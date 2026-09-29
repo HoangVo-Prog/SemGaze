@@ -21,18 +21,46 @@ class Siamese_Triplet_Gaze(Dataset):
                  catIds,
                  device, 
                  blur_action=False,
-                 acc_foveal=True):
+                 acc_foveal=True,
+                 air_split=None,
+                 air_support_export=False):
         self.root_dir = root_dir
         self.pa = pa
         self.transform = transform
         self.to_tensor = T.ToTensor()
         self.device = device
+        self.is_air = pa.name == 'AiR-D'
+        self.air_split = air_split or 'dataset'
+        self.air_one_shot = (self.is_air and air_support_export and pa.fewshot_subject[0] != -1
+                             and pa.num_fewshot == 1)
 
-        
-        # Remove fixations longer than max_traj_length
-        self.fix_labels = list(
-            filter(lambda x: len(x[3]) <= pa.max_traj_length, fix_labels))
-        
+        if self.is_air:
+            # AiR-D records are already complete scanpaths, truncated only by
+            # process_air_data.  Keep one record per trial.
+            self.fix_labels = list(fix_labels)
+            self.subject_to_indices = {}
+            for index, record in enumerate(self.fix_labels):
+                self.subject_to_indices.setdefault(record['subject_id'], []).append(index)
+            if len(self.subject_to_indices) < 2 and not self.air_one_shot:
+                raise ValueError(
+                    "AiR-D {} split needs at least two subjects for triplets; got {}".format(
+                        self.air_split, len(self.subject_to_indices)))
+            for index, record in enumerate(self.fix_labels):
+                if self.air_one_shot:
+                    continue
+                positive = [i for i in self.subject_to_indices[record['subject_id']] if i != index]
+                negative = [i for subject, indices in self.subject_to_indices.items()
+                            if subject != record['subject_id'] for i in indices]
+                if not positive or not negative:
+                    raise ValueError(
+                        "AiR-D {} anchor {} has no positive/negative triplet candidate "
+                        "(subject_id={!r}, image_id={!r}, question_id={!r})".format(
+                            self.air_split, index, record['subject_id'],
+                            record['image_id'], record['question_id']))
+        else:
+            # Remove fixations longer than max_traj_length
+            self.fix_labels = list(
+                filter(lambda x: len(x[3]) <= pa.max_traj_length, fix_labels))
 
         self.catIds = catIds
         self.blur_action = blur_action
@@ -41,17 +69,37 @@ class Siamese_Triplet_Gaze(Dataset):
 
         self.fv_tid = 0 if self.pa.TAP == 'FV' else len(self.catIds)
 
-        if self.pa.name == 'COCO-Search18':
+        if self.is_air:
+            self.task_emb_dict = None
+        elif self.pa.name == 'COCO-Search18':
             task_emb_dict = np.load(f'{self.root_dir}/coco_search18_embeddings.npy', allow_pickle=True).item()
+            self.task_emb_dict = task_emb_dict
         else:
             task_emb_dict = np.load(f'{self.root_dir}/osie_embeddings.npy', allow_pickle=True).item()
-        self.task_emb_dict = task_emb_dict
+            self.task_emb_dict = task_emb_dict
 
     def __len__(self):
         return len(self.fix_labels)
     
 
     def __getitem__(self, idx):
+        if self.is_air:
+            anchor_record = self.fix_labels[idx]
+            anchor_subject_id = anchor_record['subject_id']
+            anchor = self.process_data(idx)
+            if self.air_one_shot:
+                return {'anchor': anchor, 'positive': anchor, 'negative': anchor}
+            positive_idx = random.choice(
+                [i for i in self.subject_to_indices[anchor_subject_id] if i != idx])
+            negative_idx = random.choice(
+                [i for subject, indices in self.subject_to_indices.items()
+                 if subject != anchor_subject_id for i in indices])
+            return {
+                'anchor': anchor,
+                'positive': self.process_data(positive_idx),
+                'negative': self.process_data(negative_idx)
+            }
+
         anchor_data = self.fix_labels[idx]
         anchor_img_name = anchor_data[0]
         anchor_subject_id = anchor_data[-3]
@@ -80,6 +128,43 @@ class Siamese_Triplet_Gaze(Dataset):
         }
         
     def process_data(self, idx):
+        if self.is_air:
+            record = self.fix_labels[idx]
+            with Image.open(record['image_path']) as image:
+                im_tensor = self.transform(image.convert('RGB'))
+            if im_tensor.shape[-1] != self.pa.im_w or im_tensor.shape[-2] != self.pa.im_h:
+                raise ValueError("wrong AiR-D image size after transform for {!r}".format(record['image_id']))
+
+            scanpath_length = record['scanpath_length']
+            fixs = list(record['fixations'])
+            fixs = fixs + [fixs[-1]] * (self.pa.max_traj_length - scanpath_length)
+            is_padding = torch.zeros(self.pa.max_traj_length)
+            is_padding[scanpath_length:] = 1
+            fixs_tensor = torch.as_tensor(fixs, dtype=torch.float32)
+            original_fixs = fixs_tensor.clone()
+            # Reuse the existing SE-Net normalization.  AiR-D source pixels
+            # were resized in process_air_data without a coordinate offset.
+            fixs_tensor /= torch.FloatTensor([self.pa.im_w + 1, self.pa.im_h + 1])
+
+            dura = list(record['duration'])
+            dura = dura + [0] * (self.pa.max_traj_length - scanpath_length)
+            dura = torch.as_tensor(dura, dtype=torch.float32)
+            return {
+                "task_id": 0,
+                "true_state": im_tensor,
+                "true_action": torch.tensor([0], dtype=torch.long),
+                'img_name': record['img_name'],
+                'task_name': str(record['question_id']),
+                'normalized_fixations': fixs_tensor,
+                'is_padding': is_padding,
+                'scanpath_length': scanpath_length,
+                'duration': dura,
+                'subject_id': record['subject_id'],
+                'original_fixs': original_fixs,
+                'task_emb': torch.as_tensor(record['task_emb'], dtype=torch.float32),
+                'bbox': torch.Tensor([1, 2, 3, 4])
+            }
+
         img_name, cat_name, condition, fixs, action, is_last, sid, dura, dataset = self.fix_labels[
             idx]
         imgId = cat_name + '_' + img_name
@@ -162,4 +247,3 @@ class Siamese_Triplet_Gaze(Dataset):
             'bbox': bbox
         }
         return ret
-    

@@ -1,9 +1,202 @@
 
-from torchvision import transforms
+import os
+
 import numpy as np
+from PIL import Image
+from torchvision import transforms
 from .utils import compute_search_cdf, preprocess_fixations, filter_scanpath, select_fewshot_subject
 from .utils import cutFixOnTarget
 from .data import  Siamese_Triplet_Gaze
+
+
+def resolve_air_image_path(image_id, record, image_root):
+    """Resolve an AiR-D image without guessing names or extensions."""
+    image_id = os.fspath(image_id)
+    image_path = image_id if os.path.isabs(image_id) else os.path.join(image_root, image_id)
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(
+            "AiR-D image not found for image_id={!r}, question_id={!r}, "
+            "subject_idx={!r}: {!r}".format(
+                image_id,
+                record.get("question_id"),
+                record.get("subject_idx"),
+                image_path))
+    return os.path.abspath(image_path)
+
+
+def load_air_question_embeddings(path):
+    """Load the question_id -> 768-D embedding dictionary produced by AiR."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError("AiR-D question embedding file not found: {!r}".format(path))
+    embeddings = np.load(path, allow_pickle=True)
+    if isinstance(embeddings, np.ndarray) and embeddings.shape == ():
+        embeddings = embeddings.item()
+    if not isinstance(embeddings, dict):
+        raise ValueError("AiR-D question embedding file must contain a dictionary: {!r}".format(path))
+    return embeddings
+
+
+def _air_question_embedding(embeddings, question_id, record):
+    """Look up one question embedding, accepting only exact/string-int equivalents."""
+    candidates = [question_id]
+    if isinstance(question_id, str):
+        candidates.append(question_id.strip())
+        try:
+            candidates.append(int(question_id))
+        except ValueError:
+            pass
+    elif isinstance(question_id, (int, np.integer)):
+        candidates.append(str(int(question_id)))
+
+    for key in candidates:
+        if key in embeddings:
+            embedding = np.asarray(embeddings[key], dtype=np.float32)
+            if embedding.ndim != 1:
+                raise ValueError(
+                    "AiR-D question_id={!r}, image_id={!r}, subject_idx={!r}: "
+                    "embedding must be a 1-D vector, got shape {}".format(
+                        question_id, record.get("image_id"), record.get("subject_idx"), embedding.shape))
+            return embedding
+
+    raise KeyError(
+        "AiR-D question embedding missing for question_id={!r}, image_id={!r}, "
+        "subject_idx={!r}".format(
+            question_id, record.get("image_id"), record.get("subject_idx")))
+
+
+def validate_air_task_embedding_dim(hparams):
+    """Enforce the existing UserEmbeddingNet.task_transform input width."""
+    expected_dim = 768
+    configured_dim = getattr(hparams.Data, "task_embedding_dim", expected_dim)
+    if configured_dim != expected_dim:
+        raise ValueError(
+            "AiR-D Data.task_embedding_dim={} must match "
+            "UserEmbeddingNet.task_transform input width {}".format(configured_dim, expected_dim))
+    return expected_dim
+
+
+def build_air_subject_mapping(records, num_subjects, subject_order=None):
+    """Build one deterministic subject_idx mapping for all AiR-D splits."""
+    raw_subjects = []
+    for record in records:
+        if "subject_idx" not in record:
+            raise ValueError("AiR-D record is missing subject_idx (question_id={!r}, image_id={!r})".format(
+                record.get("question_id"), record.get("image_id")))
+        subject = record["subject_idx"]
+        if isinstance(subject, bool) or not isinstance(subject, (int, np.integer)):
+            raise ValueError("AiR-D subject_idx must be an integer, got {!r} (question_id={!r}, image_id={!r})".format(
+                subject, record.get("question_id"), record.get("image_id")))
+        raw_subjects.append(int(subject))
+
+    unique_subjects = sorted(set(raw_subjects))
+    if subject_order is not None:
+        if len(set(subject_order)) != len(subject_order) or set(subject_order) != set(unique_subjects):
+            raise ValueError(
+                "AiR-D fewshot_subject must contain distinct retained subject_idx values; "
+                "requested={!r}, retained={!r}".format(subject_order, unique_subjects))
+        mapping = {subject: mapped for mapped, subject in enumerate(subject_order)}
+    elif unique_subjects == list(range(len(unique_subjects))):
+        mapping = {subject: subject for subject in unique_subjects}
+    else:
+        mapping = {subject: mapped for mapped, subject in enumerate(unique_subjects)}
+
+    if len(mapping) > num_subjects or any(mapped >= num_subjects for mapped in mapping.values()):
+        raise ValueError(
+            "AiR-D has {} subjects but Data.num_subjects is {}; subject_idx values={!r}".format(
+                len(mapping), num_subjects, unique_subjects))
+    return mapping
+
+
+def process_air_data(records,
+                     subject_mapping,
+                     question_embeddings,
+                     dataset_root,
+                     hparams,
+                     image_root=None):
+    """Convert one AiR-D split to full-scanpath SE-Net records."""
+    expected_embedding_dim = validate_air_task_embedding_dim(hparams)
+    if not records:
+        return []
+
+    image_root = image_root or os.path.join(dataset_root, hparams.Data.image_path)
+    max_length = hparams.Data.max_traj_length
+    processed = []
+
+    for record in records:
+        question_id = record.get("question_id")
+        image_id = record.get("image_id")
+        raw_subject = record.get("subject_idx")
+        context = "question_id={!r}, image_id={!r}, subject_idx={!r}".format(
+            question_id, image_id, raw_subject)
+        if question_id is None or image_id is None or raw_subject is None:
+            raise ValueError("AiR-D record is missing question_id/image_id/subject_idx ({})".format(context))
+        if raw_subject not in subject_mapping:
+            raise ValueError("AiR-D subject_idx={!r} has no global mapping ({})".format(raw_subject, context))
+
+        try:
+            height = float(record["height"])
+            width = float(record["width"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("AiR-D record has invalid source dimensions ({})".format(context))
+        if not np.isfinite(height) or not np.isfinite(width) or height <= 0 or width <= 0:
+            raise ValueError("AiR-D source height/width must be positive ({})".format(context))
+
+        x = np.asarray(record.get("X", []), dtype=np.float32)
+        y = np.asarray(record.get("Y", []), dtype=np.float32)
+        t_start = np.asarray(record.get("T_start", []), dtype=np.float32)
+        t_end = np.asarray(record.get("T_end", []), dtype=np.float32)
+        if not (len(x) == len(y)):
+            raise ValueError("AiR-D X/Y lengths differ ({})".format(context))
+        if not (len(t_start) == len(t_end) == len(x)):
+            raise ValueError("AiR-D T_start/T_end lengths are incompatible with X/Y ({})".format(context))
+        try:
+            source_length = int(record["length"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("AiR-D length is invalid ({})".format(context))
+        if source_length != len(x):
+            raise ValueError(
+                "AiR-D length={} is incompatible with fixation arrays of length {} ({})".format(
+                    source_length, len(x), context))
+        if source_length <= 0:
+            raise ValueError("AiR-D source contains an empty scanpath ({})".format(context))
+
+        durations = t_end - t_start
+        if (not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)) or
+                not np.all(np.isfinite(durations)) or np.any(durations < 0)):
+            raise ValueError("AiR-D fixation coordinates/durations are invalid or duration is negative ({})".format(context))
+
+        image_path = resolve_air_image_path(image_id, record, image_root)
+        try:
+            with Image.open(image_path) as image:
+                image.convert("RGB")
+        except Exception as exc:
+            raise ValueError("AiR-D image is not a readable RGB image ({})".format(context)) from exc
+
+        task_emb = _air_question_embedding(question_embeddings, question_id, record)
+        if task_emb.shape[0] != expected_embedding_dim:
+            raise ValueError(
+                "AiR-D question embedding width {} != expected {} ({})".format(
+                    task_emb.shape[0], expected_embedding_dim, context))
+
+        kept_length = min(source_length, max_length)
+        # AiR-D coordinates are source-pixel coordinates.  There is deliberately
+        # no (X - 1, Y - 1) correction here.
+        resized_x = x[:kept_length] * (hparams.Data.im_w / width)
+        resized_y = y[:kept_length] * (hparams.Data.im_h / height)
+        fixations = np.stack((resized_x, resized_y), axis=1).astype(np.float32).tolist()
+        processed.append({
+            "subject_id": int(subject_mapping[raw_subject]),
+            "image_id": image_id,
+            "img_name": image_id,
+            "image_path": image_path,
+            "question_id": question_id,
+            "fixations": fixations,
+            "duration": durations[:kept_length].astype(np.float32).tolist(),
+            "task_emb": task_emb,
+            "scanpath_length": kept_length,
+        })
+
+    return processed
 
 
 def process_data(target_trajs,

@@ -1,0 +1,86 @@
+{
+  "Data": {
+    "name": "AiR-D",
+    "fix_path": "processed_data",
+    "train_fix_path": "processed_data/AiR_fixations_train.json",
+    "validation_fix_path": "processed_data/AiR_fixations_validation.json",
+    "test_fix_path": "processed_data/AiR_fixations_test.json",
+    "image_path": "stimuli",
+    "task_embedding_path": "embeddings.npy",
+    "task_embedding_dim": 768,
+    "random_support": 0,
+    "im_w": 512,
+    "im_h": 384,
+    "patch_num": [
+      32,
+      24
+    ],
+    "patch_size": [
+      16,
+      16
+    ],
+    "patch_count": 768,
+    "fovea_radius": 2,
+    "IOR_radius": 24,
+    "max_traj_length": 16,
+    "TAP": "QA",
+    "has_stop": false,
+    "subject": [
+      -1
+    ],
+    "num_subjects": 20,
+    "fewshot_subject": [
+      -1
+    ],
+    "num_fewshot": 10,
+    "backbone_config": "data/resnet50.yaml",
+    "pixel_decoder": "MSD",
+    "pad_idx": 0,
+    "eos_idx": 1,
+    "discretize_fix": false,
+    "remove_return_fixations": false,
+    "special_symbols": [
+      "<pad>"
+    ]
+  },
+  "Train": {
+    "train_backbone": false,
+    "train_pixel_decoder": true,
+    "dropout": 0.0,
+    "losses": [
+      "subject_id_pred",
+      "triplet_loss"
+    ],
+    "lr_steps": [
+      40,
+      80
+    ],
+    "subject_id_pred_weight": 1.0,
+    "triplet_loss": 1.0,
+    "parallel": false,
+    "repr": "FFN",
+    "batch_size": 16,
+    "n_workers": 4,
+    "log_dir": "assets/AiR-D-useremb",
+    "transfer_learn": "none",
+    "max_iters": 30000,
+    "checkpoint_every": 4000,
+    "evaluate_every": 4000,
+    "print_every": 200,
+    "adam_lr": 0.0001,
+    "adam_betas": [
+      0.9,
+      0.999
+    ]
+  },
+  "Model": {
+    "name": "HAT",
+    "embedding_dim": 384,
+    "n_heads": 4,
+    "n_dec_layers": 6,
+    "n_enc_layers": 3,
+    "hidden_dim": 512,
+    "num_output_layers": 3,
+    "checkpoint": ""
+  }
+}
