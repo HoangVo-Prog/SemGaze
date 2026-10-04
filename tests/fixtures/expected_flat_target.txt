@@ -1,0 +1,7 @@
+WHAT 1: upper-left cabinet
+WHAT 2: countertop objects
+WHAT 3: dark appliance area
+WHAT 4: microwave oven
+WHY 1: checks visually plausible appliance regions
+WHY 2: narrows the search and confirms the microwave
+HOW: scans several kitchen regions, then verifies the target at the right side

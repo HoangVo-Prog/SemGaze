@@ -149,7 +149,7 @@ followed by the learned atomic boundary token:
 <END_FIX>
 ```
 
-The current method design uses the duration-enabled WHERE path only. There is no duration-free primary variant in this specification. The dataset-specific mapping from the curated COCO-Search18 duration field to canonical dwell-duration milliseconds must satisfy `02_WHERE_SPEC.md`; that mapping is not frozen by the current document bundle and remains a data-provenance decision before an XYD run is executable.
+The current method design uses the duration-enabled WHERE path only. There is no duration-free primary variant in this specification. The frozen COCO-Search18 declaration is `T[t] = fixation dwell duration in milliseconds`, with identity conversion to milliseconds; serialization follows `02_WHERE_SPEC.md`.
 
 The query prompt receives the requested trajectory length:
 

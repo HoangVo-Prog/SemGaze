@@ -1,6 +1,6 @@
-# DeepGaze3.5-VL Codebase Map
+# DeepGaze-VL Codebase Map
 
-**Purpose:** source reference for building SemGaze without confusing the release with the proposed method. **Scope:** complete local checkout at `5cd84d2225beb92e77617b1ee5c5480cae948ab7`. No implementation changes accompany this map.
+**Purpose:** source reference for building SemGaze without confusing the release with the proposed method. No implementation changes accompany this map.
 
 ## 1. Executive summary and evidence standard
 
@@ -13,16 +13,14 @@ Key findings:
 - **Bundled priors cannot resolve subjects**: only `centerbias` is stored, whereas subject lookup needs `image`, `subjects`, `fixations_x`, `fixations_y`. [Pickle metadata; `evaluate_vllm_unified.py:L248-L275`.]
 - **Executable training is NOT PRESENT IN THIS REPOSITORY.** YAML SFT recipes exist but have no local consumer. There is no optimizer/backward loop, semantic pass, or fixation-hidden-state extraction. [Inventory below; §20 audit.]
 
-**VERIFIED** means direct source/data/metadata evidence or a source-extracted helper check. **INFERRED** means an interpretation or likely intervention. **NOT PRESENT** means absent locally, not necessarily upstream. **UNCLEAR FROM REPOSITORY** means external code, missing records, or a model run is needed. Source paths are relative to `DeepGaze3.5-VL/`; line ranges refer to this revision. JSON keys/binary headers are references when lines are unsuitable. All future behavior is labeled **PROPOSED SEMGAZE EXTENSION**. No remote paper/model was used to fill local evidence gaps.
+**VERIFIED** means direct source/data/metadata evidence or a source-extracted helper check. **INFERRED** means an interpretation or likely intervention. **NOT PRESENT** means absent locally, not necessarily upstream. **UNCLEAR FROM REPOSITORY** means external code, missing records, or a model run is needed. Source paths are relative to `DeepGaze-VL/`; line ranges refer to this revision. JSON keys/binary headers are references when lines are unsuitable. All future behavior is labeled **PROPOSED SEMGAZE EXTENSION**. No remote paper/model was used to fill local evidence gaps.
 
 ## 2. Complete repository inventory
 
 Recursive discovery found **45 tracked release files**, plus nested Git metadata, and only **two Python files**. No nested AGENTS.md, symlinks/reparse points, training package, tests, base checkpoint, or merged checkpoint directory was present. This is a separate Git checkout inside the parent SemGaze workspace.
 
 ```text
-DeepGaze3.5-VL/
-├── .gitattributes
-├── .gitignore
+DeepGaze-VL/
 ├── LICENSE
 ├── README.md
 ├── requirements.txt
@@ -851,7 +849,7 @@ Personalization must come from **raw same-subject demonstrations in causal multi
 
 Conceptual future fixation serialization is `(x,y,duration)<END_FIX>`. Current format is spatial `(x,y)` with ordinary punctuation, plus optional temporal/duration evaluation helper branches. Do not retroactively describe current outputs as this SemGaze format. Subject IDs may be needed in an episode manifest for data selection; they need not and should not become the personalization token. Proposed support/query split, h_t, P_E and semantic losses are not present now.
 
-## 23. DeepGaze3.5-VL → SemGaze Gap Analysis
+## 23. DeepGaze-VL → SemGaze Gap Analysis
 
 Status assesses readiness for the supplied SemGaze contract, not whether any superficially related helper exists. References identify the current evidence; missing features are supported by the complete source/training audit (§§2,20,21).
 
@@ -1214,7 +1212,7 @@ No refactoring or bug fixes were performed; these findings delimit safe reuse.
 
 ### 32.1 Commands for a prepared runtime (NOT executed in this audit)
 
-Run from `DeepGaze3.5-VL/` in an environment compatible with pinned requirements, with a suitable GPU, network/cache access to the base model, and enough CPU memory/disk for the merged checkpoint. README estimates ~16GB base download (`README.md:L58-L60`); actual resource consumption was not measured. These commands may create merge/output artifacts; they are instructions for later reproduction, not actions taken during mapping.
+Run from `DeepGaze-VL/` in an environment compatible with pinned requirements, with a suitable GPU, network/cache access to the base model, and enough CPU memory/disk for the merged checkpoint. README estimates ~16GB base download (`README.md:L58-L60`); actual resource consumption was not measured. These commands may create merge/output artifacts; they are instructions for later reproduction, not actions taken during mapping.
 
 ```bash
 pip install -r requirements.txt
@@ -1272,7 +1270,7 @@ The project has no test suite; no new tests/scripts were added. Local helper exe
 - [x] Same-subject/multi-image existing support and its correctness/data limits explicit.
 - [x] Configuration consumption, metrics/aggregation, failures, duplication and smoke commands covered.
 - [x] Gap matrix, action table, file/symbol impact maps, three Mermaid diagrams and unresolved questions included.
-- [x] No implementation modifications; final artifact is `DeepGaze3.5-VL/CODEBASE_MAP.md`.
+- [x] No implementation modifications; final artifact is `DeepGaze-VL/CODEBASE_MAP.md`.
 
 ## 33. Recommended implementation sequence (PROPOSED SEMGAZE EXTENSION)
 
@@ -1280,7 +1278,7 @@ This follows the supplied method, not a redesign. Complete each stage's validati
 
 | Stage | Work | Validation/dependency gate |
 |---|---|---|
-| **0 — Reproduce current DeepGaze3.5-VL** | Establish pinned GPU environment, record immutable base/adapter/tokenizer hashes, reproduce combined/search invocation and sample fast/grid evaluation. Measure actual image processing, context length and model outputs. | Separate verified baseline behavior from README claims; preserve outputs and flag first-fixation/normalization conventions. Confirm external model class/interfaces without yet building SemGaze. |
+| **0 — Reproduce current DeepGaze-VL** | Establish pinned GPU environment, record immutable base/adapter/tokenizer hashes, reproduce combined/search invocation and sample fast/grid evaluation. Measure actual image processing, context length and model outputs. | Separate verified baseline behavior from README claims; preserve outputs and flag first-fixation/normalization conventions. Confirm external model class/interfaces without yet building SemGaze. |
 | **1 — Isolate/test current WHERE serialization and generation** | Test real/padded/malformed pairs, time variants, pixels, prompt template, token IDs, EOS/count truncation; separate one-shot generation from GT scoring and grid sampling. | Stage0 parity; no unnoticed grammar, first-fixation or coordinate changes. |
 | **2 — Support/query episodes** | Reuse raw multi-image builder; add explicit same-subject split/episode metadata and K1/5/10 sampling; correct subject/task grouping, query exclusion, effective-K checks and deployment identity. | Stage1; real subject/search data required. Query GT must not be required to select deployment supports. Profile expanded token budgets before assuming K10 fits. |
 | **3 — WHERE duration/boundary convention** | Faithfully bridge existing tuple codec to chosen duration-inclusive fixation-boundary format, including stopping/N rules and tokenizer/embedding compatibility. | Stage1 tokenizer tests + Stage2 episode context; define exact fixation token span and post-fixation hidden-state location. Preserve a baseline codec for comparison. |

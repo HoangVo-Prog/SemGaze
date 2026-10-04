@@ -1,0 +1,69 @@
+{
+  "fixture_version": "flat-v1",
+  "note": "Normalized post-adapter implementation fixture; not the raw COCO-Search18 storage schema.",
+  "supports": [
+    {
+      "record_id": "fixture::subject1::support1",
+      "stimulus_id": "fixture_support_1",
+      "subject": 1,
+      "image_path": "tests/fixtures/images/support_1.jpg",
+      "image_width": 100,
+      "image_height": 100,
+      "task": "Find the microwave.",
+      "condition": "present",
+      "x_px": [10.0, 50.0, 90.0],
+      "y_px": [20.0, 40.0, 80.0],
+      "duration_ms": [120.0, 250.0, 1005.0],
+      "semantic": {
+        "what": [
+          "left cabinet",
+          "counter area",
+          "microwave"
+        ],
+        "why_groups": [
+          {
+            "members": [1, 2],
+            "why": "checks likely appliance locations"
+          },
+          {
+            "members": [3],
+            "why": "confirms the target appliance"
+          }
+        ],
+        "how": "scans likely kitchen appliance locations before confirming the microwave"
+      }
+    }
+  ],
+  "query": {
+    "record_id": "fixture::subject1::query",
+    "stimulus_id": "fixture_query",
+    "subject": 1,
+    "image_path": "tests/fixtures/images/query.jpg",
+    "image_width": 100,
+    "image_height": 100,
+    "task": "Find the microwave.",
+    "condition": "present",
+    "x_px": [5.0, 25.0, 55.0, 95.0],
+    "y_px": [15.0, 35.0, 65.0, 85.0],
+    "duration_ms": [96.0, 183.0, 521.0, 1200.0],
+    "semantic": {
+      "what": [
+        "upper-left cabinet",
+        "countertop objects",
+        "dark appliance area",
+        "microwave oven"
+      ],
+      "why_groups": [
+        {
+          "members": [1, 3],
+          "why": "checks visually plausible appliance regions"
+        },
+        {
+          "members": [2, 4],
+          "why": "narrows the search and confirms the microwave"
+        }
+      ],
+      "how": "scans several kitchen regions,\nthen verifies the target at the right side"
+    }
+  }
+}

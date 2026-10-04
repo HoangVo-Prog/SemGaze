@@ -95,7 +95,7 @@ $$
 
 If the official dataset documentation/source code does not establish that the source quantity is fixation dwell duration (or does not provide enough information to derive dwell duration from verified start/end timestamps), XYD mode is unsupported for that dataset. WHERE must not guess or synthesize durations.
 
-**Current COCO-Search18 bundle status:** `01_FEWSHOT_SPEC.md` requires an aligned raw field named `T`, but this document bundle does not freeze the required COCO-Search18 declaration of `duration_semantics`, `source_unit`, and `conversion_to_ms`. Therefore the mapping from curated `T` to canonical dwell-duration milliseconds is **not yet frozen**. This is a human decision/data-provenance requirement; it must not be inferred by runtime code.
+**Frozen COCO-Search18 declaration:** `duration_source_field = T`, `duration_semantics = dwell_duration`, `source_unit = ms`, `conversion_to_ms = identity`. Thus `T[t]` is fixation dwell duration in milliseconds. Preserve source milliseconds in the normalized record; round non-integer milliseconds and clip to `000..999` only for WHERE serialization.
 
 The method design uses XYD globally once that dataset-duration declaration is frozen. A deliberately named non-primary spatial-only control may use XY globally. A single assistant scanpath response must never mix `(x, y)` and `(x, y, d)` tuples.
 

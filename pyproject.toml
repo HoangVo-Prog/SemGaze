@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semgaze"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["torch==2.11.0", "transformers==5.8.0", "peft==0.18.1", "accelerate==1.12.0", "safetensors>=0.7", "Pillow>=11", "torchvision==0.26.0", "PyYAML>=6"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["semgaze*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

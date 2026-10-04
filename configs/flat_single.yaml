@@ -1,0 +1,163 @@
+# SemGaze flat single-output baseline.
+# Frozen scientific choices are explicit. Hardware-specific values may be overridden,
+# but every run must save the fully resolved configuration.
+
+experiment:
+  name: semgaze_flat_single
+  semantic_mode: flat_single_output
+  protocol_version: flat-v1
+  seed: 42
+
+# Runtime reads the persisted SemGaze split only.
+data:
+  dataset: COCO-Search18
+  variant: all
+  split_root: data/COCO_Search18/split/all
+  images_root: data/COCO_Search18/images
+  # Declare original_image only when these are the original annotation images,
+  # or provide a verified {width: ..., height: ...} coordinate frame.
+  annotation_frame: null
+  unseen_subjects: [7, 8, 9]
+
+  duration:
+    source_field: T
+    semantics: dwell_duration
+    source_unit: ms
+    conversion_to_ms: identity
+
+  fewshot:
+    k_values: [1, 5, 10]
+    train_k_probabilities: [0.3333333333, 0.3333333333, 0.3333333334]
+    require_same_subject: true
+    require_distinct_support_stimuli: true
+    exclude_query_stimulus: true
+    preserve_input_order: true
+
+model:
+  base_model: OpenGVLab/InternVL3_5-8B-HF
+  backend: huggingface
+  initialization_adapter: DeepGaze-VL/model/visual_search_adapter
+  adapter_load_mode: continue_trainable
+  merge_adapter_for_training: false
+
+  # Keep the released visual-search LoRA architecture.
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+  freeze:
+    vision_tower: true
+    native_multimodal_projector: true
+    base_lm_outside_lora: true
+    old_vocab_rows: true
+
+where:
+  mode: xyd
+  end_fix_token: "<END_FIX>"
+  require_atomic_end_fix: true
+
+  coordinates:
+    grid_size: 100
+    min_value: 0
+    max_value: 99
+    text_width: 2
+    conversion: deepgaze_two_stage_python_round
+
+  duration:
+    unit: ms
+    bin_width_ms: 1
+    min_value: 0
+    max_value: 999
+    text_width: 3
+    non_integer_rounding: nearest_python_round
+
+  context:
+    max_k: 10
+    max_images_per_episode: 11
+    max_total_sequence_length: 8192
+    visual_policy: one_448x448_tile_per_image
+    overflow_training: reject_and_resample_complete_episode
+
+  supervision:
+    support_assistant_labels: ignore
+    query_assistant_labels: supervise
+    supervise_query_end_fix: true
+    output_hidden_states: true
+    use_cache: false
+
+state:
+  readout_layer: final_language_model_layer
+  readout_position: query_end_fix_token_position
+  projector:
+    type: linear_layernorm
+    input_dim: model_hidden_size
+    output_dim: model_hidden_size
+  detach_where_states: false
+  direct_state_positions:
+    attention_mask: 1
+    label: -100
+
+semantic:
+  mode: flat_single_output
+  replay_support_context: false
+  consume_full_chronological_states: true
+  use_gold_why_groups: true
+  predict_groups: false
+  semantic_special_tokens: false
+  output_format: flat_lines
+  parser: strict_rule_based
+  loss: response_token_mean_nll
+
+training:
+  lambda_where: 1.0
+  lambda_sem: 1.0
+  optimizer: AdamW
+  learning_rate: 1.0e-4
+  scheduler: cosine
+  warmup_ratio: 0.10
+  precision: bf16
+
+  # Engineering knobs: choose for hardware without changing episode/loss semantics.
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: null
+  max_grad_norm: null
+  weight_decay: null
+  adam_beta1: null
+  adam_beta2: null
+  adam_epsilon: null
+
+  backward:
+    one_joint_backward: true
+    detach_f: false
+    detach_r: false
+
+checkpoint:
+  save_processor_and_tokenizer: true
+  save_end_fix_token_id: true
+  save_peft_adapter: true
+  save_trainable_end_fix_rows: true
+  save_projector: true
+  save_resolved_config: true
+  save_split_manifest_identity: true
+  save_optimizer: true
+  save_scheduler: true
+
+smoke:
+  fixture: tests/fixtures/flat_episode.json
+  expected_where: tests/fixtures/expected_where.txt
+  expected_flat_target: tests/fixtures/expected_flat_target.txt
+  require_finite_losses: true
+  require_lora_gradient: true
+  require_projector_nonzero_gradient: true
+  require_end_fix_input_gradient: true
+  require_end_fix_output_gradient_if_untied: true

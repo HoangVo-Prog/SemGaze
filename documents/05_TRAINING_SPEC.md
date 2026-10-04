@@ -173,12 +173,17 @@ Initialization order is normative:
 4. resize token embeddings to the final tokenizer size
 5. record END_FIX_TOKEN_ID
 6. determine whether input/output token weights are tied
-7. construct LoRA + trainable-token configuration
+7. load the released visual-search LoRA trainably and configure trainable token rows
 8. construct shared projector P_E
 9. construct optimizer over the final trainable parameter set
 ```
 
 Do not add `<END_FIX>` after the PEFT adapter or optimizer has already been constructed.
+
+The frozen primary flat/WHERE initialization is the base above plus
+`DeepGaze-VL/model/visual_search_adapter`. Load that released PEFT adapter with
+trainability enabled, retaining its rank/alpha/dropout/targets. Do not replace it
+with random LoRA initialization or merge-and-unload it for training.
 
 Semantic execution adds no semantic vocabulary token in either current mode. In particular, the primary `multibranch` method has no:
 
