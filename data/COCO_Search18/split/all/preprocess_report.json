@@ -1,0 +1,79 @@
+{
+  "attempt_id": 0,
+  "condition_counts": {
+    "absent": 13500,
+    "present": 14000
+  },
+  "coverage_errors": [],
+  "image_counts_by_split": {
+    "test": 427,
+    "train": 3451,
+    "validation": 383
+  },
+  "protocol_version": "cocosearch18_semgaze_81910_v1",
+  "record_counts_by_split": {
+    "test": 2609,
+    "train": 22439,
+    "validation": 2452
+  },
+  "shared_train_support_distinct_images": 723,
+  "shared_train_support_trial_keys": 748,
+  "split_file_sha256": {
+    "test": "08d9a19b50e6c7d1e964e77d33a7adf00c94c76f2bb45c14f249a0ba3c6c6733",
+    "train": "cd78bd3b4ffa11a8724a4059222e0ff4a9c345f1d5c006bf872ef509d4c6489e",
+    "validation": "b356854f4bf02f899e0d44db01ddf78ede9fd7a3c91f2482700591869f6fed02"
+  },
+  "subject_record_counts": {
+    "1": 3029,
+    "10": 2230,
+    "2": 2785,
+    "3": 2897,
+    "4": 2528,
+    "5": 2987,
+    "6": 3020,
+    "7": 2789,
+    "8": 2775,
+    "9": 2460
+  },
+  "subject_record_counts_by_split": {
+    "test": {
+      "1": 302,
+      "10": 228,
+      "2": 263,
+      "3": 271,
+      "4": 237,
+      "5": 269,
+      "6": 289,
+      "7": 264,
+      "8": 258,
+      "9": 228
+    },
+    "train": {
+      "1": 2464,
+      "10": 1818,
+      "2": 2292,
+      "3": 2370,
+      "4": 2057,
+      "5": 2424,
+      "6": 2441,
+      "7": 2282,
+      "8": 2269,
+      "9": 2022
+    },
+    "validation": {
+      "1": 263,
+      "10": 184,
+      "2": 230,
+      "3": 256,
+      "4": 234,
+      "5": 294,
+      "6": 290,
+      "7": 243,
+      "8": 248,
+      "9": 210
+    }
+  },
+  "total_records": 27500,
+  "total_unique_images": 4261,
+  "variant": "all"
+}

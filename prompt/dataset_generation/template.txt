@@ -1,0 +1,98 @@
+You are an expert in human visual attention, cognitive psychology, and scene understanding.
+
+Your task is to reconstruct an observer's visual reasoning process from a scanpath image and fixation coordinates.
+
+## Instructions
+
+### Step 1. Describe Each Fixation ("what")
+For every single fixation coordinate in chronological order:
+- Identify the specific object, person, body part, vehicle, or visual detail directly under the fixation.
+- Keep the description concise and focused on "what" the observer is looking at.
+
+### Step 2. Group Consecutive Fixations Into Regions ("why")
+Partition the fixation sequence into contiguous visual regions based on target objects or regions of interest.
+
+Rules:
+- Every fixation must belong to exactly one region.
+- Fixations within a region must be adjacent in chronological order. For example, `[2, 3, 4]` is valid, while `[2, 4]` or `[2, 3, 5]` is invalid.
+- The regions must collectively form an exact partition of the fixation sequence from fixation `1` to the final fixation, with no skipped, duplicated, or reordered fixation indices.
+- Never merge non-consecutive visits to the same object or visual area into one region.
+- Consecutive fixations may be grouped only when they correspond to the same object, visual area, or coherent local inspection.
+
+For each grouped region:
+- Explain why the observer inspected that region in relation to the current task or answer.
+- Describe the likely visual purpose of the inspection, such as searching for the target, verifying a candidate object, gathering evidence, or resolving the visual question.
+- Ground the explanation only in the visible content and the provided task context.
+- Do not invent unsupported intentions or reasoning.
+
+### Step 3. Summarize Visual Reasoning ("how")
+Summarize the observer's step-by-step reasoning strategy across the entire scanpath in 3–6 fluent, cohesive sentences.
+
+Ending requirements:
+- For a search task with Condition = "present", conclude explicitly that the target is present.
+- For a search task with Condition = "absent", conclude explicitly that the target is absent.
+- For a VQA task, conclude explicitly with the provided answer.
+
+## Output
+
+Return valid JSON with:
+
+1. **fixations**: Array of objects describing "what" is seen at each individual fixation.
+2. **regions**: Array of grouped consecutive fixations explaining "why" those regions were examined.
+3. **how**: Overall narrative summary of the observer's visual reasoning process.
+
+## Rules
+
+- Base all descriptions strictly on the provided image and fixation coordinates.
+- Do not invent unsupported objects, intentions, or reasoning.
+- Do not mention fixation numbers, coordinates, or region IDs in the `how` narrative field.
+- Every fixation must appear exactly once in the `regions` array.
+- Preserve the chronological order of fixations.
+- The concatenation of all `regions[*].fixations` must exactly equal `[1, 2, ..., N]`, where `N` is the total number of fixations.
+- Keep descriptions clear, concise, and accurate.
+- Return valid JSON only.
+
+## Output Format
+
+{{
+  "fixations": [
+    {{
+      "fixation": 1,
+      "what": "..."
+    }},
+    {{
+      "fixation": 2,
+      "what": "..."
+    }}
+  ],
+  "regions": [
+    {{
+      "fixations": [1],
+      "why": "..."
+    }},
+    {{
+      "fixations": [2],
+      "why": "..."
+    }}
+  ],
+  "how": "..."
+}}
+
+## Few-Shot Examples
+
+{examples}
+
+## Current Sample
+
+Image:
+- Original image overlaid with a chronological scanpath.
+- If Condition = "present", the target object is marked with a bounding box.
+
+Task: {task}
+
+Condition: {condition}
+
+Fixations:
+{fixations}
+
+Answer: {answer}
