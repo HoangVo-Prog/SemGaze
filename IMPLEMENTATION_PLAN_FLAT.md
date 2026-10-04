@@ -1269,3 +1269,137 @@ later model-dependent code is implemented provisionally against the observed
 native HF interfaces and small-model tests. Production gates stay open. This
 isolates the environmental blocker while completing independent code and tests,
 as requested; it is not authorization to bypass the released-model training gate.
+
+## 26. Epoch-end validation and trainer history (2026-10-04)
+
+Implemented the requested epoch-level validation without changing the flat
+training objective, support sampling law, token supervision, or state path.
+
+- The with-replacement sampler has no natural dataset-pass epoch. Its epoch length
+  is now explicitly `training.steps_per_epoch` or `--steps-per-epoch`; the template
+  leaves it null until selected. `--max-steps` must be a positive multiple, so each
+  scheduled epoch is complete. Counts are optimizer steps, after accumulation.
+- `evaluation.strategy: epoch`, `k_values: [1,5,10]`, and
+  `loss_aggregation: episode_mean` are explicit in `configs/flat_single.yaml`.
+- At every epoch boundary, run all seen-subject persisted validation queries with
+  their frozen same-subject train supports for every K. No unseen query enters
+  validation/model selection. Frozen context overflow fails without resampling.
+- Validation is under `no_grad` with the model and P_E in eval mode. Previous
+  module modes are restored even on failure. No backward, optimizer, scheduler,
+  parameter, or existing gradient mutation occurs during validation.
+- Each episode still uses one teacher-forced WHERE and one flat semantic forward.
+  `eval_where` and `eval_flat` use their existing response-token mean NLL;
+  `eval_total = lambda_where * eval_where + lambda_sem * eval_flat`.
+- `eval_what`, `eval_why`, `eval_how` are **diagnostic partitions of that same flat
+  response's shifted token NLL**, not multibranch objectives or text-quality
+  metrics. Include each section's line prefixes and trailing newlines; native EOS
+  belongs to HOW. Any BPE token spanning sections is attributed by its starting
+  character, without retokenizing/changing the target. Every supervised token is
+  counted once. Token-weighted component values reconstruct the episode flat NLL.
+- Epoch losses average per-episode losses, matching the existing trainer's episode
+  mean. Per-K losses and episode counts are also saved in `eval_by_k`. Nothing
+  averages WHAT/WHY/HOW to form the flat loss. Generation-quality metrics remain
+  explicitly unconfigured under the outstanding Section 25 scientific gates.
+- Print a human-readable epoch summary, append step/validation events to
+  `trainer_log.jsonl`, and save the full history in each checkpoint's
+  `trainer_state.json`. Epoch checkpoints are written after validation, independent
+  of the ordinary step save interval. Resume preserves history and absolute epoch
+  boundaries, including mid-epoch checkpoints, without repeating completed epochs.
+
+Modified/added files: `train_flat.py`, `configs/flat_single.yaml`,
+`semgaze/training/loop.py`, `semgaze/evaluation/validation.py`,
+`semgaze/where/collator.py` (response-offset metadata only),
+`semgaze/model/{build,config,checkpoint}.py`, `tests/test_epoch_validation.py`,
+`README_FLAT.md`, and this plan. No scientific spec, golden fixture, or upstream
+reference file was modified.
+
+Verification:
+
+| Command | Result |
+|---|---|
+| `.venv/Scripts/python -m pytest tests/test_epoch_validation.py -x -q` | 9 passed: diagnostic loss identity, two forwards/no-grad, unchanged parameters/gradients/RNG, restored modes, frozen all-K coverage, leakage rejection, schedule configuration, epoch timing, JSONL/checkpoint history and mid-epoch resume. |
+| `.venv/Scripts/python -m pytest tests -q` | **54 passed**, 50 existing third-party NumPy conversion deprecation warnings. |
+| `python scripts/smoke_flat.py --contract-only` | Passed; original goldens unchanged. |
+| `.venv/Scripts/python scripts/smoke_flat.py --with-model` | Blocked at existing released-model preflight: adapter/tokenizer LFS pointers and unavailable CUDA. Evidence: `runs/flat-20261004T162856Z-5a4b09/`. |
+| `.venv/Scripts/python train_flat.py --help` | Passed; explicit `--steps-per-epoch` option exposed. |
+| `.venv/Scripts/python -m compileall -q semgaze train_flat.py` | Passed. |
+| `git diff --check` | Passed (only CRLF conversion notices). |
+| `.venv/Scripts/python -m pytest tests/test_epoch_validation.py::test_real_small_hf_epoch_validation -q -s` | Passed; observed the example below using the actual small HF/PEFT fixture and all three K values. |
+
+Example from the small random HF fixture, **not a released-model benchmark**:
+
+```text
+Epoch 1 | step 2 | validation: 1 seen queries x K=1,5,10 (3 episodes)
+  response NLL (episode mean): eval_where=5.994777 | eval_what=5.977595 | eval_why=5.968741 | eval_how=5.997607 | eval_flat=5.979805 | eval_total=11.974583
+  WHAT/WHY/HOW: diagnostic sections of one flat response; generation-quality metrics not configured
+```
+
+## 27. Epoch autoregressive prediction exports (2026-10-04)
+
+Added generation after the existing epoch validation-loss event/console summary
+and before checkpoint saving. The loss reductions, diagnostics, summary format,
+training objective, and supervision remain unchanged.
+
+- Train prediction consumes exactly one batch of `per_device_train_batch_size`
+  accepted episodes: the first batch from the final optimizer step of the epoch.
+  Later accumulation batches are excluded, and inference never samples additional
+  training episodes. This also works after a mid-epoch resume without new sampler
+  state or replaying earlier epochs.
+- Validation prediction covers every seen validation query at every K=1/5/10,
+  preserving frozen same-subject support membership/order. Shared eligibility
+  checks were extracted from the loss validator without changing its behavior.
+- Reuse `evaluate_where_episode` and `evaluate_flat_episode`, both invoking native
+  HF autoregressive generation. WHERE receives no query GT scanpath. Semantic
+  generation receives full chronological states from teacher-forced GT WHERE and
+  gold WHY groups, as required by Section 18 / `06_EVALUATION_SPEC.md`. The semantic
+  assistant response is not teacher-forced and predicted WHERE is not transferred
+  to semantic inference.
+- `evaluation.predictions` fixes train batches to 1 and validation scope to
+  `all_seen`. `semantic_max_new_tokens` remains null in the template and must be
+  declared explicitly there or with `--semantic-max-new-tokens` before training.
+  It is saved in resolved configuration and checked on resume. No canonical
+  generation budget or quality metric is invented.
+- Stream `predictions/epoch-NNNN/train.jsonl` and `validation.jsonl`, with query/K,
+  ordered support IDs, split identity, exact `WHERE: {GT, PRED}` and
+  `SEMANTIC: {GT, PRED}`, and existing parser/conditioning metadata. Preserve raw
+  malformed output. Partial files retain `.partial` on failure; no successful
+  epoch-prediction event/checkpoint is written for incomplete generation.
+- Console summary prints counts, paths, and conditioning. `epoch_predictions`
+  events are retained in JSONL trainer logs and checkpoint `log_history` alongside
+  the unchanged loss events. Files stay in the original run directory and their
+  absolute paths remain in resumed history.
+- No gradient/update occurs; exact module modes and Python/Torch CPU/CUDA RNG are
+  preserved, including when generation fails. Existing gradients are untouched.
+
+Files changed for this addition: `semgaze/evaluation/predictions.py` (new),
+`semgaze/evaluation/validation.py`, `semgaze/training/loop.py`,
+`semgaze/model/config.py`, `train_flat.py`, `configs/flat_single.yaml`,
+`tests/test_epoch_predictions.py` (new), `tests/test_epoch_validation.py`,
+`README_FLAT.md`, and this plan. No canonical spec, golden, or upstream file changed.
+
+Verification:
+
+| Command | Result |
+|---|---|
+| `.venv/Scripts/python -m pytest tests/test_epoch_predictions.py tests/test_epoch_validation.py -x -q` | 17 passed: full seen/all-K coverage, raw GT/PRED preservation, exactly first train batch with accumulation, separate real HF generation calls, state conditioning, no parameter/gradient/RNG changes, failure restoration, checkpoint history and mid-epoch resume. |
+| `.venv/Scripts/python -m pytest tests -q` | **62 passed**, 68 existing third-party NumPy conversion deprecation warnings. |
+| `.venv/Scripts/python -m pytest tests/test_epoch_predictions.py::test_real_hf_predictions_generate_separately_and_preserve_training -q -s` | Passed again after adding explicit zero semantic response-length/all-masked native input assertions; printed the summary below using real small HF/PEFT generation. |
+| `python scripts/smoke_flat.py --contract-only` | Passed, unchanged goldens. |
+| `.venv/Scripts/python scripts/smoke_flat.py --with-model` | Existing preflight blocker: adapter weights/tokenizer are LFS pointers and CUDA unavailable. Evidence: `runs/flat-20261004T164331Z-a28ace/`. |
+| `.venv/Scripts/python train_flat.py --help` | Passed; explicit semantic budget option exposed. |
+| `.venv/Scripts/python -m compileall -q semgaze train_flat.py tests/test_epoch_predictions.py` | Passed. |
+| `git diff --check` | Passed (CRLF conversion notices only). |
+
+Small random HF fixture output (paths shortened; not benchmark quality evidence),
+printed after the unchanged loss summary:
+
+```text
+Epoch 1 | step 2 | autoregressive predictions:
+  train: 1 batch (1 queries) -> .../predictions/epoch-0001/train.jsonl
+  validation: 1 seen queries x K=1,5,10 (3 episodes) -> .../predictions/epoch-0001/validation.jsonl
+  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.
+```
+
+Section 25 production gates remain open: released weights/prepared device, real
+images and verified annotation frame. No full training or released-model
+prediction run is claimed by these small-model tests.

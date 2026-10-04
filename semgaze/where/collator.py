@@ -20,6 +20,7 @@ class NativeBatch:
     response_length: int
     rendered_text: str
     image_paths: tuple[str, ...]
+    response_offsets: tuple[tuple[int, int], ...]
 
 
 def load_images(paths):
@@ -104,7 +105,8 @@ def collate_native(processor, messages, image_paths, target=None, *, prompt=None
     inputs = {'input_ids': input_ids, 'attention_mask': torch.ones_like(input_ids),
               'labels': labels, 'pixel_values': pixels}
     return NativeBatch(inputs, tuple(token_boundaries), supervised[0] if supervised else len(all_ids),
-                       len(supervised), expanded, tuple(image_paths))
+                       len(supervised), expanded, tuple(image_paths),
+                       tuple((offsets[i][0] - start_char, offsets[i][1] - start_char) for i in supervised))
 
 
 def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher_forcing=True):

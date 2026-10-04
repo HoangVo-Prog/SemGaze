@@ -126,6 +126,10 @@ training:
   warmup_ratio: 0.10
   precision: bf16
 
+  # Episodes are sampled with replacement. Declare the optimizer-step epoch
+  # length here or with --steps-per-epoch; sampling probabilities stay unchanged.
+  steps_per_epoch: null
+
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 1
@@ -140,6 +144,18 @@ training:
     one_joint_backward: true
     detach_f: false
     detach_r: false
+
+evaluation:
+  strategy: epoch
+  k_values: [1, 5, 10]
+  loss_aggregation: episode_mean
+  predictions:
+    train_batches: 1
+    validation_scope: all_seen
+    # Required run choice (or --semantic-max-new-tokens); no canonical default.
+    semantic_max_new_tokens: null
+  # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
+  # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
 
 checkpoint:
   save_processor_and_tokenizer: true

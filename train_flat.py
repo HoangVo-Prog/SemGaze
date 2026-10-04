@@ -6,12 +6,13 @@ import torch
 from transformers import get_cosine_schedule_with_warmup
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
 from semgaze.data.fewshot import TrainingEpisodeSampler
-from semgaze.data.schema import normalized_episode_from_dict
+from semgaze.data.schema import normalized_episode_from_dict, UNSEEN_SUBJECTS
 from semgaze.model.build import build_flat_model_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
-from semgaze.model.checkpoint import save_checkpoint, load_checkpoint_bundle, restore_checkpoint_state
+from semgaze.model.checkpoint import load_checkpoint_bundle, restore_checkpoint_state
 from semgaze.training.flat_step import run_flat_training_step, make_optimizer
-from semgaze.where.collator import WhereContextOverflowError
+from semgaze.training.loop import resolve_epoch_schedule, run_training_loop
+from semgaze.evaluation.predictions import resolve_prediction_settings
 
 
 def main():
@@ -19,6 +20,8 @@ def main():
     parser.add_argument('--config', type=Path, default=ROOT / 'configs/flat_single.yaml')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--max-steps', type=int, required=True, help='Explicit optimizer-step training horizon')
+    parser.add_argument('--steps-per-epoch', type=int, help='Optimizer steps per epoch; overrides training.steps_per_epoch')
+    parser.add_argument('--semantic-max-new-tokens', type=int, help='Explicit epoch semantic generation budget')
     parser.add_argument('--save-every', type=int, default=100)
     parser.add_argument('--resume', type=Path)
     args = parser.parse_args()
@@ -27,15 +30,21 @@ def main():
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error('choose an empty output directory; resume reads from --resume')
     config = load_config(args.config)
+    try:
+        steps_per_epoch = resolve_epoch_schedule(config, args.max_steps, args.steps_per_epoch)
+        resolve_prediction_settings(config, args.semantic_max_new_tokens)
+    except ValueError as exc:
+        parser.error(str(exc))
     raw, manifest, identity = read_persisted_splits()
     adapter = CocoSearch18Adapter(annotation_frame=config['data'].get('annotation_frame'))
-    records = [adapter(r) for r in raw['train']]
+    records = [adapter(r) for r in raw['train'] if r['subject'] not in UNSEEN_SUBJECTS]
+    validation_records = [adapter(r) for r in raw['validation'] if r['subject'] not in UNSEEN_SUBJECTS]
     sampler = TrainingEpisodeSampler(records, config['experiment']['seed'])
     if args.resume:
         bundle = load_checkpoint_bundle(args.resume, split_manifest_identity=identity, output_dir=args.output_dir)
         # A resume config may not silently replace the checkpoint's training protocol.
         from semgaze.model.config import resolve_config
-        for section in ('experiment', 'data', 'model', 'where', 'state', 'semantic', 'training'):
+        for section in ('experiment', 'data', 'model', 'where', 'state', 'semantic', 'training', 'evaluation'):
             if bundle.config[section] != resolve_config(config)[section]:
                 raise ValueError(f'resume config differs in {section}')
         saved_horizon = bundle.config['runtime']['max_steps']
@@ -43,6 +52,8 @@ def main():
             raise ValueError('resume must preserve scheduler training horizon')
     else:
         bundle = build_flat_model_bundle(args.config, output_dir=args.output_dir)
+    bundle.config['training']['steps_per_epoch'] = steps_per_epoch
+    bundle.config['evaluation'] = config['evaluation']
     bundle.config['runtime'].update(max_steps=args.max_steps, save_every=args.save_every,
                                     split_manifest_identity=identity, world_size=1)
     write_run_config(bundle.config, args.output_dir)
@@ -58,30 +69,8 @@ def main():
     if args.resume:
         start = restore_checkpoint_state(bundle, args.resume, split_manifest_identity=identity,
                                           sampler=sampler, resume_optimizer=True)
-    episodes_per_step = t['per_device_train_batch_size'] * t['gradient_accumulation_steps']
-    if type(episodes_per_step) is not int or episodes_per_step < 1:
-        raise ValueError('positive episode batch/accumulation counts required')
-    for step in range(start, args.max_steps):
-        losses, rejected = [], 0
-        for micro in range(episodes_per_step):
-            while True:
-                episode = sampler.sample()
-                try:
-                    result = run_flat_training_step(bundle, episode, zero_grad=(micro == 0),
-                        loss_scale=1 / episodes_per_step)
-                    losses.append(float(result['loss_total']))
-                    break
-                except WhereContextOverflowError:
-                    rejected += 1  # resample the entire episode under the same probability law
-                    if rejected >= 1000:
-                        raise RuntimeError('1000 complete WHERE episode overflows; inspect context feasibility')
-        torch.nn.utils.clip_grad_norm_(bundle.trainable_parameters(), t['max_grad_norm'], error_if_nonfinite=True)
-        bundle.optimizer.step()
-        bundle.scheduler.step()
-        print(json.dumps({'step': step + 1, 'loss_total': sum(losses) / len(losses), 'rejected_where_episodes': rejected}), flush=True)
-        if (step + 1) % args.save_every == 0 or step + 1 == args.max_steps:
-            save_checkpoint(bundle, args.output_dir / f'checkpoint-{step + 1}',
-                split_manifest_identity=identity, step=step + 1, sampler=sampler)
+    run_training_loop(bundle, sampler, {r.record_id: r for r in records}, validation_records, manifest,
+        split_manifest_identity=identity, max_steps=args.max_steps, save_every=args.save_every, start=start)
 
 
 if __name__ == '__main__':

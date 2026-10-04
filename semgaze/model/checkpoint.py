@@ -29,6 +29,8 @@ def save_checkpoint(bundle, path, *, split_manifest_identity, step, sampler=None
         'step': step, 'diagnostics': bundle.diagnostics,
         'trainable_names': [n for n, p in bundle.model.named_parameters() if p.requires_grad]}
     (path / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+    (path / 'trainer_state.json').write_text(json.dumps(
+        {'step': step, 'log_history': bundle.trainer_history}, indent=2, allow_nan=False), encoding='utf-8')
     state = {'optimizer': bundle.optimizer.state_dict() if bundle.optimizer is not None else None,
              'scheduler': bundle.scheduler.state_dict() if bundle.scheduler is not None else None,
              'python_rng': random.getstate(), 'torch_rng': torch.get_rng_state(),
@@ -61,6 +63,14 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
             bundle.output_row.copy_(tensors['end_fix_output'])
     bundle.projector.load_state_dict({k.removeprefix('projector.'): v for k, v in tensors.items() if k.startswith('projector.')})
     assert_trainable_set(bundle.model, bundle.projector, bundle.input_row, bundle.output_row)
+    trainer_state = path / 'trainer_state.json'
+    if trainer_state.exists():
+        history = json.loads(trainer_state.read_text(encoding='utf-8'))
+        if history['step'] != metadata['step']:
+            raise ValueError('trainer history step differs from checkpoint metadata')
+        bundle.trainer_history = history['log_history']
+    else:
+        bundle.trainer_history = []  # backwards-compatible inference checkpoints
     if resume_optimizer:
         state = torch.load(path / 'training.pt', map_location='cpu', weights_only=True)
         if bundle.optimizer is None or bundle.scheduler is None or state['optimizer'] is None or state['scheduler'] is None:

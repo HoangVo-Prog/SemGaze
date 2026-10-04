@@ -89,6 +89,22 @@ def validate_config(config):
     for key in ('per_device_train_batch_size', 'gradient_accumulation_steps'):
         if type(config['training'][key]) is not int or config['training'][key] < 1:
             raise ValueError(f'training.{key} must be a positive integer')
+    steps = config['training'].get('steps_per_epoch')
+    if steps is not None and (type(steps) is not int or steps < 1):
+        raise ValueError('training.steps_per_epoch must be null or a positive integer')
+    evaluation = config.get('evaluation')
+    # Older inference checkpoints may omit the new epoch schedule. New training
+    # resolves it explicitly before creating a model or reading runtime data.
+    if evaluation is not None and {k: v for k, v in evaluation.items() if k != 'predictions'} != {
+            'strategy': 'epoch', 'k_values': [1, 5, 10], 'loss_aggregation': 'episode_mean'}:
+        raise ValueError('evaluation requires epoch scheduling, all K values, and episode_mean losses')
+    predictions = (evaluation or {}).get('predictions')
+    if predictions is not None:
+        if type(predictions.get('train_batches')) is not int or predictions['train_batches'] != 1 or predictions.get('validation_scope') != 'all_seen':
+            raise ValueError('epoch predictions require one train batch and all seen validation queries')
+        budget = predictions.get('semantic_max_new_tokens')
+        if budget is not None and (type(budget) is not int or budget < 1):
+            raise ValueError('semantic_max_new_tokens must be null or a positive integer')
 
 
 def resolve_config(config):

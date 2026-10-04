@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import importlib.metadata
 import json
@@ -31,6 +31,7 @@ class FlatModelBundle:
     context_limit: int = 8192
     optimizer: object = None
     scheduler: object = None
+    trainer_history: list = field(default_factory=list)
 
     def trainable_parameters(self):
         return [p for p in self.model.parameters() if p.requires_grad] + list(self.projector.parameters())

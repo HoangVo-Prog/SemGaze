@@ -52,8 +52,8 @@ or unresolved frame metadata fail explicitly.
 ## Training and resume
 
 ```powershell
-.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/experiment --max-steps 1000
-.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/resumed --max-steps 1000 --resume runs/experiment/checkpoint-100
+.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/experiment --max-steps 1000 --steps-per-epoch 100 --semantic-max-new-tokens 512
+.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/resumed --max-steps 1000 --steps-per-epoch 100 --semantic-max-new-tokens 512 --resume runs/experiment/checkpoint-100
 ```
 
 These are example horizons, not scientific defaults. Every training run executes
@@ -61,7 +61,84 @@ the fixture gradient gate before optimization. Episodes are accumulated sequenti
 with an explicit episode mean. WHERE overflow resamples the complete episode;
 semantic overflow fails. Checkpoints include processor/tokenizer, PEFT, separate
 END_FIX rows, P_E, optimizer, scheduler, RNG/sampler state, resolved config, and
-split identity. Resume preserves the scheduler horizon.
+split identity. Resume preserves the scheduler horizon, epoch schedule, and log history.
+
+### Epoch validation and logging
+
+The sampler draws episodes with replacement, so epochs are explicitly bounded by
+optimizer steps. Set `training.steps_per_epoch` or `--steps-per-epoch`; the example
+above defines ten epochs of 100 optimizer steps each. The horizon must contain
+complete epochs. This changes neither subject/K/query sampling nor accumulation.
+`evaluation.strategy: epoch` validates at the end of **every** epoch, before the
+epoch checkpoint is saved, regardless of `--save-every`.
+
+Validation uses the full seen-subject `all/validation` query set at every K=1/5/10,
+with frozen same-subject `all/train` supports. It never resamples/truncates frozen
+episodes or uses unseen subjects for validation. No gradients or updates occur;
+model/projector train/eval modes are restored even if validation fails.
+
+The human-readable epoch summary and `trainer_log.jsonl` expose:
+
+- `eval_where`: existing query-response WHERE mean NLL;
+- `eval_what`, `eval_why`, `eval_how`: diagnostic token-NLL means for the respective
+  sections of the **same single teacher-forced flat response**;
+- `eval_flat`: existing full flat response-token mean NLL;
+- `eval_total`: `lambda_where * eval_where + lambda_sem * eval_flat`.
+
+Section diagnostics include ordinary line prefixes and their trailing newlines;
+native EOS belongs to HOW. A tokenizer token spanning a section boundary is
+assigned by its starting character. All supervised flat tokens are counted exactly
+once. These diagnostics do not add semantic forwards, rebalance the flat loss,
+or define generation-quality metrics. All reported epoch losses are means of
+per-episode losses, with additional per-K summaries in `eval_by_k`. No automatic
+best-checkpoint selection is introduced.
+
+Each checkpoint includes `trainer_state.json` with the complete structured
+`log_history`. Resume carries that history into the new run's JSONL log and resumes
+the absolute epoch schedule without repeating completed epoch evaluations.
+
+### Epoch autoregressive predictions
+
+After the unchanged validation-loss summary, every epoch generates:
+
+- Train: exactly one batch of `per_device_train_batch_size` episodes, reusing the
+  first batch of accepted episodes from that epoch's final optimizer step. Later
+  gradient-accumulation batches are excluded. There are no extra sampler draws.
+- Validation: every seen query at K=1/5/10 with the same frozen supports as loss
+  validation. No sampling, truncation, or cap is applied to validation coverage.
+
+Both responses use native HF autoregressive generation separately: WHERE receives
+no query GT coordinates/durations; semantic output uses states from GT WHERE and
+gold WHY groups, as required by the primary inference contract. Predicted WHERE
+is never passed to semantic inference. Generation preserves parameters, gradients,
+module modes and training RNG. Context overflow fails without skipping a query.
+
+Declare `evaluation.predictions.semantic_max_new_tokens` or pass
+`--semantic-max-new-tokens`; the example 512 above is an explicit runtime choice,
+not a canonical default. The resolved choice is saved and must match on resume.
+The WHERE budget retains its existing tokenizer-measured policy.
+
+Each epoch writes `predictions/epoch-0001/{train,validation}.jsonl`. Each line has
+query/subject/K, ordered support IDs, split identity, and `WHERE: {GT, PRED}` and
+`SEMANTIC: {GT, PRED}`, plus existing parser diagnostics and conditioning provenance.
+Raw malformed predictions are preserved. Files are streamed through `.partial`
+paths and renamed on successful completion. A failed generation emits no success
+event or completed epoch checkpoint. Text is stored in full in the files; the
+console prints counts and paths:
+
+```text
+Epoch 1 | step 100 | autoregressive predictions:
+  train: 1 batch (1 queries) -> .../predictions/epoch-0001/train.jsonl
+  validation: 2 seen queries x K=1,5,10 (6 episodes) -> .../predictions/epoch-0001/validation.jsonl
+  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.
+```
+
+The counts above illustrate a two-query fixture, not the benchmark size.
+The `epoch_predictions` event in `trainer_log.jsonl` and checkpoint
+`trainer_state.json` records counts, absolute file paths, budget and conditioning.
+Prediction files remain in the run directory; retain that directory alongside
+checkpoints when moving runs. Resume retains earlier history and generates only
+new epochs. Training losses and the existing `epoch_validation` event are unchanged.
 
 The unresolved optimizer engineering knobs resolve explicitly to Adam betas
 `(0.9, 0.999)`, epsilon `1e-8`, weight decay `0.01`, max gradient norm `1.0`, and
