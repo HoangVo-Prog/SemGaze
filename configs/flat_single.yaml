@@ -133,17 +133,18 @@ training:
   max_episode_retries: 1000
 
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
-  per_device_train_batch_size: 1 # true physical GPU episode batch
-  gradient_accumulation_steps: 1 # number of physical batches per optimizer update
-  gradient_diagnostics_every: 0
-  length_aware_batching: true
-  reuse_query_vision: true
+  per_device_train_batch_size: 1 # physical GPU episode batch
+  gradient_accumulation_steps: 1 # physical batches per optimizer update
   gradient_checkpointing: true
+  gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
+  length_aware_batching: true # sort within each same-K physical batch only
+  reuse_query_vision: true # requires frozen deterministic producers and identical pixels
   max_grad_norm: 1.0
   weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.999
   adam_epsilon: 1.0e-8
+
 
   backward:
     one_joint_backward: true

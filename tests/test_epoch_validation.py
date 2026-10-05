@@ -102,7 +102,8 @@ class FixedSampler:
     def __init__(self, episode):
         self.episode, self.calls = episode, 0
 
-    def sample(self):
+    def sample(self, *, k=None):
+        assert k is None or k == len(self.episode.supports)
         self.calls += 1
         return self.episode
 

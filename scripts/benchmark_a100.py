@@ -28,13 +28,17 @@ import csv
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STAGES = ('sampling_collation', 'where_forward', 'semantic_preparation',
           'semantic_forward', 'backward', 'gradient_clipping', 'optimizer_step', 'scheduler_step')
 METRICS = ('episodes_per_second', 'seconds_per_episode', 'step_time_mean_sec',
            'step_time_median_sec', 'step_time_p95_sec', 'total_measured_sec',
            'peak_memory_allocated_bytes', 'peak_memory_reserved_bytes',
-           *(f'{stage}_mean_sec' for stage in STAGES))
+           *(f'{stage}_mean_sec' for stage in STAGES),
+           *(f'{branch}_{stat}' for branch in ('where', 'semantic') for stat in (
+               'tokens', 'padded_token_slots', 'padding_tokens', 'padding_fraction',
+               'length_min', 'length_mean', 'length_median', 'length_p95', 'length_max',
+               'padded_length_mean', 'padded_length_max')))
 
 
 def timestamp():
@@ -80,13 +84,14 @@ def machine_metadata():
             'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'CUBLAS_WORKSPACE_CONFIG')})
 
 
-def variant_matrix(effective_batch, include_off=False):
-    if type(effective_batch) is not int or effective_batch < 2 or effective_batch % 2:
-        raise ValueError('effective batch must be a positive multiple of 2 to compare B=1 and B=2')
+def variant_matrix(effective_batch, include_off=False, include_b4=False):
+    largest = 4 if include_b4 else 2
+    if type(effective_batch) is not int or effective_batch < largest or effective_batch % largest:
+        raise ValueError(f'effective batch must be a positive multiple of {largest} for the requested variants')
     return [dict(id=f'b{b}_gc_{"on" if gc else "off"}', physical_batch_size=b,
                  gradient_accumulation_steps=effective_batch // b, gradient_checkpointing=gc,
-                 effective_optimizer_batch=effective_batch)
-            for gc in ([True, False] if include_off else [True]) for b in (1, 2)]
+                 effective_optimizer_batch=effective_batch, sampling_group_size=largest)
+            for gc in ([True, False] if include_off else [True]) for b in ((1, 2, 4) if include_b4 else (1, 2))]
 
 
 def validate_real_config(config):
@@ -157,6 +162,38 @@ def episode_identity(episode):
                 support_ids=[s.record_id for s in episode.supports])
 
 
+def sequence_statistics(rows):
+    """Token-weighted padding from actual unpadded lengths, per physical forward.
+
+    Batch indices restart at each optimizer step. Padding is right padding to
+    that physical batch's maximum, matching WHERE and semantic collation.
+    """
+    groups = []
+    for row in rows:
+        physical = {}
+        for episode in row['episodes']:
+            physical.setdefault(episode['physical_batch_index'], []).append(episode)
+        for episodes in physical.values():
+            if len({e['K'] for e in episodes}) != 1:
+                raise ValueError('benchmark encountered a mixed-K physical batch')
+            groups.append(episodes)
+    if not groups:
+        return {}
+    result = {}
+    for branch in ('where', 'semantic'):
+        lengths = [e[f'{branch}_length'] for group in groups for e in group]
+        maxima = [max(e[f'{branch}_length'] for e in group) for group in groups]
+        tokens = sum(lengths)
+        slots = sum(len(group) * maximum for group, maximum in zip(groups, maxima))
+        stats = dict(tokens=tokens, padded_token_slots=slots, padding_tokens=slots-tokens,
+                     padding_fraction=(slots-tokens)/slots, length_min=min(lengths),
+                     length_mean=statistics.mean(lengths), length_median=statistics.median(lengths),
+                     length_p95=sorted(lengths)[math.ceil(0.95*len(lengths))-1], length_max=max(lengths),
+                     padded_length_mean=statistics.mean(maxima), padded_length_max=max(maxima))
+        result.update({f'{branch}_{key}': value for key, value in stats.items()})
+    return result
+
+
 def summarize(result):
     """Only completed measured steps contribute to rates; failed peaks remain visible."""
     rows = result['steps']
@@ -174,6 +211,7 @@ def summarize(result):
             step_time_p95_sec=sorted(times)[max(0, math.ceil(0.95 * len(times)) - 1)], total_measured_sec=total)
         for stage in STAGES:
             metrics[f'{stage}_mean_sec'] = statistics.mean(r['stage_seconds'].get(stage, 0) for r in rows)
+        metrics.update(sequence_statistics(rows))
     # Never label model-loading or warmup peaks as measured-step peaks.
     measured_memory = result['memory'].get('measured', {})
     for key in ('peak_memory_allocated_bytes', 'peak_memory_reserved_bytes'):
@@ -205,7 +243,8 @@ def run_measured_step(bundle, sampler, step, profiler, result):
     episode_rows, losses = [], []
     with profiler.stage('step'):
         with profiler.stage('sampling_collation'):
-            batches, accepted, rejected = sample_optimizer_batches(bundle, sampler)
+            batches, accepted, rejected = sample_optimizer_batches(
+                bundle, sampler, sampling_group_size=result['sampling_group_size'])
         result['workload_groups'].append([episode_identity(e) for e in accepted])
         result['inflight_episodes'] = [
             {k: v for k, v in m.items() if k != 'semantic_target'} | episode_identity(e)
@@ -232,6 +271,7 @@ def run_measured_step(bundle, sampler, step, profiler, result):
     result.pop('inflight_episodes', None)
     return dict(optimizer_step=step+1, step_time_sec=profiler.times['step'],
                 stage_seconds=dict(profiler.times), episodes=episode_rows,
+                sequence_statistics=sequence_statistics([{'episodes': episode_rows}]),
                 rejected_where_episodes=rejected, loss_total=loss)
 
 
@@ -348,7 +388,7 @@ def write_outputs(directory, report):
     report['comparison'] = check_comparability(report['variants'])
     save_json(directory / 'results.json', report)
     columns = ['id', 'status', 'physical_batch_size', 'gradient_accumulation_steps',
-               'gradient_checkpointing', 'effective_optimizer_batch', 'measured_steps_completed',
+               'gradient_checkpointing', 'effective_optimizer_batch', 'sampling_group_size', 'measured_steps_completed',
                'measured_episodes', *METRICS, 'measured_K_histogram', 'where_lengths', 'semantic_lengths',
                'image_counts', 'fixation_counts', 'failure_phase', 'failure_stage', 'error',
                'workload_sha256', 'rates_are_partial', 'inflight_episodes']
@@ -396,8 +436,9 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'runs' / ('a100-benchmark-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')))
     parser.add_argument('--warmup-steps', type=int, default=3, help='optimizer updates excluded from summary')
     parser.add_argument('--steps', type=int, default=30, help='measured optimizer updates per variant')
-    parser.add_argument('--effective-batch-size', type=int, help='defaults to configured B*accumulation; must be divisible by 2')
-    parser.add_argument('--include-checkpointing-off', action='store_true', help='also attempt B=1/B=2 without checkpointing; record OOM and continue')
+    parser.add_argument('--effective-batch-size', type=int, help='defaults to configured B*accumulation; must be divisible by largest requested B')
+    parser.add_argument('--include-b4', action='store_true', help='also attempt same-K B=4; requires effective batch divisible by 4; record OOM')
+    parser.add_argument('--include-checkpointing-off', action='store_true', help='also attempt requested batch sizes without checkpointing; record OOM and continue')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--images-root', type=Path, help='explicit server path override')
     parser.add_argument('--split-root', type=Path, help='explicit server path override')
@@ -417,7 +458,7 @@ def main(argv=None):
         scheduler_horizon(config, args.warmup_steps + args.steps)
         effective = args.effective_batch_size if args.effective_batch_size is not None else (
             config['training']['per_device_train_batch_size'] * config['training']['gradient_accumulation_steps'])
-        matrix = variant_matrix(effective, args.include_checkpointing_off)
+        matrix = variant_matrix(effective, args.include_checkpointing_off, args.include_b4)
     except ValueError as exc:
         parser.error(str(exc))
     directory = args.output_dir.resolve()
@@ -433,6 +474,8 @@ def main(argv=None):
         machine=machine_metadata(), config_source=str(args.config.resolve()), source_config=config,
         benchmark=dict(warmup_steps=args.warmup_steps, measured_steps=args.steps,
                        effective_batch_size=effective, seed=config['experiment']['seed'], world_size=1,
+                       sampling_group_size=matrix[0]['sampling_group_size'],
+                       workload_policy='shared same-K groups at largest requested B, split for smaller B; K drawn from configured distribution',
                        timing='synchronized wall-clock; includes sampling/collation, excludes report I/O and model/data loading',
                        stages_are_inclusive=True, fresh_process_per_variant=True),
         variants=[empty_result(v) for v in matrix])

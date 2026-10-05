@@ -136,8 +136,8 @@ def test_train_predictions_stop_at_first_batch_not_accumulation(tmp_path, episod
     bundle.optimizer = make_optimizer(bundle)
     bundle.scheduler = torch.optim.lr_scheduler.LambdaLR(bundle.optimizer, lambda _: 1)
     class SequentialSampler(FixedSampler):
-        def sample(self):
-            ep = super().sample()
+        def sample(self, *, k=None):
+            ep = super().sample(k=k)
             return replace(ep, query=replace(ep.query, record_id=f'train-query-{self.calls}'))
     sampler = SequentialSampler(episode)
     train, queries, manifest = validation_data(episode)

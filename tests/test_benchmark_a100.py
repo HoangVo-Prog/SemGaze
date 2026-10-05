@@ -14,8 +14,9 @@ def result_row(variant=None):
     result['status'] = 'ok'
     result['workload_groups'] = [[{'query_id': 'a', 'support_ids': ['b'], 'subject': 1}]]
     result['steps'] = [dict(step_time_sec=2.0, stage_seconds={'backward': 1.0}, episodes=[
-        dict(K=1, where_length=100, semantic_length=50, image_count=2, fixation_count=3),
-        dict(K=5, where_length=600, semantic_length=90, image_count=6, fixation_count=8)])]
+        dict(K=1, where_length=100, semantic_length=50, image_count=2, fixation_count=3, physical_batch_index=0),
+        dict(K=1, where_length=600, semantic_length=90, image_count=2, fixation_count=8,
+             physical_batch_index=1 if result['physical_batch_size'] == 1 else 0)])]
     result['memory'] = {'measured': {'peak_memory_allocated_bytes': 1000, 'peak_memory_reserved_bytes': 2000}}
     bench.summarize(result)
     return result
@@ -29,6 +30,33 @@ def test_matrix_fixes_effective_batch_without_serial_physical_fallback():
     for value in (0, 1, 3, True):
         with pytest.raises(ValueError):
             bench.variant_matrix(value)
+    variants = bench.variant_matrix(4, include_b4=True)
+    assert [v['physical_batch_size'] for v in variants] == [1, 2, 4]
+    assert [v['gradient_accumulation_steps'] for v in variants] == [4, 2, 1]
+    assert all(v['sampling_group_size'] == 4 for v in variants)
+    with pytest.raises(ValueError):
+        bench.variant_matrix(6, include_b4=True)
+
+
+def test_sequence_statistics_use_physical_batches_and_token_weighted_padding():
+    single = result_row()['metrics']
+    assert single['where_padding_fraction'] == single['semantic_padding_fraction'] == 0
+    row = result_row(bench.variant_matrix(2)[1])
+    metrics = row['metrics']
+    assert metrics['where_tokens'] == 700
+    assert metrics['where_padded_token_slots'] == 1200
+    assert metrics['where_padding_tokens'] == 500
+    assert metrics['where_padding_fraction'] == pytest.approx(500/1200)
+    assert metrics['where_length_mean'] == metrics['where_length_median'] == 350
+    assert metrics['where_length_p95'] == metrics['where_length_max'] == 600
+    assert metrics['semantic_padding_tokens'] == 40
+    # Batch index zero in a different optimizer update must form its own group.
+    short = {'episodes': [dict(K=5, where_length=10, semantic_length=20, physical_batch_index=0)]}
+    combined = bench.sequence_statistics(row['steps'] + [short])
+    assert combined['where_padding_fraction'] == pytest.approx(500/1210)
+    row['steps'][0]['episodes'][1]['K'] = 5
+    with pytest.raises(ValueError, match='mixed-K'):
+        bench.sequence_statistics(row['steps'])
 
 
 def test_summary_counts_episodes_and_preserves_partial_oom_peaks():
@@ -37,7 +65,7 @@ def test_summary_counts_episodes_and_preserves_partial_oom_peaks():
     assert row['metrics']['seconds_per_episode'] == 1.0
     assert row['metrics']['step_time_mean_sec'] == 2.0
     assert row['metrics']['backward_mean_sec'] == 1.0
-    assert row['measured_K_histogram'] == {'1': 1, '5': 1}
+    assert row['measured_K_histogram'] == {'1': 2}
     row['status'] = 'oom'
     row['memory']['measured']['peak_memory_allocated_bytes'] = 3000
     bench.summarize(row)
@@ -67,9 +95,10 @@ def test_plan_only_has_no_fabricated_measurements(tmp_path, monkeypatch):
     monkeypatch.setattr(bench, 'machine_metadata', lambda: {'test': True})
     monkeypatch.setattr(bench, 'launch_worker', lambda *a: pytest.fail('plan must not launch CUDA workers'))
     directory = tmp_path / 'plan'
-    assert bench.main(['--plan-only', '--include-checkpointing-off', '--output-dir', str(directory)]) == 0
+    assert bench.main(['--plan-only', '--include-checkpointing-off', '--include-b4',
+                       '--effective-batch-size', '4', '--output-dir', str(directory)]) == 0
     report = json.loads((directory / 'results.json').read_text())
-    assert len(report['variants']) == 4 and report['plan_only']
+    assert len(report['variants']) == 6 and report['plan_only']
     assert all(v['status'] == 'not_run' and all(x is None for x in v['metrics'].values()) for v in report['variants'])
     requests = [json.loads(p.read_text()) for p in directory.glob('*/request.json')]
     source = load_config(ROOT / 'configs/flat_throughput.yaml')
@@ -90,16 +119,16 @@ def test_parent_continues_after_oom_and_process_crash(tmp_path, monkeypatch):
     def launch(request_path, directory):
         request = json.loads(request_path.read_text())
         calls.append(request['variant']['id'])
-        if len(calls) == 1:
+        if request['variant']['physical_batch_size'] in (1, 4):
             row = bench.empty_result(request['variant']) | {'status': 'oom', 'error': 'test OOM'}
             bench.save_json(directory / 'result.json', row)
         # Second worker simulates a process killed before writing its result.
         return 1
     monkeypatch.setattr(bench, 'launch_worker', launch)
-    assert bench.main(['--output-dir', str(tmp_path / 'run')]) == 1
+    assert bench.main(['--output-dir', str(tmp_path / 'run'), '--include-b4', '--effective-batch-size', '4']) == 1
     rows = json.loads((tmp_path / 'run/results.json').read_text())['variants']
-    assert calls == ['b1_gc_on', 'b2_gc_on']
-    assert [r['status'] for r in rows] == ['oom', 'failed']
+    assert calls == ['b1_gc_on', 'b2_gc_on', 'b4_gc_on']
+    assert [r['status'] for r in rows] == ['oom', 'failed', 'oom']
 
 
 def test_profiler_failure_records_inner_boundary_without_post_failure_sync():
@@ -153,11 +182,13 @@ def test_worker_reports_oom_and_resets_measurement_peak(tmp_path, monkeypatch, f
     assert result['metrics']['peak_memory_allocated_bytes'] == (None if fail_phase == 'warmup' else 123)
 
 
-def test_real_config_rejects_fresh_or_wrong_precision():
+def test_real_config_preserves_current_adapter_mode_and_requires_bf16():
     config = load_config(ROOT / 'configs/flat_throughput.yaml')
     bench.validate_real_config(config)
     config['model']['adapter_load_mode'] = 'fresh'
-    with pytest.raises(ValueError, match='released DeepGaze'):
+    bench.validate_real_config(config)
+    config['training']['precision'] = 'fp32'
+    with pytest.raises(ValueError, match='bf16'):
         bench.validate_real_config(config)
 
 
@@ -172,7 +203,7 @@ def test_scheduler_horizon_preserves_configured_schedule():
     assert bench.scheduler_horizon(config, 33) == 1000
 
 
-@pytest.mark.parametrize('physical_batch', [1, 2])
+@pytest.mark.parametrize('physical_batch', [1, 2, 4])
 def test_offline_step_uses_real_training_batch_and_accumulation(tmp_path, physical_batch):
     """CPU graph integration only; stage synchronization is a test double."""
     pytest.importorskip('peft')
@@ -183,20 +214,21 @@ def test_offline_step_uses_real_training_batch_and_accumulation(tmp_path, physic
     episode = normalized_episode_from_dict(json.loads((ROOT / 'tests/fixtures/flat_episode.json').read_text()))
     bundle = tiny_bundle(tmp_path, episode)
     bundle.config['training'].update(per_device_train_batch_size=physical_batch,
-                                     gradient_accumulation_steps=2 // physical_batch)
+                                     gradient_accumulation_steps=4 // physical_batch)
     bundle.optimizer = make_optimizer(bundle)
     bundle.scheduler = make_scheduler(bundle, 2)
     calls = []
     hook = bundle.model.get_base_model().model.language_model.register_forward_pre_hook(
         lambda model, args, kwargs: calls.append(kwargs['inputs_embeds'].shape[0]), with_kwargs=True)
     profiler = bench.BoundaryProfiler(SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda d: None)), 'cpu-test')
-    result = bench.empty_result(bench.variant_matrix(2)[physical_batch-1])
+    result = bench.empty_result(next(v for v in bench.variant_matrix(4, include_b4=True)
+                                   if v['physical_batch_size'] == physical_batch))
     try:
-        row = bench.run_measured_step(bundle, SimpleNamespace(sample=lambda: episode), 0, profiler, result)
+        row = bench.run_measured_step(bundle, SimpleNamespace(sample=lambda **kw: episode), 0, profiler, result)
     finally:
         hook.remove()
-    assert calls == [physical_batch] * (2 * (2 // physical_batch))
-    assert len(row['episodes']) == 2 and row['episodes'][0]['K'] == 1
+    assert calls == [physical_batch] * (2 * (4 // physical_batch))
+    assert len(row['episodes']) == 4 and row['episodes'][0]['K'] == 1
     assert row['episodes'][0]['where_length'] > 0 and row['episodes'][0]['semantic_length'] > 0
     assert row['episodes'][0]['support_ids'] == [episode.supports[0].record_id]
     assert set(bench.STAGES).issubset(row['stage_seconds'])

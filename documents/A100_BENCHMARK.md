@@ -1,169 +1,179 @@
-# Server-side SemGaze A100 benchmark
+# Server-side SemGaze A100 same-K benchmark
 
-`scripts/benchmark_a100.py` is a standalone command in this repository. It imports
-the production SemGaze pipeline, not the old fixture profiler or test utilities.
-The benchmark has not been run or performance-validated on an A100 locally.
+`scripts/benchmark_a100.py` runs the production SemGaze pipeline on real training
+episodes. It has not been run or performance-validated on an A100 locally.
 
 ## Run on the training server
 
-Run these commands from the repository root, using the server's prepared Python
-environment with the pinned project dependencies and its CUDA-enabled PyTorch
-build. The released adapter/tokenizer payloads, base model or HF cache, persisted
-COCO-Search18 splits, curated source used by the split manifest, and real images
-must be installed. The ordinary production loader checks the released adapter
-payload, tokenizer compatibility, loaded LoRA tensors, bf16 and frozen modules.
-The benchmark fails explicitly if those prerequisites are missing.
+From the repository root, activate the prepared server Python environment with
+the pinned project dependencies and CUDA-enabled PyTorch. Install the configured
+model/adapter/tokenizer payloads, persisted COCO-Search18 splits, curated source
+referenced by the split manifest, and real images.
 
-Required B=1/B=2, gradient checkpointing ON:
+Compare B=1 baseline, B=2 same-K, and B=4 same-K if it fits, with checkpointing ON:
 
 ```bash
 python scripts/benchmark_a100.py \
   --config configs/flat_throughput.yaml \
-  --output-dir runs/a100-benchmark-on \
-  --effective-batch-size 2 \
+  --output-dir runs/a100-same-k \
+  --effective-batch-size 4 \
+  --include-b4 \
   --warmup-steps 3 \
   --steps 30
 ```
 
-Required variants plus optional checkpointing OFF attempts:
+Use a new or empty output directory. Append `--include-checkpointing-off` to also
+attempt all three sizes with checkpointing OFF. Omit `--include-b4` to test only
+B=1/B=2. `--effective-batch-size` must be divisible by the largest requested B;
+if omitted, it defaults to configured B times accumulation. B=4 OOM is recorded
+without losing B=1/B=2 results. Any attempted failure causes exit code 1 after
+results are saved; it does not prevent subsequent variants from running.
 
-```bash
-python scripts/benchmark_a100.py \
-  --config configs/flat_throughput.yaml \
-  --output-dir runs/a100-benchmark-all \
-  --effective-batch-size 2 \
-  --warmup-steps 3 \
-  --steps 30 \
-  --include-checkpointing-off
-```
-
-Choose one command; the second includes the first command's variants. Use a new
-output directory for each run. The script refuses to overwrite earlier results.
-Use `--device cuda:1` to select another visible GPU. Do not launch with `torchrun`.
-If the server stores data elsewhere, append explicit path overrides, for example:
+Use `--device cuda:1` for another visible GPU. Run directly, not with `torchrun`.
+For data stored elsewhere append, for example:
 
 ```bash
   --images-root /data/COCO_Search18/images --split-root /data/COCO_Search18/split/all
 ```
 
-Otherwise these paths come from your config. A custom `--config` must still select
-`OpenGVLab/InternVL3_5-8B-HF`, bf16, and the released DeepGaze adapter with
-`adapter_load_mode: continue_trainable`. Keep the verified annotation coordinate
-frame in that configuration. No dataset files or model/checkpoint weights are
-written by the benchmark.
+The config must select `OpenGVLab/InternVL3_5-8B-HF` and bf16. **Source discrepancy:**
+`configs/flat_throughput.yaml` currently selects `initialization_adapter: null` /
+`adapter_load_mode: fresh`, despite its old header describing a released adapter.
+The benchmark preserves the selected initialization. To measure an existing
+released DeepGaze production run, pass that production configuration with
+`--config`; no model initialization or optimizer setting is changed here.
+
+## Focused batch-construction audit and refinement
+
+The previous `sample_optimizer_batches` independently sampled every episode,
+sorted the whole optimizer minibatch by K and coarse length, then cut it into
+physical batches. A K group whose size was not divisible by B could leave a
+mixed-K chunk. Sorting did not guarantee homogeneous K.
+
+Training now draws its first episode normally, using the existing subject-then-K
+sampling order and configured K probabilities. It holds that K for the remaining
+episodes in the physical batch, retaining conditional subject/query/support
+sampling and support order. Context-overflow retries keep the selected K,
+including when the first episode overflows. The existing retry bound still
+fails clearly if that K cannot fit. Each new physical batch draws K again.
+Zero-probability K values remain excluded. Length sorting is confined to a same-K
+batch, and no episodes move across independently drawn K groups or updates.
+
+The requested within-batch K correlation changes B>1 seeded trajectories; it
+preserves the configured K marginal distribution and conditional episode rules.
+B=1 retains its original RNG order when no context overflow occurs. Holding K on
+retries prevents context rejection from preferentially resampling smaller K.
+The sampler checkpoint remains its original Python RNG state, with no new queues.
+Model, precision, losses, gradient paths and optimizer logic are unchanged. Generic
+collation/forward helpers still support mixed K for mathematical parity tests.
 
 ## Comparable real workloads
 
-The script reads and validates the same persisted training split as `train_flat.py`,
-normalizes real records with `CocoSearch18Adapter`, and uses the unchanged
-`TrainingEpisodeSampler` and `sample_optimizer_batches`. It does not use fixture
-episodes, force K quotas, reduce image resolution, or remove long episodes to
-avoid OOM. The production WHERE context-overflow rejection/resampling rule remains
-active and its rejection count is recorded. Other errors, including semantic
-overflow, fail the variant instead of silently changing the workload.
+The benchmark loads the same persisted training split and normalization as
+`train_flat.py`. K is random with the configured probabilities; there are no
+forced quotas, reduced resolutions, or OOM-driven changes to episode content.
+Actual query/support IDs, rejection counts and K histograms are saved.
 
-The explicit effective optimizer batch of 2 means:
+To avoid confounding throughput with different episode draws, all variants use
+**the same same-K groups of the largest requested B**. For the command above,
+real episodes are sampled in groups of four, sorted within those groups, then
+split into physical batches of 1, 2 or 4. The production batch builder exposes
+this benchmark-only grouping override. Default production training draws K once
+per physical batch; in the comparison, adjacent smaller batches share a group's
+K. This is a controlled workload replay, not a claim that production B=1 draws
+four correlated K values. B=1 is the current source's singleton baseline, not a
+historical pre-Section-A implementation.
 
-| Physical episode batch | Accumulation | Episodes per optimizer update |
+| Physical B | Accumulation | Episodes per optimizer update |
 |---|---:|---:|
-| B=1 | 2 | 2 |
-| B=2 | 1 | 2 |
+| 1 | 4 | 4 |
+| 2 | 2 | 4 |
+| 4 | 1 | 4 |
 
-Both variants sample the same ordered episode stream with the configured seed.
-Their optimizer minibatch membership, schedule horizon, warmup updates and
-measured updates are identical. Existing within-minibatch K/length grouping is
-preserved. Batching still changes the assignment of dropout RNG draws; the
-benchmark does not disable dropout or claim bitwise-identical training trajectories.
-An explicitly configured training horizon is used for the scheduler unchanged;
-otherwise the benchmark's warmup + measured step count supplies the required
-horizon. The selected horizon is saved. The script rejects a benchmark longer
-than an explicitly configured training horizon.
+All variants start from the same configured seed/initial model in fresh worker
+processes. The script checks accepted query/support IDs and order at common
+optimizer steps, dataset identity, and model provenance. Mismatches cause a
+nonzero exit. Dropout RNG assignment can differ by batch size, so training
+trajectories are not claimed bitwise identical. No dropout, attention backend,
+TF32, optimizer, loss weight, cache, or allocator setting is tuned.
 
-The default run measures 60 real episodes per variant, after six warmup episodes.
-Use more `--steps` for broader workload coverage. Actual K histograms and any
-configured K values absent from the measured sample are saved; the script never
-resamples to manufacture coverage. Omit `--effective-batch-size` to use the
-configured B*accumulation, which must be divisible by 2. Any explicit override is
-recorded as a benchmark setting.
+Thirty measured updates process 120 real episodes after 12 warmup episodes.
+Increase `--steps` for more K coverage; absent configured K values are reported.
+The configured training scheduler horizon is preserved; when no horizon is
+configured, warmup plus measured steps supplies it. A benchmark longer than an
+explicitly configured horizon is rejected.
 
-Each variant is a **fresh subprocess** that loads the same configured initial
-model, released LoRA, trainable END_FIX rows, and P_E with the same initialization
-seed. Optimizer state and the CUDA allocator are isolated between variants. The
-script compares accepted query/support IDs and their order at every common
-optimizer step, along with dataset and model provenance. A mismatch is reported
-and the command exits nonzero. No attention kernel, TF32 setting, allocator
-configuration, optimizer, dropout probability, loss weight, or cache setting is
-tuned by this script.
+## Timing, VRAM and padding definitions
 
-## Timing and memory definitions
+- `episodes_per_second` is completed measured episodes divided by total measured
+  optimizer-step wall time. `seconds_per_episode` is its reciprocal. Step times
+  include sampling, CPU preprocessing, transfers, all accumulated physical
+  WHERE/semantic forwards and backward passes, clipping, optimizer and scheduler.
+  Model/data loading, report writing and console output are excluded.
+- Stage timings include WHERE forward, semantic preparation/forward, backward,
+  clipping, optimizer and scheduler, summed per optimizer update. Mean, median
+  and p95 total step times are reported. Nested stage times are inclusive.
+- CUDA synchronization occurs only at explicit profiling boundaries. This
+  instrumentation can reduce natural overlap. Each variant has a fresh process
+  and allocator; memory peaks reset after loading and after warmup. There are no
+  per-step `empty_cache()` calls.
+- Peak allocated/reserved bytes cover the measured window, including model,
+  optimizer and activations. Loading/warmup snapshots are separate. Per-step
+  phase peaks are cumulative within that phase. Reserved bytes include cached
+  allocator blocks from warmup.
+- For each WHERE/semantic physical forward, token slots are B times that batch's
+  maximum sequence length. Padding tokens are slots minus valid sequence lengths;
+  padding fraction is total padding divided by total slots, weighted by tokens.
+  B=1 has zero padding. These describe sequence padding, not image feature memory.
+- WHERE and semantic statistics include token totals, padded slots, padding count
+  and fraction, unpadded length min/mean/median/p95/max, and mean/max padded length.
+  Semantic lengths include inserted fixation states. Statistics appear per step
+  and across completed measured steps, alongside raw per-episode lengths and K.
+- Warmup really trains using the existing semantic-to-WHERE gradient path.
+  Diagnostics follow the production first-step/periodic policy. Gradient clipping
+  and aggregate non-finite checks stay enabled at each optimizer update.
 
-- Every measured step runs production collation, physical WHERE and semantic
-  forwards, the joint backward, aggregate finite-gradient checking/clipping,
-  `optimizer.step()`, and `scheduler.step()`.
-- Throughput is **completed measured episodes / sum of measured optimizer-step
-  wall times**. Seconds/episode is its reciprocal. Step time includes sampling,
-  CPU preprocessing, transfers and all accumulated physical batches. Model/data
-  loading, report serialization and console logging are outside this window.
-- `where_forward_mean_sec` and `semantic_forward_mean_sec` time their existing
-  backbone-and-loss stage boundaries, summed over the physical microbatches in
-  an optimizer step, then averaged over completed measured steps. Backward and
-  optimizer-step metrics use the corresponding explicit boundaries. Sampling,
-  semantic preparation, clipping and scheduler timings are saved separately.
-- CUDA synchronization occurs only at profiling boundaries. This is an
-  instrumented benchmark: boundary synchronization can reduce natural overlap.
-  Nested `where`/`semantic` parent timings are inclusive; do not add them to
-  their child preparation/forward timings.
-- Peaks reset after model loading and again after warmup, in each new process.
-  `peak_memory_allocated_bytes` and `peak_memory_reserved_bytes` cover the measured
-  window, including the live model, optimizer state and activations. Warmup and
-  loading snapshots are separate. Per-step `phase_memory` peaks are cumulative
-  within that phase, not independent per-step peaks. Reserved memory includes
-  allocator blocks retained from warmup. There are no `empty_cache()` calls.
-- Gradient diagnostics use the production policy: first warmup update and any
-  configured periodic interval. Finite checking/clipping remains enabled each
-  optimizer step. Warmup really trains; no synthetic input or frozen objective
-  replaces the semantic-to-WHERE gradient path.
+## Results to send back
 
-## Files to send back
+Send **`runs/a100-same-k/results.json` and `runs/a100-same-k/results.csv`**.
+JSON contains resolved configs, machine/GPU/driver/library information, source
+hash and revision, attention backends, model/adapter provenance, optimizer state
+size, dataset identity, times, VRAM, padding statistics, query/support identities,
+K, image/fixation counts and supervised token counts. CSV contains one summary
+row per variant plus raw length/count arrays. Times are seconds, VRAM is bytes,
+and padding fractions range from 0 to 1.
 
-Send **`results.json` and `results.csv`** from your output directory.
+Each variant also has its request, result, console log and model preflight files.
+Results persist after every completed update and variant. Status is `ok`, `oom`,
+`failed` or `not_run`. A killed process is not automatically labeled CUDA OOM.
+Partial rates are marked; measured peaks may include the failed step. Warmup
+failure leaves measured metrics null and reports failure memory separately.
+Send the variant log too if it failed. GPU identity is recorded rather than
+assuming the server actually provides an A100 40GB.
 
-`results.json` contains the complete configuration, machine/GPU/driver/library
-metadata, source hash and Git revision/status, actual attention backends,
-checkpointed modules, model commit, adapter file hashes, optimizer state size,
-dataset manifest identity, summary metrics, per-step times, query/support IDs,
-K, both sequence lengths, image counts/order, fixation counts and supervised
-token counts. It also reports whether the detected GPU is an A100 with roughly
-40 GiB; it does not mislabel another GPU's results.
-
-`results.csv` has one row per variant, with summary measurements, actual length
-and count arrays, and failure status. Times are seconds and memory is bytes.
-
-Each variant also has `request.json`, `result.json`, `console.log`, and the normal
-model preflight/resolved-config files. Results are persisted after each completed
-optimizer step and after each variant. Send the variant log too if it failed.
-
-Status is `ok`, `oom`, `failed`, or `not_run`. An OOM in an optional OFF variant
-does not prevent subsequent variants from running. A crashed/killed worker is
-reported as failed with its exit code; GPU OOM is not inferred from a process
-kill alone. Rates after a partial measured run are explicitly marked partial;
-peaks may include the failed measured step. If warmup fails, measured metrics
-stay null and the failure snapshot is reported separately. Any attempted failure
-causes the overall command to exit nonzero **after saving the results**.
-
-## Local verification and example format
-
-Local verification covers CLI parsing, unchanged configuration fields, result
-math/serialization, process failure handling, mocked CUDA OOM/peak-reset logic,
-and B=1/B=2 orchestration on a small CPU HF/PEFT graph. These checks do not validate
-A100 execution, capacity, speed, or released 8B behavior.
-
-To inspect the output structure without using CUDA, data or model weights:
+For an unmeasured output plan without loading data, model or CUDA:
 
 ```bash
-python scripts/benchmark_a100.py --plan-only --include-checkpointing-off \
-  --output-dir runs/a100-benchmark-plan
+python scripts/benchmark_a100.py --plan-only \
+  --include-b4 --effective-batch-size 4 \
+  --output-dir runs/a100-same-k-plan
 ```
 
-The example files under `documents/a100_benchmark_example/` have `plan_only: true`,
-`status: not_run`, and null performance values. They are templates, not measurements.
+Example JSON/CSV under `documents/a100_benchmark_example/` are explicitly
+`plan_only`, `not_run` templates with null measurements. Local tests cover
+sampling, workload identity, padding arithmetic, OOM isolation and CPU small-HF
+loss/gradient/batching regressions. They do not validate A100 performance or
+capacity, or the real 8B model's target-hardware behavior.
+
+Local verification for this refinement: **52 passed** (CPU), including existing
+fp32/bf16 loss/state/gradient parity, episode-mean batching equivalence,
+semantic-to-WHERE gradients, sampling and RNG resume, B=1/2/4 orchestration,
+padding calculations and failure persistence. The first attempt hit Windows
+temporary-directory permissions; the run below used a workspace-local directory:
+
+```powershell
+.venv/Scripts/python.exe -m pytest tests/test_same_k_batching.py tests/test_benchmark_a100.py tests/test_training_throughput.py tests/test_epoch_validation.py tests/test_epoch_predictions.py -q --basetemp=D:/Programming/Python/SemGaze/runs/pytest-same-k-20261005 --tb=short
+```
+
+The B=1/2/4 `--plan-only` command also passed. No A100 measurements are available
+locally; throughput and VRAM remain unmeasured until the server run.

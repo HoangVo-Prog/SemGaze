@@ -30,9 +30,16 @@ class TrainingEpisodeSampler:
                     raise ValueError(f"empty valid query pool for subject={subject}, K={k}")
                 self.queries[subject, k] = pool
 
-    def sample(self):
+    def sample(self, *, k=None):
+        # A physical batch draws K once; subsequent episodes retain the same
+        # conditional subject/query/support sampling and support order.
+        if k is not None and (type(k) is not int or not any(
+                k == value and probability > 0
+                for value, probability in zip(self.k_values, self.probabilities))):
+            raise ValueError(f'K={k} is not enabled in the training distribution')
         u = self.rng.choice(self.subjects)
-        k = self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
+        if k is None:
+            k = self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
         query = self.rng.choice(self.queries[u, k])
         images = self.rng.sample([i for i in self.images[u] if i != query.stimulus_id], k)
         supports = [self.rng.choice(self.images[u][i]) for i in images]

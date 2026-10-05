@@ -138,7 +138,7 @@ training:
   gradient_accumulation_steps: 1 # physical batches per optimizer update
   gradient_checkpointing: true
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
-  length_aware_batching: true # group within this optimizer minibatch only
+  length_aware_batching: true # sort within each same-K physical batch only
   reuse_query_vision: true # requires frozen deterministic producers and identical pixels
   max_grad_norm: 1.0
   weight_decay: 0.01
