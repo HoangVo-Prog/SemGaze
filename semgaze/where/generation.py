@@ -15,8 +15,9 @@ def generate_where(bundle, episode):
     bundle.model.eval()
     n = len(episode.query.x_px)
     tokenizer = bundle.processor.tokenizer
-    budget = max(64, len(tokenizer.encode(serialize_xyd([(99, 99, 999)] * n), add_special_tokens=False)) + 16)
-    batch = collate_where(bundle.processor, episode, bundle.end_fix_id, bundle.context_limit, teacher_forcing=False)
+    token = bundle.config['where']['end_fix_token']
+    budget = max(64, len(tokenizer.encode(serialize_xyd([(99, 99, 999)] * n, token), add_special_tokens=False)) + 16)
+    batch = collate_where(bundle.processor, episode, bundle.end_fix_id, bundle.context_limit, teacher_forcing=False, config=bundle.config)
     inputs = to_model_device(batch.inputs, bundle.model)
     inputs.pop('labels')
     prompt_length = inputs['input_ids'].shape[1]
@@ -25,4 +26,4 @@ def generate_where(bundle, episode):
     output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
         eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
     text = decode_response(tokenizer, output[0, prompt_length:])
-    return {'text': text, 'max_new_tokens': budget, **parse_xyd_output(text, n)}
+    return {'text': text, 'max_new_tokens': budget, **parse_xyd_output(text, n, token)}

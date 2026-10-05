@@ -86,16 +86,16 @@ def test_validation_covers_full_seen_query_set_and_frozen_k_order(tmp_path, epis
     assert bundle.model.training
 
 
-@pytest.mark.parametrize('max_steps,steps', [(4, None), (4, 0), (4, True), (5, 2)])
+@pytest.mark.parametrize('max_steps,steps', [(4, None), (4, 0), (4, True)])
 def test_epoch_schedule_requires_an_explicit_complete_epoch(tmp_path, episode, max_steps, steps):
     cfg = tiny_bundle(tmp_path, episode).config
     with pytest.raises(ValueError): resolve_epoch_schedule(cfg, max_steps, steps)
 
 
-def test_config_rejects_non_epoch_evaluation(tmp_path, episode):
+def test_config_accepts_step_evaluation(tmp_path, episode):
     cfg = tiny_bundle(tmp_path, episode).config
     cfg['evaluation']['strategy'] = 'steps'
-    with pytest.raises(ValueError, match='epoch'): validate_config(cfg)
+    validate_config(cfg)
 
 
 class FixedSampler:

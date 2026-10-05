@@ -1,3 +1,4 @@
+# Missing-field defaults only. Explicit null values are preserved.
 # Example SemGaze flat single-output experiment, not a configuration schema.
 # Values are user-controlled; each run saves its resolved configuration.
 

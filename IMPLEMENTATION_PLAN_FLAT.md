@@ -2,6 +2,12 @@
 
 ## Status
 
+Configuration update (2026-10-05): explicit user direction makes experiment settings
+configurable, including fresh or continued LoRA initialization. Earlier fixed experiment
+values in this historical plan are reference recommendations, not Python-enforced
+requirements. Scientific graph/data integrity remains intact. See Section 28 and
+`documents/CONFIGURATION_AUDIT.md` for field-level behavior and implementation limits.
+
 Active execution plan for the first implementation target:
 
 ```text
@@ -1403,3 +1409,42 @@ Epoch 1 | step 2 | autoregressive predictions:
 Section 25 production gates remain open: released weights/prepared device, real
 images and verified annotation frame. No full training or released-model
 prediction run is claimed by these small-model tests.
+
+
+## 28. Configuration-driven runtime (2026-10-05)
+
+Explicit user request: make YAML experiment choices effective end to end; preserve real
+runtime/data validation and the existing flat architecture/objective. This supersedes
+old initialization/default-enforcement instructions in this plan, without implementing
+multibranch semantics or modifying reference baseline checkouts.
+
+Completed: missing-field-only YAML defaults; CLI-before-construction resolution; fresh
+and continued real PEFT initialization; configurable LM LoRA, token, context and device;
+config-driven persisted data roots, duration field, subjects and weighted K sampling;
+optimizer/scheduler/precision/horizons/batching; epoch/step/disabled evaluation and K
+subsets; prediction count/scope/budget; logging/output/checkpoint policies; resumable
+optimizer hyperparameters and precision. Explicit null is never filled silently.
+All reference fields have a consumer or a documented concrete implementation limit in
+`documents/CONFIGURATION_AUDIT.md`. The existing golden files were not changed.
+
+Verification:
+
+| Command | Result |
+|---|---|
+| `.venv/Scripts/python -m pytest tests/test_config_plumbing.py -q --basetemp=.cache/pytest-config-3 --tb=short` | 14 passed at that stage: actual fresh/continued HF+PEFT consumers, precision/gradients, optimizer/scheduler/sampling, CLI epochs, relocated dataset and checkpoint integrity. Two further evaluation/cache tests added afterward. |
+| `.venv/Scripts/python -m pytest tests -q --basetemp=.cache/pytest-config-final --tb=short` | **76 passed**, including **16 configuration-plumbing cases**; 75 existing third-party NumPy conversion warnings. No model downloads. |
+| `python scripts/smoke_flat.py --contract-only` | Passed unchanged fixture/golden/parser contracts. |
+| `.venv/Scripts/python scripts/smoke_flat.py --with-model` | Contract portion passed; configured fresh 8B model stopped at CUDA preflight on CPU-only host. Evidence: `runs/semgaze_flat_single-20261005T072342Z-0b621a/`. No full training ran. |
+| `.venv/Scripts/python train_flat.py --help` and `.venv/Scripts/python evaluate_flat.py --help` | Passed. |
+| `.venv/Scripts/python -m compileall -q semgaze train_flat.py evaluate_flat.py scripts/smoke_flat.py` | Passed. |
+| `git -c safe.directory=D:/Programming/Python/SemGaze diff --check` | Passed. |
+
+The first pytest invocation hit a permission error in the host user's temporary pytest
+folder; subsequent verification uses an isolated workspace `.cache/` basetemp. A new
+evaluation entrypoint test found YAML parsing of JSON scientific notation as strings;
+JSON checkpoint configs now use the JSON parser, and the complete suite passes.
+
+Remaining production gates are unchanged: prepared device/full base weights and real
+images/annotation frame. Compatible tiny real HF/PEFT tests prove mechanics, not 8B
+benchmark quality. Unsupported scientific/backend combinations and incomplete checkpoint
+exports fail explicitly, with the reasons and full field inventory in the audit report.

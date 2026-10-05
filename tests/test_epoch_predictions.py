@@ -185,5 +185,4 @@ def test_prediction_budget_is_explicit(tmp_path, episode, budget):
     resolve_prediction_settings(config, 8)
     validate_config(config)
     config['evaluation']['predictions']['train_batches'] = 2
-    with pytest.raises(ValueError, match='one train batch'):
-        validate_config(config)
+    validate_config(config)

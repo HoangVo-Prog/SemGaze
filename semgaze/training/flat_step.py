@@ -1,14 +1,28 @@
 import torch
 from semgaze.data.schema import normalized_episode_from_dict, require_seen_training_episode
-from semgaze.model.config import load_config, resolve_config
 from semgaze.where.forward import forward_where
 from semgaze.semantic.flat.forward import forward_flat
 
 
 def make_optimizer(bundle):
     t = bundle.config['training']
-    return torch.optim.AdamW(bundle.trainable_parameters(), lr=t['learning_rate'],
-        betas=(t['adam_beta1'], t['adam_beta2']), eps=t['adam_epsilon'], weight_decay=t['weight_decay'])
+    kwargs = dict(lr=t['learning_rate'], weight_decay=t['weight_decay'])
+    if t['optimizer'] in ('AdamW', 'Adam'):
+        kwargs.update(betas=(t['adam_beta1'], t['adam_beta2']), eps=t['adam_epsilon'])
+    return getattr(torch.optim, t['optimizer'])(bundle.trainable_parameters(), **kwargs)
+
+
+def make_scheduler(bundle, max_steps, start_step=0):
+    from transformers import get_scheduler
+    t = bundle.config['training']
+    scheduler = get_scheduler(t['scheduler'], bundle.optimizer,
+        num_warmup_steps=int(max_steps * t['warmup_ratio']), num_training_steps=max_steps)
+    if start_step:
+        scheduler.last_epoch = start_step
+        for group, base_lr, factor in zip(bundle.optimizer.param_groups, scheduler.base_lrs, scheduler.lr_lambdas):
+            group['lr'] = base_lr * factor(start_step)
+        scheduler._last_lr = [g['lr'] for g in bundle.optimizer.param_groups]
+    return scheduler
 
 
 def gradient_diagnostics(bundle):
@@ -23,14 +37,12 @@ def gradient_diagnostics(bundle):
             'end_fix_output_grad_finite': finite(bundle.output_row)}
 
 
-def run_flat_training_step(model_bundle, episode, config_path=None, optimizer_step=False, *,
+def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0):
     bundle = model_bundle
-    if config_path is not None and resolve_config(load_config(config_path)) != bundle.config:
-        raise ValueError('step configuration differs from model initialization')
     if isinstance(episode, dict):
         episode = normalized_episode_from_dict(episode)
-    require_seen_training_episode(episode)
+    require_seen_training_episode(episode, bundle.config['data']['unseen_subjects'])
     bundle.model.train()
     bundle.projector.train()
     if zero_grad:
@@ -46,8 +58,17 @@ def run_flat_training_step(model_bundle, episode, config_path=None, optimizer_st
     if not all(bool(torch.isfinite(loss)) for loss in (where.loss_where, loss_flat, loss_total)):
         raise RuntimeError('non-finite joint loss')
     (loss_total * loss_scale).backward()
+    if any(p.grad is not None and not bool(torch.isfinite(p.grad).all()) for p in bundle.trainable_parameters()):
+        raise RuntimeError('non-finite parameter gradient')
     diagnostics = gradient_diagnostics(bundle)
-    if not all(diagnostics.values()):
+    smoke = bundle.config['smoke']
+    checks = {
+        'require_lora_gradient': diagnostics['lora_grad_finite'],
+        'require_projector_nonzero_gradient': diagnostics['projector_grad_finite'] and diagnostics['projector_grad_nonzero'],
+        'require_end_fix_input_gradient': diagnostics['end_fix_input_grad_finite'],
+        'require_end_fix_output_gradient_if_untied': bundle.embeddings_tied or diagnostics['end_fix_output_grad_finite'],
+    }
+    if any(smoke[key] and not valid for key, valid in checks.items()):
         raise RuntimeError(f'gradient contract failed: {diagnostics}')
     if optimizer_step:
         if bundle.optimizer is None:

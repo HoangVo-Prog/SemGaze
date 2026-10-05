@@ -15,31 +15,39 @@ def save_checkpoint(bundle, path, *, split_manifest_identity, step, sampler=None
     path.mkdir(parents=True, exist_ok=True)
     if not split_manifest_identity:
         raise ValueError('split/manifest identity is required')
-    bundle.processor.save_pretrained(path / 'processor')
-    bundle.model.save_pretrained(path / 'adapter', safe_serialization=True, save_embedding_layers=False)
-    tensors = {'end_fix_input': bundle.input_row.detach().cpu().clone(),
-               **{f'projector.{k}': v.detach().cpu().clone() for k, v in bundle.projector.state_dict().items()}}
-    if not bundle.embeddings_tied:
-        tensors['end_fix_output'] = bundle.output_row.detach().cpu().clone()
-    save_file(tensors, str(path / 'semgaze.safetensors'))
-    write_run_config(bundle.config, path)
+    options = bundle.config['checkpoint']
+    if options['save_processor_and_tokenizer']:
+        bundle.processor.save_pretrained(path / 'processor')
+    if options['save_peft_adapter']:
+        bundle.model.save_pretrained(path / 'adapter', safe_serialization=True, save_embedding_layers=False)
+    tensors = {}
+    if options['save_trainable_end_fix_rows']:
+        tensors['end_fix_input'] = bundle.input_row.detach().cpu().clone()
+        if not bundle.embeddings_tied:
+            tensors['end_fix_output'] = bundle.output_row.detach().cpu().clone()
+    if options['save_projector']:
+        tensors.update({f'projector.{k}': v.detach().cpu().clone() for k, v in bundle.projector.state_dict().items()})
+    if tensors:
+        save_file(tensors, str(path / 'semgaze.safetensors'))
+    if options['save_resolved_config']:
+        write_run_config(bundle.config, path)
     metadata = {'protocol_version': bundle.config['experiment']['protocol_version'],
-        'semantic_mode': 'flat_single_output', 'end_fix_id': bundle.end_fix_id,
-        'embeddings_tied': bundle.embeddings_tied, 'split_manifest_identity': split_manifest_identity,
+        'semantic_mode': 'flat_single_output', 'end_fix_id': bundle.end_fix_id if options['save_end_fix_token_id'] else None,
+        'embeddings_tied': bundle.embeddings_tied, 'split_manifest_identity': split_manifest_identity if options['save_split_manifest_identity'] else None,
         'step': step, 'diagnostics': bundle.diagnostics,
         'trainable_names': [n for n, p in bundle.model.named_parameters() if p.requires_grad]}
     (path / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     (path / 'trainer_state.json').write_text(json.dumps(
         {'step': step, 'log_history': bundle.trainer_history}, indent=2, allow_nan=False), encoding='utf-8')
-    state = {'optimizer': bundle.optimizer.state_dict() if bundle.optimizer is not None else None,
-             'scheduler': bundle.scheduler.state_dict() if bundle.scheduler is not None else None,
+    state = {'optimizer': bundle.optimizer.state_dict() if bundle.optimizer is not None and options['save_optimizer'] else None,
+             'scheduler': bundle.scheduler.state_dict() if bundle.scheduler is not None and options['save_scheduler'] else None,
              'python_rng': random.getstate(), 'torch_rng': torch.get_rng_state(),
              'cuda_rng': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
              'sampler': sampler.state_dict() if sampler is not None else None}
     torch.save(state, path / 'training.pt')
 
 
-def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=None, resume_optimizer=False):
+def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=None, resume_optimizer=False, restore_hyperparameters=True):
     """Load into a bundle constructed with checkpoint processor and PEFT adapter."""
     path = Path(path)
     metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
@@ -75,8 +83,15 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
         state = torch.load(path / 'training.pt', map_location='cpu', weights_only=True)
         if bundle.optimizer is None or bundle.scheduler is None or state['optimizer'] is None or state['scheduler'] is None:
             raise ValueError('resumable training requires saved and constructed optimizer/scheduler')
+        configured_groups = [{k: v for k, v in group.items() if k != 'params'} for group in bundle.optimizer.param_groups]
         bundle.optimizer.load_state_dict(state['optimizer'])
-        bundle.scheduler.load_state_dict(state['scheduler'])
+        if restore_hyperparameters:
+            bundle.scheduler.load_state_dict(state['scheduler'])
+        else:
+            for group, configured in zip(bundle.optimizer.param_groups, configured_groups):
+                group.update(configured)
+                group['lr'] = bundle.config['training']['learning_rate']
+                group['initial_lr'] = group['lr']
         random.setstate(state['python_rng'])
         torch.set_rng_state(state['torch_rng'])
         if state['cuda_rng']:
@@ -88,22 +103,29 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
     return metadata['step']
 
 
-def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None):
+def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, runtime=None, precision=None):
     """Rebuild base -> checkpoint vocabulary -> continued adapter -> rows/P_E."""
     from transformers import AutoProcessor, AutoModelForImageTextToText
     from peft import PeftModel
     from .build import FlatModelBundle
-    from .config import validate_config
+    from .config import resolve_config
     from .trainable_tokens import install_trainable_rows
     from semgaze.state.projector import build_projector
     path = Path(path)
-    config = json.loads((path / 'resolved_config.json').read_text(encoding='utf-8'))
-    validate_config(config)
+    for required in ('resolved_config.json', 'metadata.json', 'processor', 'adapter', 'semgaze.safetensors'):
+        if not (path / required).exists():
+            raise ValueError(f'checkpoint is incomplete for loading: missing {required}')
+    config = resolve_config(json.loads((path / 'resolved_config.json').read_text(encoding='utf-8')))
+    if runtime is not None:
+        config['runtime'].update(runtime)
+    if precision is not None:
+        config['training']['precision'] = precision
+    config = resolve_config(config)
     metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
     if metadata['split_manifest_identity'] != split_manifest_identity:
         raise ValueError('checkpoint split/manifest identity mismatch')
     processor = AutoProcessor.from_pretrained(path / 'processor')
-    token_ids = processor.tokenizer.encode('<END_FIX>', add_special_tokens=False)
+    token_ids = processor.tokenizer.encode(config['where']['end_fix_token'], add_special_tokens=False)
     if token_ids != [metadata['end_fix_id']]:
         raise ValueError('checkpoint END_FIX is non-atomic or ID changed')
     dtype = {'bf16': torch.bfloat16, 'fp32': torch.float32}[config['training']['precision']]
@@ -121,5 +143,6 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None):
         config, metadata['diagnostics'], Path(output_dir or path))
     restore_checkpoint_state(bundle, path, split_manifest_identity=split_manifest_identity)
     if output_dir is not None:
+        config['runtime']['output_dir'] = str(Path(output_dir).resolve())
         write_run_config(config, output_dir)
     return bundle

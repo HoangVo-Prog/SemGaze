@@ -109,10 +109,15 @@ def collate_native(processor, messages, image_paths, target=None, *, prompt=None
                        tuple((offsets[i][0] - start_char, offsets[i][1] - start_char) for i in supervised))
 
 
-def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher_forcing=True):
-    messages, image_paths = build_where_conversation(episode)
+def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher_forcing=True, config=None):
+    token = config['where']['end_fix_token'] if config else '<END_FIX>'
+    if config:
+        ctx = config['where']['context']
+        if len(episode.supports) > ctx['max_k'] or len(episode.supports) + 1 > ctx['max_images_per_episode']:
+            raise WhereContextOverflowError('episode exceeds configured support/image capacity')
+    messages, image_paths = build_where_conversation(episode, token)
     batch = collate_native(processor, messages, image_paths,
-                           serialize_xyd_record(episode.query) if teacher_forcing else None)
+                           serialize_xyd_record(episode.query, token) if teacher_forcing else None)
     if batch.inputs['input_ids'].shape[1] > context_limit:
         raise WhereContextOverflowError(f'{episode.query.record_id}: complete WHERE episode exceeds {context_limit}; reject/resample, never truncate')
     if teacher_forcing:

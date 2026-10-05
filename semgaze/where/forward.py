@@ -12,9 +12,9 @@ class WhereOutput:
 
 
 def forward_where(bundle, episode):
-    batch = collate_where(bundle.processor, episode, bundle.end_fix_id, bundle.context_limit)
+    batch = collate_where(bundle.processor, episode, bundle.end_fix_id, bundle.context_limit, config=bundle.config)
     inputs = to_model_device(batch.inputs, bundle.model)
-    outputs = bundle.model(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
+    outputs = bundle.model(**inputs, output_hidden_states=True, use_cache=bundle.config['where']['supervision']['use_cache'], return_dict=True)
     states, mask, positions = extract_query_states(outputs.hidden_states[-1], inputs['input_ids'],
         inputs['labels'], bundle.end_fix_id, [len(episode.query.x_px)])
     if not mask.all():

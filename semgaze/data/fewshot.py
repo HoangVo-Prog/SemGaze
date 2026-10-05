@@ -1,15 +1,20 @@
 """Normative subject -> K -> query -> image -> record sampling."""
 from collections import defaultdict
 import random
-from .schema import FlatEpisode, K_VALUES, UNSEEN_SUBJECTS
+from .schema import FlatEpisode, UNSEEN_SUBJECTS
 
 
 class TrainingEpisodeSampler:
-    def __init__(self, train_records, seed):
+    def __init__(self, train_records, seed, *, data_config=None):
+        from semgaze.model.config import default_section
+        data_config = data_config if data_config is not None else default_section('data')
+        self.k_values = data_config['fewshot']['k_values']
+        self.probabilities = data_config['fewshot']['train_k_probabilities']
+        unseen_subjects = data_config['unseen_subjects']
         self.rng = random.Random(seed)
         self.images = defaultdict(lambda: defaultdict(list))
         for r in train_records:
-            if r.subject not in UNSEEN_SUBJECTS:
+            if r.subject not in unseen_subjects:
                 self.images[r.subject][r.stimulus_id].append(r)
         self.subjects = sorted(self.images)
         if not self.subjects:
@@ -17,7 +22,9 @@ class TrainingEpisodeSampler:
         self.queries = {}
         for subject in self.subjects:
             images = self.images[subject]
-            for k in K_VALUES:
+            for k, probability in zip(self.k_values, self.probabilities):
+                if probability == 0:
+                    continue
                 pool = [r for rows in images.values() for r in rows if len(images) - 1 >= k]
                 if not pool:
                     raise ValueError(f"empty valid query pool for subject={subject}, K={k}")
@@ -25,7 +32,7 @@ class TrainingEpisodeSampler:
 
     def sample(self):
         u = self.rng.choice(self.subjects)
-        k = self.rng.choice(K_VALUES)
+        k = self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
         query = self.rng.choice(self.queries[u, k])
         images = self.rng.sample([i for i in self.images[u] if i != query.stimulus_id], k)
         supports = [self.rng.choice(self.images[u][i]) for i in images]
@@ -39,17 +46,24 @@ class TrainingEpisodeSampler:
         self.rng.setstate(state)
 
 
-def frozen_episode(query, train_by_id, manifest, k, *, draw_id=None):
-    if k not in K_VALUES:
-        raise ValueError("unsupported K")
+def frozen_episode(query, train_by_id, manifest, k, *, draw_id=None, unseen_subjects=None):
+    if unseen_subjects is None:
+        unseen_subjects = manifest.get("unseen_subject_ids", UNSEEN_SUBJECTS)
+    if type(k) is not int or k < 1:
+        raise ValueError("K must be positive")
     if draw_id is None:
-        if query.subject in UNSEEN_SUBJECTS:
+        if query.subject in unseen_subjects:
             raise ValueError("unseen subject cannot enter validation")
-        entries = manifest["validation_supports"][str(query.subject)][str(k)]
+        blocks = manifest["validation_supports"][str(query.subject)]
+        if str(k) not in blocks:
+            raise ValueError(f"no persisted validation supports for subject={query.subject}, K={k}")
+        entries = blocks[str(k)]
         ids = [e["record_id"] for e in entries]
     else:
-        if query.subject not in UNSEEN_SUBJECTS or not 0 <= draw_id < 10:
-            raise ValueError("final evaluation requires unseen subject and draw 0..9")
+        if str(k) not in manifest["support_draws"]:
+            raise ValueError(f"no persisted final support draws for K={k}")
+        if query.subject not in unseen_subjects or not 0 <= draw_id < len(manifest["support_draws"][str(k)]):
+            raise ValueError("final evaluation requires unseen subject and a persisted draw index")
         entries = manifest["support_draws"][str(k)][draw_id]
         ids = [e["resolved_record_id_by_subject"][str(query.subject)] for e in entries]
     if len(ids) != k:

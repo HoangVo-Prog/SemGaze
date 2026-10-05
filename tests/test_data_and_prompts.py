@@ -68,7 +68,7 @@ def test_frozen_manifest_order_is_used():
 
 
 @pytest.mark.parametrize('section,key,value', [('semantic', 'mode', 'other'), ('model', 'merge_adapter_for_training', True),
-    ('state', 'detach_where_states', True), ('data', 'variant', 'tp_only'), ('semantic', 'loss', 'balanced')])
+    ('state', 'detach_where_states', True), ('semantic', 'loss', 'balanced')])
 def test_config_rejects_unsupported_contract(section, key, value):
     config = load_config(ROOT / 'configs/flat_single.yaml')
     config[section][key] = value
@@ -78,9 +78,13 @@ def test_config_rejects_unsupported_contract(section, key, value):
 def test_engineering_choices_explicit_and_annotation_frame_unresolved():
     config = load_config(ROOT / 'configs/flat_single.yaml')
     resolved = resolve_config(config)
-    assert config['training']['weight_decay'] is None
-    assert resolved['training']['weight_decay'] == resolved['engineering_resolutions']['weight_decay'] == 0.01
-    assert resolved['data']['annotation_frame'] is None
+    assert config['training']['weight_decay'] == resolved['training']['weight_decay'] == 0.01
+    config['data']['annotation_frame'] = None
+    assert resolve_config(config)['data']['annotation_frame'] is None
+    config['training']['weight_decay'] = None
+    with pytest.raises(ValueError, match='weight_decay'):
+        resolve_config(config)  # explicit null must not become a hidden default
+
 
 
 def test_adapter_preflight_detects_lfs_without_mutating_reference(tmp_path):

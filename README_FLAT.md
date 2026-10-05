@@ -19,10 +19,10 @@ python -m venv --system-site-packages .venv
 .venv/Scripts/python scripts/smoke_flat.py --with-model
 ```
 
-`--with-model` loads the released adapter trainably and performs no optimizer step
+`--with-model` initializes the configured fresh or continued LoRA trainably and performs no optimizer step
 unless `--step` is supplied. It saves resolved configuration and preflight provenance
 under `runs/`. It fails on missing dependencies, LFS pointer files, incompatible
-tokenizers/templates, wrong adapters, unsupported devices, or unintended trainables.
+tokenizers/templates, incompatible adapter tensors, unsupported devices, or unintended trainables.
 
 `tests/test_model_path.py` uses a small, randomly initialized **real HF InternVL +
 PEFT** solely to test implementation mechanics on CPU. This is not the baseline
@@ -44,9 +44,9 @@ runs, set `data.annotation_frame` to a verified `{width: ..., height: ...}` or t
 `original_image` only if installed images are the original annotation images.
 The normalized fixture already declares its dimensions and needs no such inference.
 
-The adapter reads the existing `all` splits, verifies source/split checksums and
+The adapter reads `data.split_root`, verifies source/split checksums and
 frozen manifest membership, maps `prediction.fixations/regions/how`, and preserves
-`T` as milliseconds. It never recreates splits or trial filtering. Empty images
+`data.duration.source_field` as milliseconds (default `T`). It never recreates splits or trial filtering. Empty images
 or unresolved frame metadata fail explicitly.
 
 ## Training and resume
@@ -59,21 +59,19 @@ or unresolved frame metadata fail explicitly.
 These are example horizons, not scientific defaults. Every training run executes
 the fixture gradient gate before optimization. Episodes are accumulated sequentially
 with an explicit episode mean. WHERE overflow resamples the complete episode;
-semantic overflow fails. Checkpoints include processor/tokenizer, PEFT, separate
+semantic overflow fails. By default, checkpoints include processor/tokenizer, PEFT, separate
 END_FIX rows, P_E, optimizer, scheduler, RNG/sampler state, resolved config, and
-split identity. Resume preserves the scheduler horizon, epoch schedule, and log history.
+split identity. Checkpoint component flags control saved artifacts; incomplete exports cannot reconstruct the full model. Resume restores optimizer moments, RNG and history, while applying the resolved optimizer hyperparameters and schedule. Model/token structure and optimizer implementation must remain compatible.
 
 ### Epoch validation and logging
 
 The sampler draws episodes with replacement, so epochs are explicitly bounded by
 optimizer steps. Set `training.steps_per_epoch` or `--steps-per-epoch`; the example
-above defines ten epochs of 100 optimizer steps each. The horizon must contain
-complete epochs. This changes neither subject/K/query sampling nor accumulation.
+above defines ten epochs of 100 optimizer steps each. Set `training.max_steps`, or `training.epochs` together with `steps_per_epoch`. An explicit max-steps horizon takes precedence and may end in a partial epoch. This changes neither subject/K/query sampling nor accumulation.
 `evaluation.strategy: epoch` validates at the end of **every** epoch, before the
-epoch checkpoint is saved, regardless of `--save-every`.
+epoch checkpoint is saved when `checkpoint.save_at_epoch_end` is enabled. `evaluation.strategy` also supports `steps` with `evaluation.every_steps`, or the quoted string `"no"` to disable evaluation.
 
-Validation uses the full seen-subject `all/validation` query set at every K=1/5/10,
-with frozen same-subject `all/train` supports. It never resamples/truncates frozen
+Validation uses the full seen-subject validation query set at `evaluation.k_values` (default 1/5/10), with frozen same-subject train supports from the configured manifest. It never resamples/truncates frozen
 episodes or uses unseen subjects for validation. No gradients or updates occur;
 model/projector train/eval modes are restored even if validation fails.
 
@@ -99,7 +97,7 @@ the absolute epoch schedule without repeating completed epoch evaluations.
 
 ### Epoch autoregressive predictions
 
-After the unchanged validation-loss summary, every epoch generates:
+With the reference prediction settings, every evaluation generates:
 
 - Train: exactly one batch of `per_device_train_batch_size` episodes, reusing the
   first batch of accepted episodes from that epoch's final optimizer step. Later
@@ -115,7 +113,7 @@ module modes and training RNG. Context overflow fails without skipping a query.
 
 Declare `evaluation.predictions.semantic_max_new_tokens` or pass
 `--semantic-max-new-tokens`; the example 512 above is an explicit runtime choice,
-not a canonical default. The resolved choice is saved and must match on resume.
+not a canonical default. The resolved choice is saved and may change on resume.
 The WHERE budget retains its existing tokenizer-measured policy.
 
 Each epoch writes `predictions/epoch-0001/{train,validation}.jsonl`. Each line has
@@ -140,17 +138,26 @@ Prediction files remain in the run directory; retain that directory alongside
 checkpoints when moving runs. Resume retains earlier history and generates only
 new epochs. Training losses and the existing `epoch_validation` event are unchanged.
 
-The unresolved optimizer engineering knobs resolve explicitly to Adam betas
-`(0.9, 0.999)`, epsilon `1e-8`, weight decay `0.01`, max gradient norm `1.0`, and
-gradient checkpointing `false`. Resolutions are recorded under
-`engineering_resolutions` in each run's `resolved_config.json`. Non-reentrant
-gradient checkpointing is supported when explicitly enabled. Dataset coordinate
-metadata and evaluation metric choices are not filled in by defaults.
+Configuration follows `YAML -> missing-field defaults -> CLI overrides -> validation -> runtime`.
+`configs/defaults.yaml` supplies only absent fields; explicit `null` values are never
+silently replaced. The reference experiment now declares its optimizer engineering
+values explicitly. `max_grad_norm: null` disables clipping; unresolved required
+values fail with a field-specific error. Each run saves `resolved_config.json`.
+`runtime.output_dir`, `logging.every_steps`, `logging.filename`, checkpoint save
+cadence/components, and prediction batch count/scope can all be set in YAML.
+Prediction `train_batches: 0` and `validation_scope: none` disable generation without
+disabling loss validation. Multiple train batches reuse accepted training episodes,
+without extra sampling. Step-based predictions use distinct `predictions/step-*`
+directories. Batch size and accumulation contribute their product to the optimizer
+step's episode mean; episodes run sequentially to retain their multimodal contexts.
+
+See [the configuration audit](documents/CONFIGURATION_AUDIT.md) for the complete
+field-to-consumer inventory, removed enforcement, and remaining implementation limits.
 
 ## Evaluation
 
 `evaluate_flat.py` loads a saved checkpoint, consumes every eligible query and
-the frozen K=1/5/10 support sets, and exports predictions and draw-level validity
+the configured K support sets in the saved manifest, and exports predictions and draw-level validity
 diagnostics. It runs free-running WHERE separately from GT-trajectory-conditioned
 flat semantic generation. It does not tune on evaluation subjects.
 
@@ -165,3 +172,9 @@ or automatic best-checkpoint selection is claimed by this implementation.
 
 See `IMPLEMENTATION_PLAN_FLAT.md` for phase status, concrete verification results,
 and the remaining released-model gates.
+
+Evaluation inherits the checkpoint configuration. `--config` may supply `runtime`
+and `evaluation` overrides, including a new output directory, device, K subset and
+semantic generation budget. Explicit CLI flags override these values. Model/data
+identity stays attached to the checkpoint; missing frozen support blocks and
+manifest/hash mismatches fail instead of inventing replacement supports.

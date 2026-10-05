@@ -8,7 +8,7 @@ import math
 import torch
 from torch.nn import functional as F
 from semgaze.data.fewshot import frozen_episode
-from semgaze.data.schema import K_VALUES, UNSEEN_SUBJECTS
+from semgaze.data.schema import UNSEEN_SUBJECTS
 from semgaze.where.forward import forward_where
 from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
@@ -62,7 +62,7 @@ def flat_component_nll(logits, labels, response_offsets, semantic):
 
 
 def _episode_losses(bundle, episode):
-    if episode.query.subject in UNSEEN_SUBJECTS:
+    if episode.query.subject in bundle.config['data']['unseen_subjects']:
         raise ValueError('unseen subjects cannot contribute epoch validation/model selection')
     where = forward_where(bundle, episode)
     states = bundle.projector(where.states)
@@ -85,11 +85,12 @@ def evaluate_validation_episode(bundle, episode):
         return _episode_losses(bundle, episode)
 
 
-def validation_queries(train_by_id, validation_records, manifest):
+def validation_queries(train_by_id, validation_records, manifest, unseen_subjects=None):
     """Shared eligibility checks for loss validation and epoch predictions."""
-    queries = tuple(r for r in validation_records if r.subject not in UNSEEN_SUBJECTS)
+    unseen_subjects = set(manifest.get('unseen_subject_ids', UNSEEN_SUBJECTS) if unseen_subjects is None else unseen_subjects)
+    queries = tuple(r for r in validation_records if r.subject not in unseen_subjects)
     seen = set(manifest['seen_subject_ids'])
-    if not queries or {r.subject for r in queries} != seen or seen & UNSEEN_SUBJECTS:
+    if not queries or {r.subject for r in queries} != seen or seen & unseen_subjects:
         raise ValueError('validation must cover every manifest seen subject and exclude unseen subjects')
     if len({r.record_id for r in queries}) != len(queries):
         raise ValueError('duplicate validation query record')
@@ -107,23 +108,24 @@ def validate_epoch(bundle, train_by_id, validation_records, manifest):
     Mean per-episode response losses match the trainer's episode mean. Per-K
     summaries remain explicit; this is monitoring, not a model-selection metric.
     """
-    queries = validation_queries(train_by_id, validation_records, manifest)
+    queries = validation_queries(train_by_id, validation_records, manifest, bundle.config['data']['unseen_subjects'])
+    k_values = bundle.config['evaluation']['k_values']
     sums = {key: 0.0 for key in EVAL_KEYS}
     by_k = {}
     with validation_mode(bundle):
-        for k in K_VALUES:
+        for k in k_values:
             subtotal = {key: 0.0 for key in EVAL_KEYS}
             for query in queries:
-                episode = frozen_episode(query, train_by_id, manifest, k)
+                episode = frozen_episode(query, train_by_id, manifest, k, unseen_subjects=bundle.config['data']['unseen_subjects'])
                 values = _episode_losses(bundle, episode)
                 for key in EVAL_KEYS:
                     subtotal[key] += values[key]
                     sums[key] += values[key]
             by_k[str(k)] = {key: value / len(queries) for key, value in subtotal.items()}
             by_k[str(k)]['episodes'] = len(queries)
-    count = len(queries) * len(K_VALUES)
+    count = len(queries) * len(k_values)
     return {**{key: value / count for key, value in sums.items()}, 'eval_by_k': by_k,
-            'eval_queries': len(queries), 'eval_episodes': count,
+            'k_values': list(k_values), 'eval_queries': len(queries), 'eval_episodes': count,
             'eval_loss_aggregation': 'episode_mean', 'eval_kind': 'teacher_forced_response_nll',
             'eval_component_definition': 'flat_response_token_sections; prefixes/newlines included; EOS in HOW',
             'generation_quality_metrics': 'not configured: project protocol choices remain unresolved'}

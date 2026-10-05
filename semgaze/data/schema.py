@@ -2,8 +2,11 @@ from dataclasses import dataclass
 import math
 from .semantic import NormalizedSemantic, WhyGroup, semantic_from_dict, validate_semantic
 
-UNSEEN_SUBJECTS = frozenset({7, 8, 9})
-K_VALUES = (1, 5, 10)
+from semgaze.model.config import default_section
+
+# Backward-compatible direct-call defaults; runtime always supplies resolved data config.
+UNSEEN_SUBJECTS = frozenset(default_section('data')['unseen_subjects'])
+K_VALUES = tuple(default_section('data')['fewshot']['k_values'])
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,8 @@ class FlatEpisode:
     query: NormalizedRecord
 
     def __post_init__(self):
-        if len(self.supports) not in K_VALUES:
-            raise ValueError("K must be 1, 5 or 10")
+        if not self.supports:
+            raise ValueError("at least one support is required")
         if any(s.subject != self.query.subject for s in self.supports):
             raise ValueError("supports and query must have the same subject")
         stimuli = [s.stimulus_id for s in self.supports]
@@ -66,6 +69,6 @@ def normalized_episode_from_dict(payload):
                        normalized_record_from_dict(payload["query"]))
 
 
-def require_seen_training_episode(episode):
-    if episode.query.subject in UNSEEN_SUBJECTS:
+def require_seen_training_episode(episode, unseen_subjects=UNSEEN_SUBJECTS):
+    if episode.query.subject in unseen_subjects:
         raise ValueError(f"{episode.query.record_id}: unseen subjects never contribute training gradients")

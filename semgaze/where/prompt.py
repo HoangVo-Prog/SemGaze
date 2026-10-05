@@ -2,7 +2,7 @@ COCO_TARGETS = frozenset(('bottle', 'bowl', 'car', 'chair', 'clock', 'cup', 'for
     'knife', 'laptop', 'microwave', 'mouse', 'oven', 'potted plant', 'sink', 'stop sign', 'toilet', 'tv'))
 
 
-def build_where_prompt(task, n):
+def build_where_prompt(task, n, end_fix_token="<END_FIX>"):
     if n <= 0:
         raise ValueError('positive requested fixation count required')
     if task in COCO_TARGETS:
@@ -20,7 +20,7 @@ Generate a scanpath of exactly {n} fixation points in temporal order, with fixat
 - y: vertical position (0-100, 0=top, 100=bottom)
 - t: fixation duration in milliseconds (0-999)
 - Points should be ordered from first fixation to last fixation.
-- Append <END_FIX> immediately after every fixation tuple.
+- Append {end_fix_token} immediately after every fixation tuple.
 
 Output ONLY the list-style scanpath sequence:
-[(51, 46, 221)<END_FIX>, (38, 28, 754)<END_FIX>, ...]'''
+[(51, 46, 221){end_fix_token}, (38, 28, 754){end_fix_token}, ...]'''

@@ -1,12 +1,10 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import importlib.metadata
 import json
 from pathlib import Path
 import random
-import uuid
 import torch
-from .config import ROOT, load_config, resolve_config, write_run_config
+from .config import ROOT, load_config, resolve_config, write_run_config, resolve_output_dir
 from .trainable_tokens import install_trainable_rows
 from semgaze.data.cocosearch18 import sha256_file
 from semgaze.state.projector import build_projector
@@ -28,10 +26,14 @@ class FlatModelBundle:
     config: dict
     diagnostics: dict
     output_dir: Path
-    context_limit: int = 8192
+    context_limit: int = None
     optimizer: object = None
     scheduler: object = None
     trainer_history: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.context_limit is None:
+            self.context_limit = self.config['where']['context']['max_total_sequence_length']
 
     def trainable_parameters(self):
         return [p for p in self.model.parameters() if p.requires_grad] + list(self.projector.parameters())
@@ -40,14 +42,12 @@ class FlatModelBundle:
 def inspect_adapter(path):
     path = Path(path)
     metadata = json.loads((path / 'adapter_config.json').read_text())
-    targets = {s.split('.')[-1] for s in metadata['target_modules']}
-    expected = {'q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'}
-    if (metadata['base_model_name_or_path'] != 'OpenGVLab/InternVL3_5-8B-HF'
-            or (metadata['r'], metadata['lora_alpha'], metadata['lora_dropout']) != (8, 16, 0.05)
-            or targets != expected or metadata['peft_type'] != 'LORA'):
-        raise ModelPreflightError('released adapter architecture does not match frozen initialization')
+    if metadata.get('peft_type') != 'LORA':
+        raise ModelPreflightError('this trainer implements LoRA adapters only')
     hashes, blockers = {}, []
-    for name in ('adapter_config.json', 'adapter_model.safetensors', 'tokenizer.json'):
+    files = ['adapter_config.json', 'adapter_model.safetensors']
+    files += [name for name in ('tokenizer.json', 'tokenizer_config.json', 'chat_template.jinja') if (path / name).exists()]
+    for name in files:
         file = path / name
         if not file.exists():
             blockers.append(f'missing {file}')
@@ -61,6 +61,8 @@ def inspect_adapter(path):
 
 def verify_tokenizer_compatibility(processor, adapter_path):
     from transformers import AutoTokenizer
+    if not (Path(adapter_path) / 'tokenizer_config.json').exists():
+        return  # Standard PEFT checkpoints need not contain a tokenizer.
     released = AutoTokenizer.from_pretrained(adapter_path)
     tokenizer = processor.tokenizer
     if tokenizer.get_vocab() != released.get_vocab():
@@ -68,6 +70,8 @@ def verify_tokenizer_compatibility(processor, adapter_path):
     for key in ('eos_token_id', 'pad_token_id'):
         if getattr(tokenizer, key) != getattr(released, key):
             raise ModelPreflightError(f'base/adapter {key} differs')
+    if not (Path(adapter_path) / 'chat_template.jinja').exists():
+        return
     template = (Path(adapter_path) / 'chat_template.jinja').read_text(encoding='utf-8')
     # Compare actual role/image rendering, allowing harmless template-source whitespace.
     from jinja2 import Environment
@@ -122,47 +126,65 @@ def assert_trainable_set(model, projector, input_row, output_row):
             'vision_tower_frozen': vision_frozen, 'native_multimodal_projector_frozen': native_frozen}
 
 
-def build_flat_model_bundle(config_path, *, output_dir=None):
-    config = resolve_config(load_config(config_path))
-    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    output_dir = Path(output_dir or ROOT / 'runs' / f'flat-{stamp}-{uuid.uuid4().hex[:6]}')
+def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
+    config = resolve_config(config) if config is not None else load_config(config_path)
+    output_dir = resolve_output_dir(config, output_dir)
     write_run_config(config, output_dir)
-    adapter = ROOT / config['model']['initialization_adapter']
-    diagnostics = inspect_adapter(adapter)
-    diagnostics.update(adapter_source=adapter.as_posix(), torch_version=torch.__version__,
+    source = config['model']['initialization_adapter']
+    adapter = ROOT / source if source is not None else None
+    diagnostics = inspect_adapter(adapter) if adapter else {'blockers': []}
+    diagnostics.update(adapter_source=adapter.as_posix() if adapter else None, torch_version=torch.__version__,
                        cuda_available=torch.cuda.is_available())
     for package in ('transformers', 'peft', 'accelerate', 'safetensors'):
         try:
             diagnostics[package + '_version'] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             diagnostics['blockers'].append(f'missing dependency: {package}')
-    if config['runtime']['device'] == 'cuda' and not torch.cuda.is_available():
-        diagnostics['blockers'].append('CUDA unavailable; released 8B gradient smoke needs a prepared model device')
+    if torch.device(config['runtime']['device']).type == 'cuda' and not torch.cuda.is_available():
+        diagnostics['blockers'].append('CUDA unavailable; configured runtime.device requires a prepared CUDA device')
     (output_dir / 'preflight.json').write_text(json.dumps(diagnostics, indent=2), encoding='utf-8')
     if diagnostics['blockers']:
         raise ModelPreflightError('; '.join(diagnostics['blockers']) + f'; diagnostics: {output_dir}')
     from transformers import AutoProcessor, AutoModelForImageTextToText
-    from peft import PeftModel
+    from peft import PeftModel, LoraConfig, get_peft_model
     seed = config['experiment']['seed']
     random.seed(seed)
     torch.manual_seed(seed)
     processor = AutoProcessor.from_pretrained(config['model']['base_model'])
-    verify_tokenizer_compatibility(processor, adapter)
+    if adapter is not None:
+        verify_tokenizer_compatibility(processor, adapter)
     precision = config['training']['precision']
     dtype = {'bf16': torch.bfloat16, 'fp32': torch.float32}[precision]
-    if dtype == torch.bfloat16 and config['runtime']['device'] == 'cuda' and not torch.cuda.is_bf16_supported():
+    if dtype == torch.bfloat16 and torch.device(config['runtime']['device']).type == 'cuda' and not torch.cuda.is_bf16_supported():
         raise ModelPreflightError('bf16 unsupported; explicitly choose supported precision')
     base = AutoModelForImageTextToText.from_pretrained(config['model']['base_model'], dtype=dtype)
     if base.__class__.__name__ != 'InternVLForConditionalGeneration':
         raise ModelPreflightError('expected HF InternVLForConditionalGeneration')
     tokenizer = processor.tokenizer
-    tokenizer.add_tokens(['<END_FIX>'], special_tokens=True)
-    token_ids = tokenizer.encode('<END_FIX>', add_special_tokens=False)
+    token = config['where']['end_fix_token']
+    tokenizer.add_tokens([token], special_tokens=True)
+    token_ids = tokenizer.encode(token, add_special_tokens=False)
     if len(token_ids) != 1:
         raise ModelPreflightError('END_FIX is not atomic')
     base.resize_token_embeddings(len(tokenizer))
-    model = PeftModel.from_pretrained(base, adapter, is_trainable=True)
-    verify_loaded_adapter(model, adapter)
+    if adapter is not None:
+        model = PeftModel.from_pretrained(base, adapter, is_trainable=True)
+        verify_loaded_adapter(model, adapter)
+        # Continued weights own their tensor architecture; record effective metadata,
+        # without replacing the user's fresh-initialization LoRA settings.
+        diagnostics['effective_lora'] = diagnostics['adapter_metadata']
+    else:
+        lora = config['model']['lora']
+        targets = [name for name, module in base.named_modules()
+                   if '.language_model.' in name and any(name == target or name.endswith('.' + target)
+                       for target in lora['target_modules'])]
+        missing = [target for target in lora['target_modules'] if not any(name == target or name.endswith('.' + target) for name in targets)]
+        if missing:
+            raise ModelPreflightError(f'configured LoRA targets match no language-model modules: {missing}')
+        model = get_peft_model(base, LoraConfig(r=lora['rank'], lora_alpha=lora['alpha'],
+            lora_dropout=lora['dropout'], target_modules=targets, task_type='CAUSAL_LM'))
+        diagnostics['effective_lora'] = lora
+
     model.to(device=config['runtime']['device'])
     input_row, output_row, tied = install_trainable_rows(model, token_ids[0])
     projector = build_projector(base.config.text_config.hidden_size).to(device=input_row.device, dtype=input_row.dtype)

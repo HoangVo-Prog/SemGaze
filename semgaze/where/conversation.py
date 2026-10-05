@@ -6,11 +6,11 @@ def image_user(text):
     return {'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': text}]}
 
 
-def build_where_conversation(episode):
+def build_where_conversation(episode, end_fix_token="<END_FIX>"):
     messages, images = [], []
     for record in (*episode.supports, episode.query):
-        messages.append(image_user(build_where_prompt(record.task, len(record.x_px))))
+        messages.append(image_user(build_where_prompt(record.task, len(record.x_px), end_fix_token)))
         images.append(record.image_path)
         if record is not episode.query:
-            messages.append({'role': 'assistant', 'content': serialize_xyd_record(record)})
+            messages.append({'role': 'assistant', 'content': serialize_xyd_record(record, end_fix_token)})
     return messages, images
