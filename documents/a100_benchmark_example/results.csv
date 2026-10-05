@@ -1,0 +1,5 @@
+id,status,physical_batch_size,gradient_accumulation_steps,gradient_checkpointing,effective_optimizer_batch,measured_steps_completed,measured_episodes,episodes_per_second,seconds_per_episode,step_time_mean_sec,step_time_median_sec,step_time_p95_sec,total_measured_sec,peak_memory_allocated_bytes,peak_memory_reserved_bytes,sampling_collation_mean_sec,where_forward_mean_sec,semantic_preparation_mean_sec,semantic_forward_mean_sec,backward_mean_sec,gradient_clipping_mean_sec,optimizer_step_mean_sec,scheduler_step_mean_sec,measured_K_histogram,where_lengths,semantic_lengths,image_counts,fixation_counts,failure_phase,failure_stage,error,workload_sha256,rates_are_partial,inflight_episodes
+b1_gc_on,not_run,1,2,True,2,0,0,,,,,,,,,,,,,,,,,{},[],[],[],[],,,,,,[]
+b2_gc_on,not_run,2,1,True,2,0,0,,,,,,,,,,,,,,,,,{},[],[],[],[],,,,,,[]
+b1_gc_off,not_run,1,2,False,2,0,0,,,,,,,,,,,,,,,,,{},[],[],[],[],,,,,,[]
+b2_gc_off,not_run,2,1,False,2,0,0,,,,,,,,,,,,,,,,,{},[],[],[],[],,,,,,[]

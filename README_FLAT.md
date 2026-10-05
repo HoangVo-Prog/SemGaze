@@ -70,6 +70,13 @@ split identity. Checkpoint component flags control saved artifacts; incomplete e
 
 ### Training throughput and profiling
 
+For the real server-side A100 B=1/B=2 benchmark, use
+[`scripts/benchmark_a100.py`](scripts/benchmark_a100.py). The
+[server guide](documents/A100_BENCHMARK.md) gives exact commands and describes
+real training episodes, isolated variants, OOM handling, and JSON/CSV results.
+It has no fixture or CPU fallback. The older profiler below remains available
+for the original-path and tiny-model engineering comparisons.
+
 Training computes full-vocabulary logits only at supervised predictor positions
 and reads final LM hidden states directly. The deprecated
 `where.supervision.output_hidden_states` field remains readable in old checkpoints;
