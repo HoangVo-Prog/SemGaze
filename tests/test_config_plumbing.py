@@ -141,9 +141,10 @@ def test_evaluation_subset_multiple_prediction_batches_and_no_validation_predict
     def losses(bundle, ep):
         seen.append(len(ep.supports))
         return dict.fromkeys(EVAL_KEYS, 2.0)
-    monkeypatch.setattr(validation, '_episode_losses', losses)
+    monkeypatch.setattr(validation, 'batch_losses', lambda bundle, episodes, **kw: [losses(bundle,e) for e in episodes])
     assert validate_epoch(bundle, train, queries, manifest)['eval_episodes'] == 1
     assert seen == [5]
+    bundle.config['validation']['prediction']['execution'] = 'serial'
     monkeypatch.setattr(predictions, 'evaluate_where_episode', lambda *a: {'text':'where'})
     budgets = []
     monkeypatch.setattr(predictions, 'evaluate_flat_episode', lambda *a, generation_budget: budgets.append(generation_budget) or {'text':'flat'})
@@ -307,8 +308,12 @@ def test_evaluate_entrypoint_inherits_checkpoint_and_honors_overrides(tmp_path, 
     bundle=tiny_bundle(tmp_path,episode)
     monkeypatch.setattr(evaluate_flat,'load_checkpoint_bundle',lambda *a,**kw:calls.append(kw) or bundle)
     budgets=[]
-    monkeypatch.setattr(evaluate_flat,'evaluate_where_episode',lambda *a:{'under_generated':False})
-    monkeypatch.setattr(evaluate_flat,'evaluate_flat_episode',lambda *a,generation_budget:budgets.append(generation_budget) or {'flat_format_valid':True})
+    def predicted(bundle, episodes, *, budget, cache, path):
+        assert path == 'both'
+        for ep in episodes:
+            budgets.append(budget)
+            yield ep, ({'under_generated':False}, {'flat_format_valid':True})
+    monkeypatch.setattr(evaluate_flat,'prediction_batches',predicted)
     monkeypatch.setattr(sys,'argv',['evaluate_flat.py','--checkpoint',str(checkpoint),'--config',str(override),
         '--split','validation','--path','both','--semantic-max-new-tokens','9'])
     evaluate_flat.main()

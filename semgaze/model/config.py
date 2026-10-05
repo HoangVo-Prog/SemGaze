@@ -12,6 +12,9 @@ DEFAULTS_PATH = ROOT / 'configs/defaults.yaml'
 def _merge(defaults, values):
     result = copy.deepcopy(defaults)
     for key, value in values.items():
+        if key == 'batch_size_by_k' and isinstance(value, dict):
+            result[key] = {str(k): v for k, v in result.get(key, {}).items()} | {str(k): v for k, v in value.items()}
+            continue
         result[key] = _merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else copy.deepcopy(value)
     return result
 
@@ -179,6 +182,24 @@ def validate_config(config):
     if not isinstance(config['where']['end_fix_token'], str) or not config['where']['end_fix_token'].strip():
         raise ValueError('end_fix_token must be nonempty')
     predictions = evaluation['predictions']
+    validation = config['validation']
+    for branch in ('loss', 'prediction'):
+        settings = validation[branch]
+        if settings['execution'] not in ('serial', 'same_k_batched'):
+            raise ValueError('validation execution must be serial or same_k_batched')
+        from semgaze.evaluation.batching import physical_size
+        for k in evaluation['k_values']:
+            physical_size(settings, k)
+        positive_int(settings['bucket_window'], 'validation.bucket_window')
+        if type(settings['bucket_by_length']) is not bool:
+            raise ValueError('bucket_by_length must be boolean')
+    cache = validation['cache']
+    positive_int(cache['max_entries'], 'validation.cache.max_entries')
+    for flag in ('frozen_visual_features', 'support_preprocessing', 'prefix_kv'):
+        if type(cache[flag]) is not bool:
+            raise ValueError('validation cache flags must be boolean')
+    if cache['prefix_kv']:
+        raise ValueError('prefix KV caching requires separate server profiling and parity')
     positive_int(predictions['train_batches'], 'evaluation.predictions.train_batches', minimum=0)
     positive_int(predictions['semantic_max_new_tokens'], 'semantic_max_new_tokens', allow_none=True)
     if predictions['validation_scope'] not in ('all_seen', 'none'):

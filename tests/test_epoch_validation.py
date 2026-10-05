@@ -26,6 +26,7 @@ def validation_data(episode):
 
 def test_validation_losses_are_flat_diagnostics_and_preserve_training(tmp_path, episode):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     run_flat_training_step(bundle, episode)
     parameters = [(p, p.detach().clone(), None if p.grad is None else p.grad.clone())
                   for p in (*bundle.model.parameters(), *bundle.projector.parameters())]
@@ -57,6 +58,7 @@ def test_validation_losses_are_flat_diagnostics_and_preserve_training(tmp_path, 
 
 def test_validation_covers_full_seen_query_set_and_frozen_k_order(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     train, queries, manifest = validation_data(episode)
     queries.append(replace(episode.query, record_id='second', stimulus_id='second-image'))
     manifest['validation_stimulus_ids'].append('second-image')
@@ -68,7 +70,9 @@ def test_validation_covers_full_seen_query_set_and_frozen_k_order(tmp_path, epis
         assert [s.record_id for s in ep.supports] == [e['record_id'] for e in manifest['validation_supports']['1'][str(k)]]
         calls.append((ep.query.record_id, k))
         return {key: float(k) for key in EVAL_KEYS}
-    monkeypatch.setattr(validation, '_episode_losses', evaluate)
+    def evaluate_batch(bundle, episodes, **kwargs):
+        return [evaluate(bundle, ep) for ep in episodes]
+    monkeypatch.setattr(validation, 'batch_losses', evaluate_batch)
     result = validate_epoch(bundle, train, queries, manifest)
     assert len(calls) == result['eval_episodes'] == 6
     assert result['eval_queries'] == 2
@@ -79,9 +83,9 @@ def test_validation_covers_full_seen_query_set_and_frozen_k_order(tmp_path, epis
         validate_epoch(bundle, train | {queries[0].record_id: queries[0]}, queries, manifest)
     with pytest.raises(ValueError, match='cover every'):
         validate_epoch(bundle, train, [], manifest)
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError('overflow or forward failure')
-    monkeypatch.setattr(validation, '_episode_losses', fail)
+    monkeypatch.setattr(validation, 'batch_losses', fail)
     with pytest.raises(RuntimeError): validate_epoch(bundle, train, queries, manifest)
     assert bundle.model.training
 
@@ -116,6 +120,7 @@ class FixedSampler:
 
 def test_epoch_end_logs_checkpoint_and_resume(tmp_path, episode, monkeypatch, capsys):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     predictions.resolve_prediction_settings(bundle.config, 4)
     resolve_epoch_schedule(bundle.config, 4, 2)
     bundle.optimizer = make_optimizer(bundle)
@@ -165,6 +170,7 @@ def test_epoch_end_logs_checkpoint_and_resume(tmp_path, episode, monkeypatch, ca
 
 def test_real_small_hf_epoch_validation(tmp_path, episode):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     train, queries, manifest = validation_data(episode)
     result = validate_epoch(bundle, train, queries, manifest)
     assert result['eval_episodes'] == 3

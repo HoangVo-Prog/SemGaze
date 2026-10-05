@@ -6,8 +6,9 @@ from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
 from semgaze.data.fewshot import frozen_episode
 from semgaze.model.checkpoint import load_checkpoint_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
-from semgaze.evaluation.where import evaluate_where_episode
-from semgaze.evaluation.flat import evaluate_flat_episode
+from semgaze.evaluation.predictions import prediction_batches
+from semgaze.evaluation.validation import validation_mode
+from semgaze.model.visual_cache import InferenceVisualCache
 
 
 def main():
@@ -24,8 +25,8 @@ def main():
     if args.config:
         import yaml
         overrides = yaml.safe_load(args.config.read_text(encoding='utf-8'))
-        if set(overrides) - {'runtime', 'evaluation'}:
-            parser.error('evaluation overrides may change runtime/evaluation; model/data settings belong to the checkpoint')
+        if set(overrides) - {'runtime', 'evaluation', 'validation'}:
+            parser.error('evaluation overrides may change runtime/evaluation/validation; model/data settings belong to the checkpoint')
         from semgaze.model.config import resolve_config
         config = resolve_config(config, overrides)
     if args.semantic_max_new_tokens is not None:
@@ -56,7 +57,10 @@ def main():
               'metrics_gate': 'SM/MM/SED implementations and invalid treatment, semantic metrics and selection scalar require explicit protocol choices'}
     (output_dir / 'evaluation_config.json').write_text(json.dumps(policy, indent=2), encoding='utf-8')
     summary = {}
-    with (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
+    cache_settings = config['validation']['cache']
+    cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
+        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
+    with validation_mode(bundle), (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
         for k in config['evaluation']['k_values']:
             draws = range(len(manifest['support_draws'][str(k)])) if args.split == 'test' else (None,)
             draw_rates = []
@@ -66,15 +70,17 @@ def main():
                     counts['where_under_generated'] = 0
                 if args.path in ('semantic', 'both'):
                     counts['flat_format_valid'] = 0
-                for query in queries:
-                    episode = frozen_episode(query, train, manifest, k, draw_id=draw_id, unseen_subjects=data['unseen_subjects'])
+                episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
+                            unseen_subjects=data['unseen_subjects']) for query in queries]
+                for episode, generated in prediction_batches(bundle, episodes, budget=budget, cache=cache, path=args.path):
+                    query = episode.query
                     result = {'record_id': query.record_id, 'subject': query.subject, 'k': k, 'draw_id': draw_id,
                               'support_ids': [s.record_id for s in episode.supports]}
                     if args.path in ('where', 'both'):
-                        result['where'] = evaluate_where_episode(bundle, episode)
+                        result['where'] = generated[0]
                         counts['where_under_generated'] += int(result['where']['under_generated'])
                     if args.path in ('semantic', 'both'):
-                        result['semantic'] = evaluate_flat_episode(bundle, episode, generation_budget=budget)
+                        result['semantic'] = generated[1]
                         counts['flat_format_valid'] += int(result['semantic']['flat_format_valid'])
                     counts['queries'] += 1
                     stream.write(json.dumps(result, ensure_ascii=False) + '\n')
@@ -84,6 +90,7 @@ def main():
                 draw_rates.append(rates)
                 summary[f'K={k},draw={draw_id}'] = counts | rates
             summary[f'K={k},draw_mean'] = {key: sum(r[key] for r in draw_rates) / len(draw_rates) for key in draw_rates[0]}
+    cache.close()
     (output_dir / 'validity_summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
 
 

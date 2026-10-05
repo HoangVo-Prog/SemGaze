@@ -164,6 +164,23 @@ evaluation:
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
 
+validation:
+  loss:
+    execution: same_k_batched
+    batch_size_by_k: {'1': 1, '5': 1, '10': 1} # conservative; select on A100
+    bucket_by_length: false # enable after measuring padding
+    bucket_window: 64
+  prediction:
+    execution: same_k_batched
+    batch_size_by_k: {'1': 1, '5': 1, '10': 1}
+    bucket_by_length: false
+    bucket_window: 64
+  cache:
+    frozen_visual_features: true
+    support_preprocessing: true
+    max_entries: 256 # bounded invocation-local LRU, including GPU visual features
+    prefix_kv: false
+
 runtime:
   device: cuda
   output_dir: null # generated run directory when omitted

@@ -20,7 +20,7 @@ def forward_where(bundle, episode):
     return WhereOutput(result.loss_where, result.states[0], result.batch.samples[0], result.positions[0])
 
 
-def forward_where_batch(bundle, episodes, *, batch=None, profiler=None):
+def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_cache=None, use_cache=None):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where_collation'):
         batch = batch if batch is not None else collate_where_batch(
@@ -29,12 +29,16 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None):
         raise ValueError('precollated WHERE batch does not match requested episodes')
     inputs = to_model_device({k: v for k, v in batch.inputs.items() if k != 'labels'}, bundle.model)
     with stage('where_forward'):
-        outputs = forward_backbone(bundle.model, inputs, use_cache=bundle.config['where']['supervision']['use_cache'])
+        features = None
+        if visual_cache is not None:
+            inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths])
+        outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
+                                  if use_cache is None else use_cache))
         loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'], bundle.model.get_output_embeddings())
     counts = [len(e.query.x_px) for e in episodes]
     states, mask, positions = extract_query_states(outputs.last_hidden_state, batch.inputs['input_ids'],
         batch.inputs['labels'], bundle.end_fix_id, counts)
-    features = outputs.image_hidden_states
+    features = outputs.image_hidden_states if features is None else features
     if features.shape[:2] != (sum(m['image_count'] for m in batch.metadata), bundle.processor.image_seq_length):
         raise ValueError('native image feature groups differ from collated image ordering')
     return WhereOutput(loss.loss, [states[b, :n] for b, n in enumerate(counts)], batch, positions,

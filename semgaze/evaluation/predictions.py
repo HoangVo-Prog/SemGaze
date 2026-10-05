@@ -5,7 +5,10 @@ import random
 import time
 import torch
 from semgaze.data.fewshot import frozen_episode
-from semgaze.evaluation.flat import evaluate_flat_episode
+from semgaze.evaluation.flat import evaluate_flat_episode, evaluate_flat_batch
+from semgaze.where.generation import generate_where_batch
+from semgaze.evaluation.batching import physical_size
+from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.where import evaluate_where_episode
 from semgaze.evaluation.validation import validation_mode, validation_queries
 from semgaze.semantic.flat.target import build_flat_target
@@ -28,11 +31,11 @@ def resolve_prediction_settings(config, semantic_max_new_tokens=None):
     return settings
 
 
-def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, split_manifest_identity):
-    where = evaluate_where_episode(bundle, episode)
+def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, split_manifest_identity, generated=None):
+    where = evaluate_where_episode(bundle, episode) if generated is None else generated[0]
     # Canonical semantic inference constructs R from GT WHERE, never predicted
     # fixations. Only the semantic response is autoregressively generated here.
-    semantic = evaluate_flat_episode(bundle, episode, generation_budget=budget)
+    semantic = evaluate_flat_episode(bundle, episode, generation_budget=budget) if generated is None else generated[1]
     query = episode.query
     return {'epoch': epoch, 'step': step, 'split': split, 'prediction_index': index,
             'split_manifest_identity': split_manifest_identity,
@@ -44,11 +47,48 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
             'where_generation': where, 'semantic_generation': semantic}
 
 
+def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
+    """Yield canonical-order predictions while grouping same-K work internally.
+
+    Index-based restoration permits repeated supplied training episodes.
+    """
+    settings = bundle.config['validation']['prediction']
+    window = settings['bucket_window']
+    for start in range(0, len(episodes), window):
+        block = episodes[start:start+window]
+        results = {}
+        for k in dict.fromkeys(len(e.supports) for e in block):
+            indices = [i for i, e in enumerate(block) if len(e.supports) == k]
+            if settings['bucket_by_length']:
+                from semgaze.where.collator import collate_where
+                indices.sort(key=lambda i: collate_where(bundle.processor, block[i], bundle.end_fix_id,
+                    bundle.context_limit, teacher_forcing=False, config=bundle.config,
+                    image_cache=cache).inputs['input_ids'].shape[1])
+            size = physical_size(settings, k)
+            for offset in range(0, len(indices), size):
+                selected = indices[offset:offset+size]
+                group = [block[i] for i in selected]
+                if settings['execution'] == 'serial':
+                    generated = [(evaluate_where_episode(bundle, e) if path in ('where', 'both') else None,
+                                  evaluate_flat_episode(bundle, e, generation_budget=budget)
+                                  if path in ('semantic', 'both') else None) for e in group]
+                else:
+                    where = generate_where_batch(bundle, group, cache=cache) if path in ('where', 'both') else [None]*len(group)
+                    semantic = evaluate_flat_batch(bundle, group, generation_budget=budget, cache=cache) if path in ('semantic', 'both') else [None]*len(group)
+                    generated = [({'oracle_length_conditioned': True, **w} if w is not None else None, f)
+                                 for w, f in zip(where, semantic)]
+                results.update(zip(selected, generated))
+        if set(results) != set(range(len(block))):
+            raise ValueError('prediction coverage mismatch')
+        for i, e in enumerate(block):
+            yield e, results[i]
+
+
 def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest, *,
                   epoch, step, split_manifest_identity):
     """Exactly one supplied train batch; every seen validation query at every K.
 
-    Episodes are executed sequentially, like training, to retain full multi-image
+    Episodes use same-K physical batches and retain full multi-image
     contexts. No training sampler is consumed. Partial files remain identifiable
     on failure and no successful history event is emitted for incomplete coverage.
     """
@@ -72,6 +112,9 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
               f"K={list(k_values)} | total_episodes={len(queries) * len(k_values)}", flush=True)
     else:
         print('[EVAL][PRED] validation predictions disabled', flush=True)
+    cache_settings = bundle.config['validation']['cache']
+    cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
+        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
     python_rng = random.getstate()
     try:
         # Greedy inference normally consumes no RNG. Preserve it explicitly so
@@ -86,11 +129,12 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
                     if split == 'train':
                         total = len(train_batch)
                         interval = progress_interval(total)
-                        for episode in train_batch:
+                        for episode, generated in prediction_batches(bundle, train_batch,
+                                budget=settings['semantic_max_new_tokens'], cache=cache):
                             count += 1
                             record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                 split=split, index=count, budget=settings['semantic_max_new_tokens'],
-                                split_manifest_identity=split_manifest_identity)
+                                split_manifest_identity=split_manifest_identity, generated=generated)
                             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                             stream.flush()
                             if should_report(count, total, interval):
@@ -102,13 +146,14 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
                         for k in k_values:
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
-                            for query_index, query in enumerate(queries, 1):
+                            episodes = [frozen_episode(query, train_by_id, manifest, k,
+                                unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
+                            for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
+                                    budget=settings['semantic_max_new_tokens'], cache=cache), 1):
                                 count += 1
-                                episode = frozen_episode(query, train_by_id, manifest, k,
-                                    unseen_subjects=bundle.config['data']['unseen_subjects'])
                                 record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                     split=split, index=count, budget=settings['semantic_max_new_tokens'],
-                                    split_manifest_identity=split_manifest_identity)
+                                    split_manifest_identity=split_manifest_identity, generated=generated)
                                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                                 stream.flush()
                                 if should_report(query_index, len(queries), interval):
@@ -123,6 +168,7 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
                 partial.replace(path)
                 counts[split], paths[split] = count, str(path)
     finally:
+        cache.close()
         random.setstate(python_rng)
     prediction_time = time.perf_counter() - prediction_started
     print(f"[EVAL][PRED] done | time={prediction_time:.2f}s", flush=True)

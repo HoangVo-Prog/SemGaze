@@ -26,6 +26,7 @@ def read_records(path):
 
 def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 8)
     bundle.config['training']['per_device_train_batch_size'] = 2
     train, queries, manifest = validation_data(episode)
@@ -67,6 +68,7 @@ def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatc
 
 def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)  # explicit small test budget
     run_flat_training_step(bundle, episode)
     train, queries, manifest = validation_data(episode)
@@ -130,6 +132,7 @@ def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path,
 
 def test_train_predictions_stop_at_first_batch_not_accumulation(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)
     loop.resolve_epoch_schedule(bundle.config, 2, 2)
     bundle.config['training'].update(per_device_train_batch_size=2, gradient_accumulation_steps=3)
@@ -158,6 +161,7 @@ def test_train_predictions_stop_at_first_batch_not_accumulation(tmp_path, episod
 
 def test_prediction_failure_restores_modes_rng_and_keeps_partial_file(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)
     train, queries, manifest = validation_data(episode)
     rng, python_rng = torch.get_rng_state().clone(), random.getstate()

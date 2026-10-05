@@ -60,25 +60,27 @@ def frozen_vision_is_reusable(model):
     return True
 
 
-def prepare_semantic_batch(bundle, queries, states, *, where=None):
+def prepare_semantic_batch(bundle, queries, states, *, where=None, generation_budget=None, reuse_query_vision=None):
     """One native prompt per sample, followed by differentiable batched assembly."""
     if not queries or len(queries) != len(states):
         raise ValueError('query/state batch counts differ')
-    reuse = (where is not None and bundle.config['training'].get('reuse_query_vision', True)
+    reuse = (where is not None and (bundle.config['training'].get('reuse_query_vision', True)
+             if reuse_query_vision is None else reuse_query_vision)
              and frozen_vision_is_reusable(bundle.model))
     natives, embeddings, metadata = [], [], []
     image_cache = where.batch.image_cache if where is not None else {}
     for b, (query, state) in enumerate(zip(queries, states)):
         prompt = build_flat_prompt(query)
         native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
-            build_flat_target(query.semantic), prompt=prompt, image_cache=image_cache)
+            build_flat_target(query.semantic) if generation_budget is None else None,
+            prompt=prompt, image_cache=image_cache)
         n = len(query.x_px)
         length = native.inputs['input_ids'].shape[1]
-        if length + n > bundle.context_limit:
+        if length + n + (generation_budget or 0) > bundle.context_limit:
             raise SemanticContextOverflowError(sample_id=query.record_id, native_prompt_length=native.response_start,
                 number_of_inserted_states=n, number_of_gold_groups=len(query.semantic.why_groups),
                 final_prompt_length=native.response_start+n, target_length=length-native.response_start,
-                generation_budget=None, context_limit=bundle.context_limit)
+                generation_budget=generation_budget, context_limit=bundle.context_limit)
         if state.shape != (n, bundle.projector[0].in_features):
             raise ValueError('full chronological R shape differs from [N,d_model]')
         ids = native.inputs['input_ids']
@@ -100,22 +102,28 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None):
         natives.append(native)
         metadata.append(dict(semantic_length=length+n,
             supervised_semantic_tokens=int((native.inputs['labels'][:, 1:] != -100).sum()),
-            reused_query_vision=reuse))
+            reused_query_vision=reuse, response_offsets=native.response_offsets))
     fused, positions = insert_states_batch(embeddings, [s.inputs['attention_mask'] for s in natives],
         [s.inputs['labels'] for s in natives], states, [s.boundaries for s in natives])
     # Keep host labels for selected index discovery; move only the backbone inputs.
     if not reuse:
         fused['pixel_values'] = torch.cat([s.inputs['pixel_values'] for s in natives])
+    if generation_budget is not None:
+        fused.pop('labels')
     return fused, positions, metadata
 
 
-def forward_flat_batch(bundle, queries, states, *, where=None, profiler=None):
+def forward_flat_batch(bundle, queries, states, *, where=None, profiler=None, reuse_query_vision=None,
+                       response_offsets=False):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('semantic_preparation'):
-        inputs, positions, metadata = prepare_semantic_batch(bundle, queries, states, where=where)
+        inputs, positions, metadata = prepare_semantic_batch(bundle, queries, states, where=where,
+                                                            reuse_query_vision=reuse_query_vision)
     host_labels = inputs['labels']
     with stage('semantic_forward'):
         outputs = forward_backbone(bundle.model, to_model_device(
             {k: v for k, v in inputs.items() if k != 'labels'}, bundle.model))
         loss = compute_selected_causal_nll(outputs.last_hidden_state, host_labels, bundle.model.get_output_embeddings())
+    if not response_offsets:
+        metadata = [{k: v for k, v in row.items() if k != 'response_offsets'} for row in metadata]
     return loss, positions, metadata

@@ -50,7 +50,8 @@ def collate_native(processor, messages, image_paths, target=None, *, prompt=None
         [*messages, {'role': 'assistant', 'content': target}], tokenize=False, add_generation_prompt=False)
     if not full.startswith(prefix):
         raise ValueError('native training template does not preserve the generation prefix')
-    encoded = processor(text=[full], images=load_images(image_paths, image_cache), return_tensors='pt',
+    active_processor = image_cache.processor_for(processor, image_paths) if hasattr(image_cache, 'processor_for') else processor
+    encoded = active_processor(text=[full], images=load_images(image_paths, image_cache), return_tensors='pt',
                         crop_to_patches=False, size={'height': 448, 'width': 448},
                         add_special_tokens=False)
     pixels = encoded['pixel_values']
