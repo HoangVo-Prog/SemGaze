@@ -1,0 +1,61 @@
+{
+  "variant": "baseline",
+  "physical_batch_size": 1,
+  "optimizer_episode_count": 1,
+  "tiny_model": true,
+  "device": "cpu",
+  "measured_steps": 10,
+  "warmup_steps": 2,
+  "checkpointing": "on",
+  "K": [
+    1
+  ],
+  "fixations": [
+    4
+  ],
+  "images": [
+    2
+  ],
+  "episodes_per_second": 2.4484999656731232,
+  "seconds_per_episode": 0.4084133199998178,
+  "stage_seconds": {
+    "where": 1.2075936999754049,
+    "semantic": 0.867313299968373,
+    "backward": 1.810957999987295,
+    "optimizer": 0.08536669999011792,
+    "total": 4.084133199998178
+  },
+  "memory_bytes": {
+    "allocated": null,
+    "reserved": null,
+    "peak_allocated": null,
+    "peak_reserved": null
+  },
+  "episodes": [
+    {
+      "record_id": "fixture::subject1::query",
+      "K": 1,
+      "where_length": 948,
+      "semantic_length": 751,
+      "image_count": 2,
+      "fixation_count": 4,
+      "supervised_where_tokens": 59,
+      "supervised_semantic_tokens": 161
+    }
+  ],
+  "runtime": {
+    "text_attention": "sdpa",
+    "vision_attention": "sdpa",
+    "vocabulary_size": 400,
+    "dtype": "torch.float32",
+    "checkpointed_modules": [
+      "model.vision_tower.encoder",
+      "model.vision_tower.encoder.layer.0",
+      "model.language_model",
+      "model.language_model.layers.0",
+      "model.language_model.layers.1"
+    ],
+    "trainable_parameters": 9376,
+    "optimizer_state_bytes": 75144
+  }
+}

@@ -57,11 +57,63 @@ or unresolved frame metadata fail explicitly.
 ```
 
 These are example horizons, not scientific defaults. Every training run executes
-the fixture gradient gate before optimization. Episodes are accumulated sequentially
-with an explicit episode mean. WHERE overflow resamples the complete episode;
+the fixture gradient gate before optimization. `per_device_train_batch_size` is a
+true physical GPU episode batch: one WHERE backbone forward and one semantic
+backbone forward per batch. `gradient_accumulation_steps` counts these physical
+batches per optimizer update. Each branch averages shifted supervised-token NLL
+within each episode, then averages episode losses; long targets get no extra
+weight. Effective batch size is physical B * accumulation (world size is currently 1).
+WHERE overflow resamples only the rejected complete episode;
 semantic overflow fails. By default, checkpoints include processor/tokenizer, PEFT, separate
 END_FIX rows, P_E, optimizer, scheduler, RNG/sampler state, resolved config, and
 split identity. Checkpoint component flags control saved artifacts; incomplete exports cannot reconstruct the full model. Resume restores optimizer moments, RNG and history, while applying the resolved optimizer hyperparameters and schedule. Model/token structure and optimizer implementation must remain compatible.
+
+### Training throughput and profiling
+
+Training computes full-vocabulary logits only at supervised predictor positions
+and reads final LM hidden states directly. The deprecated
+`where.supervision.output_hidden_states` field remains readable in old checkpoints;
+training always disables all-layer output collection. Trainable parameter names
+and checkpoint tensors are unchanged. Keep non-reentrant checkpointing enabled
+until the target GPU is profiled.
+
+`length_aware_batching: true` stably groups already-sampled episodes by K and coarse
+length only **within one optimizer minibatch**. It preserves every accepted episode,
+support order and sampler RNG state. Floating-point summation order and dropout
+RNG assignment can differ with physical batching; deterministic parity tests disable
+dropout while production retains its configured probabilities. Prediction snapshots
+retain their original sampling-order membership.
+
+`reuse_query_vision: true` reuses this batch's frozen projected query image features
+when preprocessing is identical and vision has no active stochastic dropout. It
+automatically disables reuse if either vision producer becomes trainable. Images
+are decoded once per optimizer minibatch, and no image/language cache survives an
+optimizer step. Native preprocessing is still run per prompt. Gradient diagnostics
+run at smoke/preflight, the first optimizer step, and optionally every
+`gradient_diagnostics_every` steps (0 disables periodic scans). Aggregate non-finite
+gradient checking runs at every optimizer step, including when clipping is disabled.
+
+Use `configs/flat_throughput.yaml` for the required released DeepGaze adapter and
+bf16 A100 run. The fresh-initialization example remains a separate user choice.
+The profiling command synchronizes only at explicit profiling boundaries, records
+live/peak allocated and reserved memory separately, component timings, episode
+lengths, images, K, fixation counts, supervised counts, attention backends and
+optimizer-state bytes. It never empties the allocator cache.
+
+```powershell
+python scripts/profile_training.py --config configs/flat_throughput.yaml --variant baseline --batch-size 1 --output runs/profile-old-b1.json
+python scripts/profile_training.py --config configs/flat_throughput.yaml --variant optimized --batch-size 1 --output runs/profile-new-b1.json
+python scripts/profile_training.py --config configs/flat_throughput.yaml --variant optimized --batch-size 2 --output runs/profile-new-b2.json
+```
+
+Repeat with `--checkpointing off` for the requested checkpointing matrix, and with
+larger B only if memory headroom permits. `--workload episodes.json` accepts an
+array of normalized episodes (exactly `--batch-size` entries); retain the same
+episode pool and seed for comparisons. The default is the K=1 fixture. Use
+`--tiny` for CPU engineering measurements; these cannot establish 8B/A100 capacity
+or speed. No attention backend, allocator, optimizer precision, or checkpointing
+retuning is selected without target measurements. See
+`documents/TRAINING_THROUGHPUT_AUDIT.md` and `documents/TRAINING_THROUGHPUT_RESULTS.md`.
 
 ### Epoch validation and logging
 

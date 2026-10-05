@@ -91,7 +91,7 @@ where:
     support_assistant_labels: ignore
     query_assistant_labels: supervise
     supervise_query_end_fix: true
-    output_hidden_states: true
+    output_hidden_states: false # final backbone tensor only; legacy true is accepted on resume
     use_cache: false
 
 state:
@@ -134,9 +134,12 @@ training:
   max_episode_retries: 1000
 
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 1
-  gradient_checkpointing: false
+  per_device_train_batch_size: 1 # physical GPU episode batch
+  gradient_accumulation_steps: 1 # physical batches per optimizer update
+  gradient_checkpointing: true
+  gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
+  length_aware_batching: true # group within this optimizer minibatch only
+  reuse_query_vision: true # requires frozen deterministic producers and identical pixels
   max_grad_norm: 1.0
   weight_decay: 0.01
   adam_beta1: 0.9

@@ -194,5 +194,9 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
     diagnostics.update(adapter_trainable=True, end_fix_token_count=1, end_fix_token_id=token_ids[0],
                        embeddings_tied=tied, base_commit=getattr(base.config, '_commit_hash', None))
     (output_dir / 'preflight.json').write_text(json.dumps(diagnostics, indent=2), encoding='utf-8')
-    return FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
-                           config, diagnostics, output_dir)
+    bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
+                             config, diagnostics, output_dir)
+    from semgaze.training.profiling import runtime_metadata
+    diagnostics.update(runtime_metadata(bundle))
+    (output_dir / 'preflight.json').write_text(json.dumps(diagnostics, indent=2), encoding='utf-8')
+    return bundle

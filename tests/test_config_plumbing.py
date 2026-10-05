@@ -167,7 +167,9 @@ def test_batch_accumulation_step_eval_logging_and_checkpoint_controls(tmp_path, 
     monkeypatch.setattr(loop,'validate_epoch',lambda *a:evaluations.append(1) or dict.fromkeys(EVAL_KEYS,1.0) | {'eval_queries':1,'eval_episodes':1})
     monkeypatch.setattr(loop,'save_checkpoint',lambda *a,**kw:pytest.fail('saving was disabled'))
     run_training_loop(bundle,FixedSampler(episode),{},[],{},split_manifest_identity='fixture',max_steps=3,save_every=None)
-    assert len(calls) == 18 and all(c['loss_scale'] == 1/6 for c in calls)
+    assert len(calls) == 9 and all(c['loss_scale'] == 1/3 for c in calls)
+    assert all(len(c['where_batch'].episodes) == 2 for c in calls)
+    assert [i for i, c in enumerate(calls) if c['diagnostics']] == [2]
     assert sum(c['zero_grad'] for c in calls) == 3 and len(evaluations) == 1
     entries = [json.loads(line) for line in (tmp_path/'custom/log.jsonl').read_text().splitlines()]
     assert [e['step'] for e in entries if e['event']=='train_step'] == [2,3]
@@ -321,9 +323,10 @@ def test_evaluate_entrypoint_inherits_checkpoint_and_honors_overrides(tmp_path, 
 def test_cache_setting_reaches_where_forward(tmp_path, episode, monkeypatch):
     from semgaze.where.forward import forward_where
     bundle=tiny_bundle(tmp_path,episode)
-    bundle.config=resolve_config(bundle.config,{'where':{'supervision':{'use_cache':True}}})
+    bundle.config=resolve_config(bundle.config,{'where':{'supervision':{'use_cache':True}},
+                                               'training':{'gradient_checkpointing':False}})
     seen=[]
-    hook=bundle.model.register_forward_pre_hook(lambda m,a,kw:seen.append(kw['use_cache']),with_kwargs=True)
+    hook=bundle.model.get_base_model().model.register_forward_pre_hook(lambda m,a,kw:seen.append(kw['use_cache']),with_kwargs=True)
     try:
         forward_where(bundle,episode)
     finally:

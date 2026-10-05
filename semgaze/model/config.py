@@ -69,7 +69,6 @@ def validate_config(config):
         'where.supervision.support_assistant_labels': 'ignore',
         'where.supervision.query_assistant_labels': 'supervise',
         'where.supervision.supervise_query_end_fix': True,
-        'where.supervision.output_hidden_states': True,
         'state.readout_layer': 'final_language_model_layer',
         'state.readout_position': 'query_end_fix_token_position',
         'state.projector.type': 'linear_layernorm',
@@ -119,6 +118,12 @@ def validate_config(config):
                     raise ValueError(f'{section}.{key} must be boolean')
     if type(config['where']['supervision']['use_cache']) is not bool:
         raise ValueError('where.supervision.use_cache must be boolean')
+    if type(config['where']['supervision']['output_hidden_states']) is not bool:
+        raise ValueError('where.supervision.output_hidden_states must be boolean (legacy compatibility field)')
+    positive_int(config['training']['gradient_diagnostics_every'], 'training.gradient_diagnostics_every', minimum=0)
+    for key in ('length_aware_batching', 'reuse_query_vision'):
+        if type(config['training'][key]) is not bool:
+            raise ValueError(f'training.{key} must be boolean')
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']

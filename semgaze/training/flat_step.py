@@ -1,7 +1,8 @@
 import torch
 from semgaze.data.schema import normalized_episode_from_dict, require_seen_training_episode
-from semgaze.where.forward import forward_where
-from semgaze.semantic.flat.forward import forward_flat
+from semgaze.where.forward import forward_where_batch
+from semgaze.semantic.flat.forward import forward_flat_batch
+from contextlib import nullcontext
 
 
 def make_optimizer(bundle):
@@ -37,30 +38,11 @@ def gradient_diagnostics(bundle):
             'end_fix_output_grad_finite': finite(bundle.output_row)}
 
 
-def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
-                           zero_grad=True, loss_scale=1.0):
-    bundle = model_bundle
-    if isinstance(episode, dict):
-        episode = normalized_episode_from_dict(episode)
-    require_seen_training_episode(episode, bundle.config['data']['unseen_subjects'])
-    bundle.model.train()
-    bundle.projector.train()
-    if zero_grad:
-        bundle.model.zero_grad(set_to_none=True)
-        bundle.projector.zero_grad(set_to_none=True)
-    where = forward_where(bundle, episode)
-    states = bundle.projector(where.states)
-    if not where.states.requires_grad or not states.requires_grad:
-        raise RuntimeError('WHERE F / projected R were detached')
-    loss_flat, positions = forward_flat(bundle, episode.query, states)
-    t = bundle.config['training']
-    loss_total = t['lambda_where'] * where.loss_where + t['lambda_sem'] * loss_flat
-    if not all(bool(torch.isfinite(loss)) for loss in (where.loss_where, loss_flat, loss_total)):
-        raise RuntimeError('non-finite joint loss')
-    (loss_total * loss_scale).backward()
-    if any(p.grad is not None and not bool(torch.isfinite(p.grad).all()) for p in bundle.trainable_parameters()):
-        raise RuntimeError('non-finite parameter gradient')
+def check_gradients(bundle):
     diagnostics = gradient_diagnostics(bundle)
+    if any(p.grad is not None and not bool(torch.isfinite(p.grad).all())
+           for p in bundle.trainable_parameters()):
+        raise RuntimeError('non-finite parameter gradient')
     smoke = bundle.config['smoke']
     checks = {
         'require_lora_gradient': diagnostics['lora_grad_finite'],
@@ -70,17 +52,76 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     }
     if any(smoke[key] and not valid for key, valid in checks.items()):
         raise RuntimeError(f'gradient contract failed: {diagnostics}')
+    return diagnostics
+
+
+def clip_and_check_gradients(bundle):
+    # One aggregate finite check per optimizer step, even when clipping is disabled.
+    limit = bundle.config['training']['max_grad_norm']
+    return torch.nn.utils.clip_grad_norm_(bundle.trainable_parameters(),
+        float('inf') if limit is None else limit, error_if_nonfinite=True)
+
+
+def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
+                           zero_grad=True, loss_scale=1.0, diagnostics=True,
+                           where_batch=None, profiler=None):
+    """One vectorized WHERE and semantic forward, one backward per physical batch.
+
+    A scalar episode keeps the public smoke/validation-facing result convention.
+    Lists/tuples are physical batches, never sequential model execution.
+    """
+    bundle = model_bundle
+    single = not isinstance(episode, (list, tuple))
+    episodes = [episode] if single else list(episode)
+    episodes = [normalized_episode_from_dict(e) if isinstance(e, dict) else e for e in episodes]
+    if not episodes:
+        raise ValueError('empty physical episode batch')
+    for e in episodes:
+        require_seen_training_episode(e, bundle.config['data']['unseen_subjects'])
+    bundle.model.train()
+    bundle.projector.train()
+    if zero_grad:
+        bundle.model.zero_grad(set_to_none=True)
+        bundle.projector.zero_grad(set_to_none=True)
+    stage = profiler.stage if profiler is not None else lambda name: nullcontext()
+    with stage('where'):
+        where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler)
+    with stage('semantic'):
+        # One shared projector on all valid states; no padding enters P_E.
+        counts = [len(e.query.x_px) for e in episodes]
+        projected = bundle.projector(torch.cat(where.states, dim=0))
+        states = list(projected.split(counts))
+        if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
+            raise RuntimeError('WHERE F / projected R were detached')
+        flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
+                                                               where=where, profiler=profiler)
+        t = bundle.config['training']
+        episode_total = t['lambda_where'] * where.episode_losses + t['lambda_sem'] * flat.episode_losses
+        loss_total = episode_total.mean()
+    if diagnostics and not bool(torch.isfinite(torch.stack((where.loss_where, flat.loss, loss_total))).all()):
+        raise RuntimeError('non-finite joint loss')
+    with stage('backward'):
+        (loss_total * loss_scale).backward()
+    checks = check_gradients(bundle) if diagnostics else {}
     if optimizer_step:
         if bundle.optimizer is None:
             bundle.optimizer = make_optimizer(bundle)
-        if t['max_grad_norm'] is not None:
-            torch.nn.utils.clip_grad_norm_(bundle.trainable_parameters(), t['max_grad_norm'], error_if_nonfinite=True)
-        bundle.optimizer.step()
-        if bundle.scheduler is not None:
-            bundle.scheduler.step()
-    return {'loss_where': where.loss_where.detach(), 'loss_flat': loss_flat.detach(),
-            'loss_total': loss_total.detach(), 'query_fixation_count': len(episode.query.x_px),
-            'query_end_fix_state_count': len(where.states), 'supervised_query_end_fix_count': len(where.positions),
-            'supervised_support_end_fix_count': int((where.batch.inputs['labels'][:, :where.batch.response_start] == bundle.end_fix_id).sum()),
-            'projector_output_shape': tuple(states.shape), 'inserted_state_count': len(positions),
-            'embeddings_untied': not bundle.embeddings_tied, **diagnostics}
+        with stage('optimizer'):
+            clip_and_check_gradients(bundle)
+            bundle.optimizer.step()
+            if bundle.scheduler is not None:
+                bundle.scheduler.step()
+    metadata = [{k: v for k, v in m.items() if k != 'semantic_target'} | sm
+                for m, sm in zip(where.batch.metadata, semantic_metadata)]
+    result = {'loss_where': where.loss_where.detach(), 'loss_flat': flat.loss.detach(),
+              'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
+              'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
+    for key, values in (
+        ('query_fixation_count', counts), ('query_end_fix_state_count', [len(f) for f in where.states]),
+        ('supervised_query_end_fix_count', [len(p) for p in where.positions]),
+        ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum())
+                                             for s in where.batch.samples]),
+        ('projector_output_shape', [tuple(r.shape) for r in states]),
+        ('inserted_state_count', [len(p) for p in positions])):
+        result[key] = values[0] if single else values
+    return result

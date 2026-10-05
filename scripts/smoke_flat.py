@@ -257,6 +257,13 @@ def run_with_model(args: argparse.Namespace) -> None:
         assert bool(get("end_fix_output_grad_finite"))
 
     print("[OK] configured LoRA initialized trainably")
+    from semgaze.data.schema import normalized_episode_from_dict
+    normalized = normalized_episode_from_dict(fixture)
+    batched = run_flat_training_step(bundle, [normalized, normalized], optimizer_step=args.step)
+    assert batched['query_end_fix_state_count'] == [n, n]
+    assert batched['inserted_state_count'] == [n, n]
+    assert batched['projector_grad_nonzero']
+    print('[OK] true physical B=2 joint backward and semantic-to-WHERE gradient contract')
     print("[OK] END_FIX atomic and trainable contract")
     print(f"[OK] query fixation/state count = {n}")
     print(f"[OK] P_E output shape = {tuple(get('projector_output_shape'))}; {n} aligned state insertions")

@@ -38,7 +38,10 @@ class RowHead(nn.Module):
         replacement = F.linear(hidden, self.end_fix_row.to(hidden.dtype).unsqueeze(0))
         if getattr(self.base, 'bias', None) is not None:
             replacement = replacement + self.base.bias[self.token_id]
-        return torch.cat((logits[..., :self.token_id], replacement, logits[..., self.token_id + 1:]), dim=-1)
+        # Linear backward needs its input/weight, not its output. CopySlices
+        # replaces just this column and zeros its frozen-base gradient contribution.
+        logits[..., self.token_id:self.token_id + 1] = replacement
+        return logits
 
 
 def install_trainable_rows(model, token_id):

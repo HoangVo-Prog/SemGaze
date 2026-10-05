@@ -142,6 +142,8 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
         config, metadata['diagnostics'], Path(output_dir or path))
     restore_checkpoint_state(bundle, path, split_manifest_identity=split_manifest_identity)
+    from semgaze.training.profiling import runtime_metadata
+    bundle.diagnostics.update(runtime_metadata(bundle))
     if output_dir is not None:
         config['runtime']['output_dir'] = str(Path(output_dir).resolve())
         write_run_config(config, output_dir)

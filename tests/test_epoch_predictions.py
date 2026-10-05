@@ -180,6 +180,7 @@ def test_prediction_failure_restores_modes_rng_and_keeps_partial_file(tmp_path, 
 @pytest.mark.parametrize('budget', [None, 0, -1, True])
 def test_prediction_budget_is_explicit(tmp_path, episode, budget):
     config = tiny_bundle(tmp_path, episode).config
+    config['evaluation']['predictions']['semantic_max_new_tokens'] = None
     with pytest.raises(ValueError, match='semantic_max_new_tokens'):
         resolve_prediction_settings(config, budget)
     resolve_prediction_settings(config, 8)

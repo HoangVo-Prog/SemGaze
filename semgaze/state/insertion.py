@@ -1,4 +1,5 @@
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 
 def insert_states(inputs_embeds, attention_mask, labels, states, boundaries):
@@ -26,3 +27,22 @@ def insert_states(inputs_embeds, attention_mask, labels, states, boundaries):
     targets.append(labels[:, previous:])
     return {'inputs_embeds': torch.cat(chunks, 1), 'attention_mask': torch.cat(masks, 1),
             'labels': torch.cat(targets, 1)}, tuple(positions)
+
+
+def insert_states_batch(embeddings, attention_masks, labels, states, boundaries):
+    """Assemble unpadded samples and right-pad once; states remain in autograd.
+
+    Host masks/labels allow boundary checks without a CUDA synchronization.
+    No model execution occurs in this metadata/embedding assembly loop.
+    """
+    size = len(embeddings)
+    if not size or any(len(x) != size for x in (attention_masks, labels, states, boundaries)):
+        raise ValueError('semantic batch field counts differ')
+    rows, positions = [], []
+    for values in zip(embeddings, attention_masks, labels, states, boundaries):
+        row, pos = insert_states(*values)
+        rows.append(row)
+        positions.append(pos)
+    fused = {key: pad_sequence([row[key][0] for row in rows], batch_first=True, padding_value=pad)
+             for key, pad in (('inputs_embeds', 0), ('attention_mask', 0), ('labels', -100))}
+    return fused, positions

@@ -1,0 +1,70 @@
+{
+  "variant": "optimized",
+  "physical_batch_size": 1,
+  "optimizer_episode_count": 1,
+  "tiny_model": true,
+  "device": "cpu",
+  "K": [
+    1
+  ],
+  "fixations": [
+    4
+  ],
+  "images": [
+    2
+  ],
+  "episodes_per_second": 0.9139838969553075,
+  "seconds_per_episode": 1.0941111800013459,
+  "stage_seconds": {
+    "where": 2.2936703000304988,
+    "semantic": 3.9621508999698563,
+    "backward": 4.373321799983387,
+    "optimizer": 0.21785840000666212,
+    "total": 10.94111180001346
+  },
+  "memory_bytes": {
+    "allocated": null,
+    "reserved": null,
+    "peak_allocated": null,
+    "peak_reserved": null
+  },
+  "episodes": [
+    {
+      "record_id": "fixture::subject1::query",
+      "K": 1,
+      "fixation_count": 4,
+      "where_length": 948,
+      "response_start": 888,
+      "response_length": 59,
+      "supervised_where_tokens": 59,
+      "image_count": 2,
+      "image_paths": [
+        "tests/fixtures/images/support_1.jpg",
+        "tests/fixtures/images/query.jpg"
+      ],
+      "image_offset": 0,
+      "support_image_indices": [
+        0
+      ],
+      "query_image_index": 1,
+      "semantic_length": 751,
+      "supervised_semantic_tokens": 161,
+      "reused_query_vision": true
+    }
+  ],
+  "runtime": {
+    "text_attention": "sdpa",
+    "vision_attention": "sdpa",
+    "vocabulary_size": 400,
+    "dtype": "torch.float32",
+    "checkpointed_modules": [
+      "model.vision_tower.encoder",
+      "model.vision_tower.encoder.layer.0",
+      "model.language_model",
+      "model.language_model.layers.0",
+      "model.language_model.layers.1"
+    ],
+    "trainable_parameters": 9376,
+    "optimizer_state_bytes": 75144
+  }
+}

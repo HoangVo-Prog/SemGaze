@@ -33,7 +33,7 @@ def test_validation_losses_are_flat_diagnostics_and_preserve_training(tmp_path, 
     modes = [m.training for root in (bundle.model, bundle.projector) for m in root.modules()]
     rng = torch.get_rng_state().clone()
     calls = []
-    hook = bundle.model.register_forward_pre_hook(lambda *args: calls.append(torch.is_grad_enabled()))
+    hook = bundle.model.get_base_model().model.register_forward_pre_hook(lambda *args: calls.append(torch.is_grad_enabled()))
     try:
         result = evaluate_validation_episode(bundle, episode)
     finally:

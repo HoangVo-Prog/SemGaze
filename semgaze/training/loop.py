@@ -6,8 +6,8 @@ import torch
 from semgaze.evaluation.validation import EVAL_KEYS, validate_epoch
 from semgaze.evaluation.predictions import predict_epoch, format_prediction_summary, resolve_prediction_settings
 from semgaze.model.checkpoint import save_checkpoint
-from semgaze.training.flat_step import run_flat_training_step
-from semgaze.where.collator import WhereContextOverflowError
+from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
+from semgaze.training.batching import sample_optimizer_batches
 
 
 def _format_loss(value):
@@ -73,45 +73,40 @@ def run_training_loop(bundle, sampler, train_by_id, validation_records, manifest
             losses, rejected = [], 0
             component_losses = {'loss_where': [], 'loss_flat': []}
             diagnostic_losses = {key: [] for key in ('loss_what', 'loss_why', 'loss_how')}
-            prediction_batch = []
-            for micro in range(episodes_per_step):
-                while True:
-                    episode = sampler.sample()
-                    try:
-                        result = run_flat_training_step(bundle, episode, zero_grad=(micro == 0),
-                            loss_scale=1 / episodes_per_step)
-                        losses.append(float(result['loss_total']))
-                        for key in component_losses:
-                            if key in result and result[key] is not None:
-                                component_losses[key].append(float(result[key]))
-                        for key in diagnostic_losses:
-                            if key in result and result[key] is not None:
-                                diagnostic_losses[key].append(float(result[key]))
-                        if len(prediction_batch) < prediction_capacity:
-                            prediction_batch.append(episode)
-                        break
-                    except WhereContextOverflowError:
-                        rejected += 1
-                        if rejected >= t['max_episode_retries']:
-                            raise RuntimeError(f"{rejected} complete WHERE episode overflows; inspect context feasibility")
+            batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
+            prediction_batch = sampled_episodes[:prediction_capacity]
+            interval = t.get('gradient_diagnostics_every', 0)
+            diagnose = step == start or (interval > 0 and (step + 1) % interval == 0)
+            for micro, batch in enumerate(batches):
+                result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
+                    loss_scale=1 / t['gradient_accumulation_steps'], where_batch=batch,
+                    diagnostics=diagnose and micro == len(batches) - 1)
+                losses.append(result['loss_total'])
+                for key in component_losses:
+                    if key in result and result[key] is not None:
+                        component_losses[key].append(result[key])
+                for key in diagnostic_losses:
+                    if key in result and result[key] is not None:
+                        diagnostic_losses[key].append(result[key])
             if prediction_capacity:
                 recent_episodes = (recent_episodes + prediction_batch)[-prediction_capacity:]
-            if t['max_grad_norm'] is not None:
-                torch.nn.utils.clip_grad_norm_(bundle.trainable_parameters(), t['max_grad_norm'], error_if_nonfinite=True)
+            clip_and_check_gradients(bundle)
             bundle.optimizer.step()
             bundle.scheduler.step()
             step_time = time.perf_counter() - step_started
             entry = {'event': 'train_step', 'step': step + 1,
                      'epoch': (step + 1) / steps_per_epoch,
-                     'loss_total': sum(losses) / len(losses),
+                     'loss_total': float(sum(losses) / len(losses)),
                      'rejected_where_episodes': rejected,
                      'learning_rate': float(bundle.optimizer.param_groups[0]['lr']),
-                     'step_time_sec': step_time}
+                     'step_time_sec': step_time, 'physical_batch_size': t['per_device_train_batch_size'],
+                     'gradient_accumulation_steps': t['gradient_accumulation_steps'],
+                     'episodes_per_second': episodes_per_step / step_time}
             for key, values in component_losses.items():
-                entry[key] = sum(values) / len(values) if values else None
+                entry[key] = float(sum(values) / len(values)) if values else None
             for key, values in diagnostic_losses.items():
                 if values:
-                    entry[key] = sum(values) / len(values)
+                    entry[key] = float(sum(values) / len(values))
             if (step + 1) % logging['every_steps'] == 0 or step + 1 == max_steps:
                 bundle.trainer_history.append(entry)
                 stream.write(json.dumps(entry, allow_nan=False) + '\n')

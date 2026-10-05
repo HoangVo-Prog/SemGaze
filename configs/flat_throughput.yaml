@@ -1,0 +1,15 @@
+# Continued released-adapter configuration for Section A acceptance.
+# Missing values inherit defaults.yaml. Adapter LFS payload and CUDA are required.
+experiment:
+  name: semgaze_flat_throughput
+model:
+  base_model: OpenGVLab/InternVL3_5-8B-HF
+  initialization_adapter: DeepGaze-VL/model/visual_search_adapter
+  adapter_load_mode: continue_trainable
+training:
+  precision: bf16
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+evaluation:
+  strategy: 'no'
