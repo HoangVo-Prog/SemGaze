@@ -93,8 +93,6 @@ def validate_real_config(config):
     model, training = config['model'], config['training']
     if model['base_model'] != 'OpenGVLab/InternVL3_5-8B-HF':
         raise ValueError('benchmark requires OpenGVLab/InternVL3_5-8B-HF')
-    if model['adapter_load_mode'] != 'continue_trainable' or not model['initialization_adapter']:
-        raise ValueError('configure the released DeepGaze adapter with adapter_load_mode: continue_trainable')
     if training['precision'] != 'bf16':
         raise ValueError('benchmark requires configured bf16 precision')
     if config['where']['supervision']['use_cache']:
