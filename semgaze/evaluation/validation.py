@@ -5,6 +5,7 @@ training objectives. No generation-quality metric is defined here.
 """
 from contextlib import contextmanager
 import math
+import time
 import torch
 from torch.nn import functional as F
 from semgaze.data.fewshot import frozen_episode
@@ -12,6 +13,7 @@ from semgaze.data.schema import UNSEEN_SUBJECTS
 from semgaze.where.forward import forward_where
 from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
+from semgaze.evaluation.progress import format_duration, progress_interval, should_report
 
 EVAL_KEYS = ('eval_where', 'eval_what', 'eval_why', 'eval_how', 'eval_flat', 'eval_total')
 
@@ -112,20 +114,39 @@ def validate_epoch(bundle, train_by_id, validation_records, manifest):
     k_values = bundle.config['evaluation']['k_values']
     sums = {key: 0.0 for key in EVAL_KEYS}
     by_k = {}
+    k_times = {}
+    validation_started = time.perf_counter()
+    total_episodes = len(queries) * len(k_values)
+    print(f"[EVAL][LOSS] queries={len(queries)} | K={list(k_values)} | episodes={total_episodes}", flush=True)
     with validation_mode(bundle):
         for k in k_values:
+            k_started = time.perf_counter()
+            interval = progress_interval(len(queries))
+            print(f"[EVAL][LOSS] K={k} | starting | queries={len(queries)}", flush=True)
             subtotal = {key: 0.0 for key in EVAL_KEYS}
-            for query in queries:
+            for index, query in enumerate(queries, 1):
                 episode = frozen_episode(query, train_by_id, manifest, k, unseen_subjects=bundle.config['data']['unseen_subjects'])
                 values = _episode_losses(bundle, episode)
                 for key in EVAL_KEYS:
                     subtotal[key] += values[key]
                     sums[key] += values[key]
+                if should_report(index, len(queries), interval):
+                    elapsed = time.perf_counter() - k_started
+                    rate = elapsed / index
+                    eta = rate * (len(queries) - index)
+                    print(f"[EVAL][LOSS] K={k} | {index}/{len(queries)} | "
+                          f"{100 * index / len(queries):.1f}% | elapsed={format_duration(elapsed)} | "
+                          f"ETA={format_duration(eta)}", flush=True)
+            k_time = time.perf_counter() - k_started
             by_k[str(k)] = {key: value / len(queries) for key, value in subtotal.items()}
             by_k[str(k)]['episodes'] = len(queries)
+            k_times[str(k)] = k_time
+            print(f"[EVAL][LOSS] K={k} | done | time={k_time:.2f}s", flush=True)
     count = len(queries) * len(k_values)
+    validation_time = time.perf_counter() - validation_started
     return {**{key: value / count for key, value in sums.items()}, 'eval_by_k': by_k,
             'k_values': list(k_values), 'eval_queries': len(queries), 'eval_episodes': count,
+            'validation_time_sec': validation_time, 'validation_k_time_sec': k_times,
             'eval_loss_aggregation': 'episode_mean', 'eval_kind': 'teacher_forced_response_nll',
             'eval_component_definition': 'flat_response_token_sections; prefixes/newlines included; EOS in HOW',
             'generation_quality_metrics': 'not configured: project protocol choices remain unresolved'}

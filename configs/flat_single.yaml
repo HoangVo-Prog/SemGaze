@@ -156,7 +156,7 @@ evaluation:
     train_batches: 1
     validation_scope: all_seen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
-    semantic_max_new_tokens: null
+    semantic_max_new_tokens: 32
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
 

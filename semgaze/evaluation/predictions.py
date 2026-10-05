@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import random
+import time
 import torch
 from semgaze.data.fewshot import frozen_episode
 from semgaze.evaluation.flat import evaluate_flat_episode
@@ -9,6 +10,7 @@ from semgaze.evaluation.where import evaluate_where_episode
 from semgaze.evaluation.validation import validation_mode, validation_queries
 from semgaze.semantic.flat.target import build_flat_target
 from semgaze.where.serialization import serialize_xyd_record
+from semgaze.evaluation.progress import format_duration, progress_interval, should_report
 
 
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
@@ -62,36 +64,75 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
     directory.mkdir(parents=True, exist_ok=True)
     paths, counts = {}, {}
+    prediction_by_k = {}
+    prediction_started = time.perf_counter()
+    print(f"[EVAL][PRED] starting training predictions | episodes={len(train_batch)}", flush=True)
+    if queries:
+        print(f"[EVAL][PRED] starting validation predictions | queries={len(queries)} | "
+              f"K={list(k_values)} | total_episodes={len(queries) * len(k_values)}", flush=True)
+    else:
+        print('[EVAL][PRED] validation predictions disabled', flush=True)
     python_rng = random.getstate()
     try:
         # Greedy inference normally consumes no RNG. Preserve it explicitly so
         # even runtime-specific generation internals cannot change training draws.
         with torch.random.fork_rng(), validation_mode(bundle):
-            for split, episodes in (
-                ('train', iter(train_batch)),
-                ('validation', (frozen_episode(q, train_by_id, manifest, k, unseen_subjects=bundle.config['data']['unseen_subjects'])
-                                for k in k_values for q in queries)),
-            ):
+            for split in ('train', 'validation'):
                 path = directory / f'{split}.jsonl'
                 partial = path.with_suffix('.jsonl.partial')
                 count = 0
+                split_started = time.perf_counter()
                 with partial.open('w', encoding='utf-8') as stream:
-                    for count, episode in enumerate(episodes, 1):
-                        record = _prediction_record(bundle, episode, epoch=epoch, step=step,
-                            split=split, index=count, budget=settings['semantic_max_new_tokens'],
-                            split_manifest_identity=split_manifest_identity)
-                        stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
-                        stream.flush()
+                    if split == 'train':
+                        total = len(train_batch)
+                        interval = progress_interval(total)
+                        for episode in train_batch:
+                            count += 1
+                            record = _prediction_record(bundle, episode, epoch=epoch, step=step,
+                                split=split, index=count, budget=settings['semantic_max_new_tokens'],
+                                split_manifest_identity=split_manifest_identity)
+                            stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+                            stream.flush()
+                            if should_report(count, total, interval):
+                                elapsed = time.perf_counter() - split_started
+                                print(f"[EVAL][PRED][TRAIN] {count}/{total} | "
+                                      f"{100 * count / total:.1f}% | elapsed={format_duration(elapsed)} | "
+                                      f"ETA={format_duration(elapsed / count * (total - count))}", flush=True)
+                    else:
+                        for k in k_values:
+                            k_started = time.perf_counter()
+                            interval = progress_interval(len(queries))
+                            for query_index, query in enumerate(queries, 1):
+                                count += 1
+                                episode = frozen_episode(query, train_by_id, manifest, k,
+                                    unseen_subjects=bundle.config['data']['unseen_subjects'])
+                                record = _prediction_record(bundle, episode, epoch=epoch, step=step,
+                                    split=split, index=count, budget=settings['semantic_max_new_tokens'],
+                                    split_manifest_identity=split_manifest_identity)
+                                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+                                stream.flush()
+                                if should_report(query_index, len(queries), interval):
+                                    elapsed = time.perf_counter() - k_started
+                                    print(f"[EVAL][PRED] K={k} | {query_index}/{len(queries)} | "
+                                          f"{100 * query_index / len(queries):.1f}% | "
+                                          f"elapsed={format_duration(elapsed)} | "
+                                          f"ETA={format_duration(elapsed / query_index * (len(queries) - query_index))}", flush=True)
+                            k_time = time.perf_counter() - k_started
+                            prediction_by_k[str(k)] = {'episodes': len(queries), 'prediction_k_time_sec': k_time}
+                            print(f"[EVAL][PRED] K={k} | done | time={k_time:.2f}s", flush=True)
                 partial.replace(path)
                 counts[split], paths[split] = count, str(path)
     finally:
         random.setstate(python_rng)
+    prediction_time = time.perf_counter() - prediction_started
+    print(f"[EVAL][PRED] done | time={prediction_time:.2f}s", flush=True)
     return {'event': 'epoch_predictions', 'epoch': epoch, 'step': step,
             'train_prediction_batches': settings['train_batches'], 'train_prediction_episodes': counts['train'],
             'train_prediction_source': 'final_training_batches_before_evaluation',
             'validation_prediction_queries': len(queries),
             'validation_prediction_episodes': counts['validation'], 'k_values': list(k_values),
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
+            'prediction_time_sec': prediction_time, 'prediction_by_k': prediction_by_k,
             'where_conditioning': 'oracle_length; no query GT trajectory',
             'semantic_conditioning': 'teacher_forced_GT_XYD states; gold WHY groups'}
 
@@ -101,7 +142,8 @@ def format_prediction_summary(entry):
     k_text = ','.join(map(str, entry['k_values']))
     batches = entry['train_prediction_batches']
     batch_word = 'batch' if batches == 1 else 'batches'
-    return (f"Epoch {entry['epoch']} | step {entry['step']} | autoregressive predictions:\n"
+    return (f"[EVAL][PRED] epoch {entry['epoch']} | step {entry['step']} | "
+            f"autoregressive predictions | time={entry.get('prediction_time_sec', 0.0):.2f}s:\n"
             f"  train: {batches} {batch_word} ({entry['train_prediction_episodes']} queries) -> {paths['train']}\n"
             f"  validation: {entry['validation_prediction_queries']} seen queries x K={k_text} "
             f"({entry['validation_prediction_episodes']} episodes) -> {paths['validation']}\n"
