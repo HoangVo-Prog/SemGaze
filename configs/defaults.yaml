@@ -150,7 +150,8 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: epoch # epoch | no (smoke/benchmark only)
+  strategy: epoch # epoch | steps | no (smoke/benchmark only)
+  eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:

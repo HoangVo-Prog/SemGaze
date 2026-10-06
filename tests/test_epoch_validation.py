@@ -99,11 +99,32 @@ def test_epoch_schedule_requires_query_count(tmp_path, episode, query_count):
         resolve_epoch_schedule(cfg, query_count)
 
 
-def test_config_rejects_step_evaluation(tmp_path, episode):
+def test_config_accepts_step_evaluation(tmp_path, episode):
     cfg = tiny_bundle(tmp_path, episode).config
     cfg['evaluation']['strategy'] = 'steps'
-    with pytest.raises(ValueError, match='epoch'):
-        validate_config(cfg)
+    cfg['evaluation']['eval_steps'] = 1000
+    validate_config(cfg)
+
+
+def test_step_evaluation_uses_configured_global_step_interval(tmp_path, episode, monkeypatch):
+    bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['training']['num_train_epochs'] = 1
+    bundle.config['evaluation'].update(strategy='steps', eval_steps=2)
+    bundle.config['evaluation']['predictions'].update(train_batches=0, test_scope='none')
+    bundle.config['checkpoint'].update(save_at_end=False, save_at_epoch_end=False)
+    bundle.optimizer = make_optimizer(bundle)
+    bundle.scheduler = torch.optim.lr_scheduler.LambdaLR(bundle.optimizer, lambda _: 1)
+    evaluations = []
+
+    monkeypatch.setattr(loop, 'run_flat_training_step', lambda *a, **kw: {'loss_total': 1.0})
+    monkeypatch.setattr(loop, 'evaluate_test_epoch', lambda *a: evaluations.append(1) or
+                        dict.fromkeys(EVAL_KEYS, 1.0) | {'test_queries': 1, 'test_episodes': 1})
+
+    run_training_loop(bundle, FixedSampler(episode, count=5), {}, [], {},
+                      split_manifest_identity='fixture', max_steps=None, save_every=None)
+
+    assert [entry['step'] for entry in bundle.trainer_history if entry['event'] == 'epoch_test'] == [2, 4]
+    assert len(evaluations) == 2
 
 
 class FixedSampler:

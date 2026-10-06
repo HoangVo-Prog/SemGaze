@@ -119,8 +119,9 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             clip_and_check_gradients(bundle)
             bundle.optimizer.step()
             bundle.scheduler.step()
+            global_step = step + 1
             step_time = time.perf_counter() - step_started
-            entry = {'event': 'train_step', 'step': step + 1,
+            entry = {'event': 'train_step', 'step': global_step,
                      'epoch': sampler.epoch - 1 + sampler.cursor / sampler.query_count,
                      'query_cursor': sampler.cursor, 'query_count': sampler.query_count,
                      'loss_total': float(sum(losses)),
@@ -134,13 +135,15 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             for key, values in diagnostic_losses.items():
                 if values:
                     entry[key] = float(sum(values))
-            if (step + 1) % logging['every_steps'] == 0 or step + 1 == max_steps:
+            if global_step % logging['every_steps'] == 0 or global_step == max_steps:
                 bundle.trainer_history.append(entry)
                 stream.write(json.dumps(entry, allow_nan=False) + '\n')
                 stream.flush()
                 print(format_train_step(entry, max_steps), flush=True)
             epoch_end = sampler.epoch_complete()
-            should_evaluate = evaluation['strategy'] == 'epoch' and epoch_end
+            should_evaluate = ((evaluation['strategy'] == 'epoch' and epoch_end) or
+                               (evaluation['strategy'] == 'steps' and
+                                global_step % evaluation['eval_steps'] == 0))
             if should_evaluate:
                 evaluation_started = time.perf_counter()
                 print(f"[EVAL] step {step + 1} | starting test evaluation", flush=True)

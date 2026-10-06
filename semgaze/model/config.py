@@ -172,8 +172,10 @@ def validate_config(config):
         raise ValueError('max_grad_norm must be positive or null (disabled)')
     if type(t['gradient_checkpointing']) is not bool:
         raise ValueError('gradient_checkpointing must be an explicit boolean')
-    if evaluation['strategy'] not in ('epoch', 'no'):
-        raise ValueError('evaluation.strategy supports epoch or no (smoke/benchmark only)')
+    if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
+        raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
+    if evaluation['strategy'] == 'steps':
+        positive_int(evaluation.get('eval_steps'), 'evaluation.eval_steps')
     for name, values in [('data.fewshot.k_values',config['data']['fewshot']['k_values']), ('evaluation.k_values',evaluation['k_values'])]:
         if not isinstance(values, list) or not values or len(set(values)) != len(values):
             raise ValueError(f'{name} must be a nonempty list of unique positive integers')
