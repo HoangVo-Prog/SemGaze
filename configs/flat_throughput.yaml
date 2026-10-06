@@ -4,6 +4,7 @@ experiment:
   name: semgaze_flat_throughput
 model:
   base_model: OpenGVLab/InternVL3_5-8B-HF
+  attention_backend: flash_attention_2
   initialization_adapter: null # DeepGaze-VL/model/visual_search_adapter | null
   adapter_load_mode: fresh # continue_trainable | fresh
 training:
@@ -12,5 +13,9 @@ training:
   gradient_accumulation_steps: 1
   gradient_checkpointing: true
   num_train_epochs: 1
+  prefetch:
+    enabled: true
+    depth: 2
+    pin_memory: true
 evaluation:
   strategy: 'no'

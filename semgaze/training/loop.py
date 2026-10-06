@@ -12,6 +12,7 @@ from semgaze.training.batching import sample_optimizer_batches
 from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.cache import ProjectedWhereCache
+from semgaze.training.prefetch import OptimizerWindowPrefetcher, PrefetchLifecycle
 
 
 def _format_loss(value):
@@ -103,20 +104,48 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
     with log_path.open('w', encoding='utf-8') as stream:
         for entry in bundle.trainer_history:
             stream.write(json.dumps(entry, allow_nan=False) + '\n')
-    with log_path.open('a', encoding='utf-8') as stream:
+    prefetch_cfg = t.get('prefetch', {})
+    prefetcher = None
+    # Prefetch is a CUDA producer/consumer path. Keep CPU reference and tiny
+    # correctness runs on the synchronous implementation.
+    prefetch_enabled = prefetch_cfg.get('enabled', False) and torch.device(
+        bundle.config['runtime']['device']).type == 'cuda'
+    if prefetch_enabled:
+        prefetcher = OptimizerWindowPrefetcher(bundle, sampler,
+            depth=prefetch_cfg.get('depth', 2), pin_memory=prefetch_cfg.get('pin_memory', True),
+            max_windows=max_steps - start)
+        prefetcher.start()
+        print(f"[TRAIN] attention_backend={bundle.diagnostics.get('text_attention', 'configured')} "
+              "fa2_active=" + str(bool(bundle.diagnostics.get('fa2_active', False))) +
+              f" cpu_prefetch=enabled depth={prefetcher.depth} pin_memory={prefetcher.pin_memory}", flush=True)
+    else:
+        print(f"[TRAIN] attention_backend={bundle.diagnostics.get('text_attention', 'configured')} "
+              "fa2_active=" + str(bool(bundle.diagnostics.get('fa2_active', False))) +
+              " cpu_prefetch=disabled depth=" + str(prefetch_cfg.get('depth', 2)) +
+              " pin_memory=" + str(bool(prefetch_cfg.get('pin_memory', True))), flush=True)
+    with PrefetchLifecycle(prefetcher), log_path.open('a', encoding='utf-8') as stream:
         epoch_rate = RollingRate()
         timed_epoch = None
         for step in range(start, max_steps):
-            if sampler.epoch == 0 or sampler.epoch_complete():
+            if prefetcher is None and (sampler.epoch == 0 or sampler.epoch_complete()):
                 sampler.start_epoch()
-            if timed_epoch != sampler.epoch:
-                epoch_rate.reset()
-                timed_epoch = sampler.epoch
             step_started = time.perf_counter()
             losses, rejected = [], 0
             component_losses = {'loss_where': [], 'loss_flat': []}
             diagnostic_losses = {key: [] for key in ('loss_what', 'loss_why', 'loss_how')}
-            batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
+            if prefetcher is not None:
+                prepared = prefetcher.get()
+                prefetcher.assert_consumer_state(sampler, prepared)
+                batches, sampled_episodes, rejected = prepared.batches, list(prepared.sampled_episodes), prepared.rejected
+                # The producer may be ahead, but checkpoints record the consumed window.
+                sampler.load_state_dict(prepared.after_state)
+            else:
+                batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
+            # Prefetch consumption may advance across an epoch boundary. Reset
+            # progress after the committed state is installed, never before.
+            if timed_epoch != sampler.epoch:
+                epoch_rate.reset()
+                timed_epoch = sampler.epoch
             prediction_batch = sampled_episodes[-prediction_capacity:] if prediction_capacity else []
             weights = [len(batch.episodes) / len(sampled_episodes) for batch in batches]
             interval = t.get('gradient_diagnostics_every', 0)
@@ -124,7 +153,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             for micro, batch in enumerate(batches):
                 result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
                     loss_scale=weights[micro], where_batch=batch,
-                    diagnostics=diagnose and micro == len(batches) - 1)
+                    diagnostics=diagnose and micro == len(batches) - 1,
+                    semantic_native_batches=batch.semantic_samples or None)
                 losses.append(result['loss_total'] * weights[micro])
                 for key in component_losses:
                     if key in result and result[key] is not None:

@@ -66,7 +66,7 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
                            where_batch=None, profiler=None,
                            audit_disable_where_attention_mask=False,
-                           audit_capture=None):
+                           audit_capture=None, semantic_native_batches=None):
     """One vectorized WHERE and semantic forward, one backward per physical batch.
 
     A scalar episode keeps the public smoke/evaluation-facing result convention.
@@ -104,7 +104,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
             raise RuntimeError('WHERE F / projected R were detached')
         flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-                                                               where=where, profiler=profiler)
+                                                               where=where, profiler=profiler,
+                                                               native_batches=semantic_native_batches)
         t = bundle.config['training']
         episode_total = t['lambda_where'] * where.episode_losses + t['lambda_sem'] * flat.episode_losses
         loss_total = episode_total.mean()

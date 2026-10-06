@@ -36,6 +36,8 @@ data:
 model:
   base_model: OpenGVLab/InternVL3_5-8B-HF
   backend: huggingface
+  # sdpa keeps CPU/tiny-model tests usable; production CUDA configs opt into FA2.
+  attention_backend: sdpa
   initialization_adapter: null # DeepGaze-VL/model/visual_search_adapter | null
   adapter_load_mode: fresh # continue_trainable | fresh
   merge_adapter_for_training: false
@@ -138,6 +140,10 @@ training:
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
   length_aware_batching: true # sort within each same-K physical batch only
   reuse_query_vision: true # requires frozen deterministic producers and identical pixels
+  prefetch:
+    enabled: false
+    depth: 2
+    pin_memory: true
   max_grad_norm: 1.0
   weight_decay: 0.01
   adam_beta1: 0.9

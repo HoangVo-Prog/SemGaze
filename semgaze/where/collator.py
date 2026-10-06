@@ -148,6 +148,23 @@ class WhereBatch:
     episodes: tuple
     metadata: tuple[dict, ...]
     image_cache: dict
+    semantic_samples: tuple = ()
+
+    def pin_memory_(self, enabled=True, *, pin_semantic_pixels=False):
+        """Pin only tensors that can cross the CPU-to-CUDA boundary."""
+        if not enabled:
+            return self
+        for key in ('input_ids', 'attention_mask', 'pixel_values'):
+            value = self.inputs[key]
+            if value.device.type == 'cpu' and not value.is_pinned():
+                self.inputs[key] = value.pin_memory()
+        for native in self.semantic_samples:
+            keys = ('input_ids', 'attention_mask') + (('pixel_values',) if pin_semantic_pixels else ())
+            for key in keys:
+                value = native.inputs[key]
+                if value.device.type == 'cpu' and not value.is_pinned():
+                    native.inputs[key] = value.pin_memory()
+        return self
 
 
 def pack_where_batch(processor, episodes, samples, image_cache=None):

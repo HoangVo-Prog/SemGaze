@@ -2015,6 +2015,25 @@ cross-checkpoint cache reuse
 
 Do not opportunistically clean up unrelated code.
 
+## Implemented production architecture notes
+
+The implemented CUDA training path keeps dense multimodal SemGaze inputs and
+image-feature insertion, then uses the Qwen3 language model's native
+Transformers FlashAttention-2 route: dense Q/K/V projections and RoPE, native
+variable-length unpadding with cumulative sequence lengths, grouped-query
+attention, and native repadding before `o_proj`. External sequence indexing,
+labels, `<END_FIX>` extraction, episode boundaries, and the semantic branch
+remain dense. Gradient checkpointing remains enabled and semantic gradients
+continue through WHERE states.
+
+CPU preparation runs as one authoritative producer for optimizer window N+1
+feeding a bounded depth-2 queue while the GPU consumer executes window N.
+Sampling, retries, support order, and physical grouping are unchanged. Checkpoint
+progress belongs to the consumed consumer sampler state; queued windows are
+discarded and regenerated after resume. Transferable CPU tensors are pinned
+selectively and moved with existing non-blocking transfers; Python/PIL metadata
+is not pinned.
+
 The implementation should be narrowly scoped to:
 
 ```text

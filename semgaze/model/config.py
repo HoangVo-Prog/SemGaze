@@ -130,6 +130,8 @@ def validate_config(config):
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']
+    if model.get('attention_backend', 'sdpa') not in ('sdpa', 'flash_attention_2'):
+        raise ValueError('model.attention_backend must be sdpa or flash_attention_2')
     if 'validation' in config or 'validation_scope' in evaluation['predictions']:
         raise ValueError('obsolete validation configuration; use test/test_scope')
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
@@ -171,6 +173,12 @@ def validate_config(config):
         raise ValueError('max_grad_norm must be positive or null (disabled)')
     if type(t['gradient_checkpointing']) is not bool:
         raise ValueError('gradient_checkpointing must be an explicit boolean')
+    prefetch = t.get('prefetch', {})
+    if type(prefetch.get('enabled', False)) is not bool:
+        raise ValueError('training.prefetch.enabled must be boolean')
+    positive_int(prefetch.get('depth', 2), 'training.prefetch.depth')
+    if type(prefetch.get('pin_memory', True)) is not bool:
+        raise ValueError('training.prefetch.pin_memory must be boolean')
     if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
         raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
     if evaluation['strategy'] == 'steps':

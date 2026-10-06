@@ -174,6 +174,32 @@ and optimizer-window geometry must match on resume. The current trainer supports
 one process; distributed launches fail before training because uneven-rank
 execution is not implemented. No distributed sampler pads or drops queries.
 
+### Production attention and input pipeline
+
+The production CUDA configs select `model.attention_backend: flash_attention_2`.
+The deployment environment must provide a `flash-attn` build compatible with its
+PyTorch, CUDA, Python, and A100 stack; the project intentionally does not pin an
+arbitrary wheel version or install it from training code.
+InternVL keeps dense multimodal inputs and image-token merging; Qwen3 language
+attention uses the native Transformers FlashAttention-2 variable-length
+unpad/varlen grouped-query attention/repad route. External token, label,
+`<END_FIX>` and episode indexing remains dense, and gradient checkpointing stays
+enabled. The semantic branch receives dense extracted WHERE states, so its
+gradient continues through WHERE.
+
+Training preparation uses one authoritative CPU producer for optimizer window
+N+1 and a bounded queue (default depth 2) consumed by the GPU step for window N.
+Sampling and retry RNG order are unchanged. A checkpoint serializes the live
+consumer sampler after the consumed window; queued producer windows are
+discarded and recreated after resume. Only transferable CPU tensors are pinned
+and existing non-blocking transfers are retained; PIL objects and labels remain
+ordinary host objects.
+
+CPU checkpoint inspection may explicitly request a CPU runtime; in that
+non-production case the loader records the requested FA2 backend and uses SDPA
+to make the saved model inspectable. CUDA production startup never performs
+this fallback: missing CUDA or `flash_attn` is a preflight error.
+
 See [the protocol migration notes](documents/COCO_955_MIGRATION.md) for validation
 and remaining runtime limits.
 

@@ -35,6 +35,7 @@ data:
 model:
   base_model: OpenGVLab/InternVL3_5-8B-HF
   backend: huggingface
+  attention_backend: flash_attention_2
   initialization_adapter: null # DeepGaze-VL/model/visual_search_adapter | null
   adapter_load_mode: fresh # continue_trainable | fresh
   merge_adapter_for_training: false
@@ -126,17 +127,21 @@ training:
   precision: bf16
 
   # One epoch is exactly one shuffled traversal of Q_train.
-  num_train_epochs: 1
+  num_train_epochs: 2
   max_steps: null # debugging override only
   max_episode_retries: 1000
 
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
   per_device_train_batch_size: 1 # physical GPU episode batch
-  gradient_accumulation_steps: 1 # physical batches per optimizer update
+  gradient_accumulation_steps: 8 # physical batches per optimizer update
   gradient_checkpointing: true
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
   length_aware_batching: true # sort within each same-K physical batch only
   reuse_query_vision: true # requires frozen deterministic producers and identical pixels
+  prefetch:
+    enabled: true
+    depth: 2
+    pin_memory: true
   max_grad_norm: 1.0
   weight_decay: 0.01
   adam_beta1: 0.9
@@ -158,7 +163,7 @@ evaluation:
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
-    semantic_max_new_tokens: 32
+    semantic_max_new_tokens: 512
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
 
@@ -167,11 +172,11 @@ runtime:
   output_dir: null # generated run directory when omitted
 
 logging:
-  every_steps: 1
+  every_steps: 100
   filename: trainer_log.jsonl
 
 checkpoint:
-  save_every: 100
+  save_every: 1000
   save_at_epoch_end: true
   save_at_end: true
   save_processor_and_tokenizer: true

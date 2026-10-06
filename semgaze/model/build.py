@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import importlib.metadata
+import importlib.util
 import json
 from pathlib import Path
 import random
@@ -12,6 +13,48 @@ from semgaze.state.projector import build_projector
 
 class ModelPreflightError(RuntimeError):
     pass
+
+
+def validate_attention_backend(config, diagnostics=None):
+    """Validate the explicitly selected text attention backend before loading weights."""
+    backend = config['model'].get('attention_backend', 'sdpa')
+    if backend not in ('sdpa', 'flash_attention_2'):
+        raise ModelPreflightError(f'unsupported model.attention_backend={backend!r}')
+    if diagnostics is not None:
+        diagnostics['attention_backend'] = backend
+        diagnostics['text_attention'] = backend
+        diagnostics['fa2_active'] = backend == 'flash_attention_2'
+    if backend == 'flash_attention_2':
+        if not torch.cuda.is_available():
+            raise ModelPreflightError(
+                'model.attention_backend=flash_attention_2 requires CUDA; '
+                'run on the target CUDA environment or choose sdpa for CPU tests')
+        if importlib.util.find_spec('flash_attn') is None:
+            raise ModelPreflightError(
+                'model.attention_backend=flash_attention_2 requires the flash-attn package; '
+                'install a build compatible with this PyTorch/CUDA/Python environment')
+        try:
+            importlib.import_module('flash_attn')
+        except Exception as error:
+            raise ModelPreflightError(
+                'flash-attn is present but cannot be imported; install a build compatible '
+                f'with this PyTorch/CUDA/Python environment ({error})') from error
+
+
+def set_text_attention_backend(base, backend):
+    """Select FA2 only on InternVL's Qwen language model, preserving vision attention."""
+    language = getattr(getattr(base, 'model', None), 'language_model', None)
+    if language is None:
+        raise ModelPreflightError('InternVL language_model module is missing; cannot configure text attention')
+    try:
+        language.set_attn_implementation(backend)
+    except Exception as error:
+        raise ModelPreflightError(
+            f'failed to configure text attention backend {backend!r}: {error}') from error
+    actual = getattr(language.config, '_attn_implementation', None)
+    if actual != backend:
+        raise ModelPreflightError(f'text attention backend requested {backend!r}, observed {actual!r}')
+    return actual
 
 
 @dataclass
@@ -135,6 +178,7 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
     diagnostics = inspect_adapter(adapter) if adapter else {'blockers': []}
     diagnostics.update(adapter_source=adapter.as_posix() if adapter else None, torch_version=torch.__version__,
                        cuda_available=torch.cuda.is_available())
+    validate_attention_backend(config, diagnostics)
     for package in ('transformers', 'peft', 'accelerate', 'safetensors'):
         try:
             diagnostics[package + '_version'] = importlib.metadata.version(package)
@@ -160,6 +204,8 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
     base = AutoModelForImageTextToText.from_pretrained(config['model']['base_model'], dtype=dtype)
     if base.__class__.__name__ != 'InternVLForConditionalGeneration':
         raise ModelPreflightError('expected HF InternVLForConditionalGeneration')
+    set_text_attention_backend(base, config['model'].get('attention_backend', 'sdpa'))
+    diagnostics['vision_attention'] = getattr(getattr(base.config, 'vision_config', None), '_attn_implementation', None)
     tokenizer = processor.tokenizer
     token = config['where']['end_fix_token']
     tokenizer.add_tokens([token], special_tokens=True)

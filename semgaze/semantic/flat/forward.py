@@ -14,6 +14,22 @@ class SemanticContextOverflowError(ValueError):
         super().__init__(str(self.diagnostics))
 
 
+def prepare_semantic_native(bundle, query, *, image_cache=None, generation_budget=None):
+    """Prepare native semantic CPU inputs before WHERE states exist."""
+    prompt = build_flat_prompt(query)
+    target = build_flat_target(query.semantic) if generation_budget is None else None
+    native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
+                            target, prompt=prompt, image_cache=image_cache)
+    n = len(query.x_px)
+    if native.inputs['input_ids'].shape[1] + n + (generation_budget or 0) > bundle.context_limit:
+        raise SemanticContextOverflowError(sample_id=query.record_id, native_prompt_length=native.response_start,
+            number_of_inserted_states=n, number_of_gold_groups=len(query.semantic.why_groups),
+            final_prompt_length=native.response_start + n,
+            target_length=native.inputs['input_ids'].shape[1] - native.response_start if target is not None else None,
+            generation_budget=generation_budget, context_limit=bundle.context_limit)
+    return native
+
+
 def prepare_flat_inputs(bundle, query, states, *, generation_budget=None):
     prompt = build_flat_prompt(query)
     target = build_flat_target(query.semantic) if generation_budget is None else None
@@ -61,10 +77,12 @@ def frozen_vision_is_reusable(model):
 
 
 def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=None,
-                           generation_budget=None, reuse_query_vision=None):
+                           generation_budget=None, reuse_query_vision=None, native_batches=None):
     """One native prompt per sample, followed by differentiable batched assembly."""
     if not queries or len(queries) != len(states):
         raise ValueError('query/state batch counts differ')
+    if native_batches is not None and len(native_batches) != len(queries):
+        raise ValueError('prepared semantic/native batch counts differ')
     reuse = ((where is not None or (visual_cache is not None and visual_cache.features)) and (bundle.config['training'].get('reuse_query_vision', True)
              if reuse_query_vision is None else reuse_query_vision)
              and frozen_vision_is_reusable(bundle.model))
@@ -72,9 +90,10 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
     image_cache = where.batch.image_cache if where is not None else {}
     for b, (query, state) in enumerate(zip(queries, states)):
         prompt = build_flat_prompt(query)
-        native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
-            build_flat_target(query.semantic) if generation_budget is None else None,
-            prompt=prompt, image_cache=(visual_cache if visual_cache is not None else image_cache))
+        native = (native_batches[b] if native_batches is not None else
+                  prepare_semantic_native(bundle, query,
+                      image_cache=(visual_cache if visual_cache is not None else image_cache),
+                      generation_budget=generation_budget))
         n = len(query.x_px)
         length = native.inputs['input_ids'].shape[1]
         if length + n + (generation_budget or 0) > bundle.context_limit:
@@ -87,7 +106,7 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
         ids = native.inputs['input_ids']
         if bool((ids == bundle.end_fix_id).any()):
             raise ValueError('semantic conversation must not contain END_FIX')
-        embedding = bundle.model.get_input_embeddings()(ids.to(bundle.input_row.device))
+        embedding = bundle.model.get_input_embeddings()(ids.to(bundle.input_row.device, non_blocking=True))
         if reuse:
             # Feature identity includes native preprocessing. Compare on host before reuse.
             if where is not None:
@@ -114,17 +133,24 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
     # Keep host labels for selected index discovery; move only the backbone inputs.
     if not reuse:
         fused['pixel_values'] = torch.cat([s.inputs['pixel_values'] for s in natives])
+        # Concatenation creates fresh storage, so pin the actual tensor that
+        # crosses the producer/consumer boundary rather than relying on the
+        # native per-sample buffers to remain pinned.
+        if (bundle.config['training'].get('prefetch', {}).get('pin_memory', True)
+                and torch.cuda.is_available() and fused['pixel_values'].device.type == 'cpu'):
+            fused['pixel_values'] = fused['pixel_values'].pin_memory()
     if generation_budget is not None:
         fused.pop('labels')
     return fused, positions, metadata
 
 
 def forward_flat_batch(bundle, queries, states, *, where=None, profiler=None, reuse_query_vision=None,
-                       response_offsets=False):
+                       response_offsets=False, native_batches=None):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('semantic_preparation'):
         inputs, positions, metadata = prepare_semantic_batch(bundle, queries, states, where=where,
-                                                            reuse_query_vision=reuse_query_vision)
+                                                            reuse_query_vision=reuse_query_vision,
+                                                            native_batches=native_batches)
     host_labels = inputs['labels']
     with stage('semantic_forward'):
         outputs = forward_backbone(bundle.model, to_model_device(

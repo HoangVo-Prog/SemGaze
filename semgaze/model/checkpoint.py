@@ -107,7 +107,7 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     """Rebuild base -> checkpoint vocabulary -> continued adapter -> rows/P_E."""
     from transformers import AutoProcessor, AutoModelForImageTextToText
     from peft import PeftModel
-    from .build import FlatModelBundle
+    from .build import FlatModelBundle, validate_attention_backend, set_text_attention_backend
     from .config import resolve_config
     from .trainable_tokens import install_trainable_rows
     from semgaze.state.projector import build_projector
@@ -122,6 +122,15 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
         config['training']['precision'] = precision
     config = resolve_config(config)
     metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
+    diagnostics = metadata['diagnostics']
+    # Checkpoint/unit-test loaders may intentionally target CPU. Preserve the
+    # saved production choice in diagnostics while selecting the only usable
+    # CPU backend; normal CUDA training remains fail-closed in preflight.
+    if (torch.device(config['runtime']['device']).type != 'cuda' and
+            config['model'].get('attention_backend') == 'flash_attention_2'):
+        diagnostics['requested_attention_backend'] = 'flash_attention_2'
+        config['model']['attention_backend'] = 'sdpa'
+    validate_attention_backend(config, diagnostics)
     if metadata['split_manifest_identity'] != split_manifest_identity:
         raise ValueError('checkpoint split/manifest identity mismatch')
     processor = AutoProcessor.from_pretrained(path / 'processor')
@@ -133,6 +142,8 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
         revision=metadata['diagnostics'].get('base_commit'))
     if base.__class__.__name__ != 'InternVLForConditionalGeneration':
         raise ValueError('expected HF InternVLForConditionalGeneration')
+    set_text_attention_backend(base, config['model'].get('attention_backend', 'sdpa'))
+    diagnostics['vision_attention'] = getattr(getattr(base.config, 'vision_config', None), '_attn_implementation', None)
     base.resize_token_embeddings(len(processor.tokenizer))
     model = PeftModel.from_pretrained(base, path / 'adapter', is_trainable=True).to(config['runtime']['device'])
     input_row, output_row, tied = install_trainable_rows(model, token_ids[0])
@@ -140,7 +151,7 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     if config['training']['gradient_checkpointing']:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
     bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
-        config, metadata['diagnostics'], Path(output_dir or path))
+        config, diagnostics, Path(output_dir or path))
     restore_checkpoint_state(bundle, path, split_manifest_identity=split_manifest_identity)
     from semgaze.training.profiling import runtime_metadata
     bundle.diagnostics.update(runtime_metadata(bundle))
