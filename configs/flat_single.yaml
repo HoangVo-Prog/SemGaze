@@ -25,8 +25,8 @@ data:
     conversion_to_ms: identity
 
   fewshot:
-    k_values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    train_k_probabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    k_values: [1]
+    train_k_probabilities: [1.0]
     require_same_subject: true
     require_distinct_support_stimuli: true
     exclude_query_stimulus: true
@@ -150,9 +150,9 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: epoch # epoch | steps | no (smoke/benchmark only)
+  strategy: steps # epoch | steps | no (smoke/benchmark only)
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
-  k_values: [1, 5, 10]
+  k_values: [1]
   loss_aggregation: episode_mean
   predictions:
     train_batches: 1

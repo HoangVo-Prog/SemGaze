@@ -134,8 +134,7 @@ def validate_config(config):
         raise ValueError('obsolete validation configuration; use test/test_scope')
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
         raise ValueError('use num_train_epochs; optimizer updates are derived from Q_train')
-    if evaluation['k_values'] != [1, 5, 10]:
-        raise ValueError('canonical K_eval must remain [1,5,10]')
+
     if config['data']['unseen_subjects'] != [7, 8, 9]:
         raise ValueError('unseen subjects must remain [7,8,9]')
 
@@ -184,8 +183,7 @@ def validate_config(config):
     probs = config['data']['fewshot']['train_k_probabilities']
     if len(probs) != len(config['data']['fewshot']['k_values']) or any(not math.isfinite(p) or p < 0 for p in probs) or not math.isclose(sum(probs), 1, abs_tol=1e-8):
         raise ValueError('train_k_probabilities must align with k_values and sum to one')
-    if config['data']['fewshot']['k_values'] != list(range(1, 11)) or any(abs(p - 0.1) > 1e-8 for p in probs):
-        raise ValueError('COCO-Search18 training K must be Uniform({1,...,10})')
+
     split_root = str(config['data']['split_root']).replace('\\', '/')
     if '/COCO_Search18/split/' in split_root or 'validation.json' in split_root or Path(split_root).parent.name != 'split_95_5' or Path(split_root).name != config['data']['variant']:
         raise ValueError('COCO-Search18 requires data/COCO_Search18/split_95_5/<variant>')

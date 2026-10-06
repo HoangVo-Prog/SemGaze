@@ -8,6 +8,7 @@ from semgaze.evaluation.predictions import predict_epoch, format_prediction_summ
 from semgaze.model.checkpoint import save_checkpoint
 from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
 from semgaze.training.batching import sample_optimizer_batches
+from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
 
 
 def _format_loss(value):
@@ -16,15 +17,25 @@ def _format_loss(value):
 
 def format_train_step(entry, max_steps=None):
     """Human-readable console rendering for a structured train-step event."""
-    step_text = str(entry['step']) if max_steps is None else f"{entry['step']}/{max_steps}"
+    epoch_index = entry.get('epoch_index', entry.get('epoch', 0))
+    epoch_total = entry.get('epoch_total', '?')
+    epoch_step = entry.get('epoch_step', '?')
+    epoch_steps = entry.get('epoch_steps', '?')
+    progress = entry.get('epoch_progress_pct')
+    progress_text = '...' if progress is None else f'{progress:.1f}%'
     learning_rate = entry.get('learning_rate')
     lr_text = '...' if learning_rate is None else f'{learning_rate:.3g}'
-    return (f"[TRAIN] step {step_text} | epoch {entry['epoch']:.3f}\n"
+    text = (f"[TRAIN] epoch {epoch_index}/{epoch_total} | {epoch_step}/{epoch_steps} | "
+            f"{progress_text} | global_step={entry['step']}\n"
             f"  loss={_format_loss(entry.get('loss_total'))} | "
             f"where={_format_loss(entry.get('loss_where'))} | "
             f"flat={_format_loss(entry.get('loss_flat'))} | lr={lr_text}\n"
             f"  rejected={entry.get('rejected_where_episodes', 0)} | "
-            f"time={entry.get('step_time_sec', 0.0):.2f}s")
+            f"ETA epoch={format_eta(entry.get('epoch_eta_sec'))} | "
+            f"finish~{format_finish_time(entry.get('epoch_eta_sec'))}")
+    if entry.get('epoch_complete'):
+        text += '\n        epoch complete'
+    return text
 
 
 def require_single_process(config):
@@ -58,7 +69,7 @@ def format_epoch_summary(entry):
     return (f"[EVAL][LOSS] Epoch {entry['epoch']} | step {entry['step']} | test: "
             f"{entry['test_queries']} unseen queries x K={entry.get('k_values', [])} ({entry['test_episodes']} episodes)\n"
             f"  response NLL (episode mean): {losses}\n"
-            f"  test loss time: {entry.get('test_time_sec', 0.0):.2f}s\n"
+            f"  complete traversals: {entry.get('test_loss_traversals', '?')}\n"
             '  WHAT/WHY/HOW: diagnostic sections of one flat response; generation-quality metrics not configured')
 
 
@@ -67,8 +78,7 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
     t = bundle.config['training']
     updates_per_epoch = resolve_epoch_schedule(bundle.config, sampler.query_count)
     max_steps = t['total_optimizer_updates'] if max_steps is None else min(max_steps, t['total_optimizer_updates'])
-    if bundle.config['evaluation']['strategy'] not in ('epoch', 'no'):
-        raise ValueError('COCO evaluation must follow completed coverage epochs')
+
     evaluation = bundle.config['evaluation']
     settings = resolve_prediction_settings(bundle.config) if evaluation['strategy'] != 'no' else evaluation['predictions']
     prediction_capacity = settings['train_batches'] * t['per_device_train_batch_size']
@@ -91,9 +101,14 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
         for entry in bundle.trainer_history:
             stream.write(json.dumps(entry, allow_nan=False) + '\n')
     with log_path.open('a', encoding='utf-8') as stream:
+        epoch_rate = RollingRate()
+        timed_epoch = None
         for step in range(start, max_steps):
             if sampler.epoch == 0 or sampler.epoch_complete():
                 sampler.start_epoch()
+            if timed_epoch != sampler.epoch:
+                epoch_rate.reset()
+                timed_epoch = sampler.epoch
             step_started = time.perf_counter()
             losses, rejected = [], 0
             component_losses = {'loss_where': [], 'loss_flat': []}
@@ -121,8 +136,16 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             bundle.scheduler.step()
             global_step = step + 1
             step_time = time.perf_counter() - step_started
+            epoch_step = min(updates_per_epoch, (sampler.cursor + window - 1) // window)
+            epoch_complete = sampler.epoch_complete()
+            epoch_rate.update(epoch_step)
+            epoch_eta = epoch_rate.eta(updates_per_epoch - epoch_step)
             entry = {'event': 'train_step', 'step': global_step,
                      'epoch': sampler.epoch - 1 + sampler.cursor / sampler.query_count,
+                     'epoch_index': sampler.epoch, 'epoch_total': t['num_train_epochs'],
+                     'epoch_step': epoch_step, 'epoch_steps': updates_per_epoch,
+                     'epoch_progress_pct': 100 * epoch_step / updates_per_epoch,
+                     'epoch_eta_sec': epoch_eta, 'epoch_complete': epoch_complete,
                      'query_cursor': sampler.cursor, 'query_count': sampler.query_count,
                      'loss_total': float(sum(losses)),
                      'rejected_where_episodes': rejected,
@@ -135,18 +158,19 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             for key, values in diagnostic_losses.items():
                 if values:
                     entry[key] = float(sum(values))
-            if global_step % logging['every_steps'] == 0 or global_step == max_steps:
+            if (global_step % logging['every_steps'] == 0 or global_step == max_steps or
+                    epoch_complete):
                 bundle.trainer_history.append(entry)
                 stream.write(json.dumps(entry, allow_nan=False) + '\n')
                 stream.flush()
                 print(format_train_step(entry, max_steps), flush=True)
-            epoch_end = sampler.epoch_complete()
+            epoch_end = epoch_complete
             should_evaluate = ((evaluation['strategy'] == 'epoch' and epoch_end) or
                                (evaluation['strategy'] == 'steps' and
                                 global_step % evaluation['eval_steps'] == 0))
             if should_evaluate:
                 evaluation_started = time.perf_counter()
-                print(f"[EVAL] step {step + 1} | starting test evaluation", flush=True)
+                print(f"[EVAL] starting epoch {sampler.epoch} evaluation", flush=True)
                 summary = {'event': 'epoch_test', 'step': step + 1,
                            'epoch': sampler.epoch,
                            **evaluate_test_epoch(bundle, train_by_id, test_records, manifest)}
@@ -166,7 +190,7 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                     stream.write(json.dumps(predictions, allow_nan=False) + '\n')
                     stream.flush()
                     print(format_prediction_summary(predictions), flush=True)
-                print(f"[EVAL] done | total_time={time.perf_counter() - evaluation_started:.2f}s", flush=True)
+                print('[EVAL] complete', flush=True)
             # Save after test and generation, including at epoch ends even when the
             # ordinary step-based save interval does not land on the boundary.
             if (epoch_end and checkpoint['save_at_epoch_end']) or (save_every is not None and (step + 1) % save_every == 0) or (step + 1 == max_steps and checkpoint['save_at_end']):

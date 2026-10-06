@@ -1,0 +1,153 @@
+{
+  "condition_record_counts_by_runtime_split": {
+    "test": {
+      "absent": 684,
+      "present": 691
+    },
+    "test_seen": {
+      "absent": 675,
+      "present": 700
+    },
+    "train": {
+      "absent": 11090,
+      "present": 11600
+    }
+  },
+  "coverage_errors": [],
+  "excluded_heldout_records": {
+    "count": 2060,
+    "ratio_over_source": 0.07490909090909091
+  },
+  "heldout_candidate_record_counts": {
+    "seen": 3411,
+    "unseen": 1399
+  },
+  "master_attempt_id": 1912,
+  "master_eval_image_ratio": 0.174137526402253,
+  "master_image_counts": {
+    "eval": 742,
+    "train": 3519
+  },
+  "master_selected_score": 3.5003181533498102,
+  "protocol_version": "cocosearch18_semgaze_subject_stratified_5_5_shared_eval_v1",
+  "runtime_record_counts_by_split": {
+    "test": 1375,
+    "test_seen": 1375,
+    "train": 22690
+  },
+  "runtime_record_ratio_by_split_over_source": {
+    "test": 0.05,
+    "test_seen": 0.05,
+    "train": 0.8250909090909091
+  },
+  "shared_train_support_distinct_images": 730,
+  "shared_train_support_trial_keys": 753,
+  "split_file_sha256": {
+    "test": "3fed1a65899f5b783f08cff360918de55eb2632363b24f48e956a25ee376180c",
+    "test_seen": "29fd8f4afdddb75026d51002f632994c8b96c5908a7e4e174bc59e3c03216528",
+    "train": "1b4de2975c68b14b6337584af87ea41a1ffff02464cca7431f62bac87b6761c1"
+  },
+  "subject_record_counts_by_runtime_split": {
+    "test": {
+      "7": 471,
+      "8": 490,
+      "9": 414
+    },
+    "test_seen": {
+      "1": 210,
+      "10": 141,
+      "2": 209,
+      "3": 198,
+      "4": 194,
+      "5": 204,
+      "6": 219
+    },
+    "train": {
+      "1": 2505,
+      "10": 1840,
+      "2": 2288,
+      "3": 2372,
+      "4": 2071,
+      "5": 2479,
+      "6": 2510,
+      "7": 2308,
+      "8": 2273,
+      "9": 2044
+    }
+  },
+  "target_record_counts": {
+    "test": 1375,
+    "test_seen": 1375
+  },
+  "target_record_ratio_over_source": {
+    "test_seen": 0.05,
+    "test_unseen": 0.05
+  },
+  "task_record_counts_by_runtime_split": {
+    "test": {
+      "bottle": 83,
+      "bowl": 75,
+      "car": 51,
+      "chair": 118,
+      "clock": 47,
+      "cup": 105,
+      "fork": 92,
+      "keyboard": 72,
+      "knife": 75,
+      "laptop": 56,
+      "microwave": 76,
+      "mouse": 47,
+      "oven": 49,
+      "potted plant": 78,
+      "sink": 124,
+      "stop sign": 62,
+      "toilet": 47,
+      "tv": 118
+    },
+    "test_seen": {
+      "bottle": 87,
+      "bowl": 70,
+      "car": 41,
+      "chair": 115,
+      "clock": 50,
+      "cup": 121,
+      "fork": 95,
+      "keyboard": 81,
+      "knife": 69,
+      "laptop": 48,
+      "microwave": 81,
+      "mouse": 49,
+      "oven": 42,
+      "potted plant": 82,
+      "sink": 111,
+      "stop sign": 58,
+      "toilet": 56,
+      "tv": 119
+    },
+    "train": {
+      "bottle": 1228,
+      "bowl": 1034,
+      "car": 861,
+      "chair": 1621,
+      "clock": 951,
+      "cup": 1816,
+      "fork": 1639,
+      "keyboard": 1311,
+      "knife": 1138,
+      "laptop": 1038,
+      "microwave": 1268,
+      "mouse": 859,
+      "oven": 877,
+      "potted plant": 1202,
+      "sink": 2061,
+      "stop sign": 887,
+      "toilet": 929,
+      "tv": 1970
+    }
+  },
+  "test_and_test_seen_share_eval_image_pool": true,
+  "test_seen_ratio_within_seen_pool": 0.0705997124666256,
+  "test_unseen_ratio_within_unseen_pool": 0.17136091724825522,
+  "total_source_records": 27500,
+  "variant": "all"
+}

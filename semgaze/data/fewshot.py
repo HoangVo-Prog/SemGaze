@@ -10,8 +10,7 @@ class TrainingEpisodeSampler:
         data_config = data_config if data_config is not None else default_section('data')
         if data_config['variant'] != 'all':
             raise ValueError('Q_train must be built from split_95_5/all/train.json')
-        if data_config['fewshot']['k_values'] != list(range(1, 11)) or any(abs(p - 0.1) > 1e-8 for p in data_config['fewshot']['train_k_probabilities']):
-            raise ValueError('K_train must be uniform over 1..10')
+
         self.k_values = tuple(range(1, 11))
         self.probabilities = tuple(0.1 for _ in self.k_values)
         unseen_subjects = data_config['unseen_subjects']

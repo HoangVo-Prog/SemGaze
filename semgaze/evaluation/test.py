@@ -16,7 +16,8 @@ from semgaze.evaluation.batching import schedule_batches, episode_id
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
-from semgaze.evaluation.progress import format_duration
+from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
+                                          progress_interval, should_report)
 
 EVAL_KEYS = ('test_where', 'test_what', 'test_why', 'test_how', 'test_flat', 'test_total')
 
@@ -185,16 +186,25 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
     overall, by_k, k_times, batch_stats = EpisodeAccumulator(), {}, {}, {}
+    draw_counts = {str(k): len(manifest['support_draws'][str(k)]) for k in k_values}
     expected = [f'{k}:{draw}:{q.record_id}' for k in k_values
                 for draw in range(len(manifest['support_draws'][str(k)])) for q in queries]
     started = time.perf_counter()
-    print(f'[TEST][LOSS] queries={len(queries)} | K={k_values} | episodes={len(expected)}', flush=True)
+    print(f'[EVAL][LOSS] starting | queries={len(queries)} | K={k_values} | '
+          f'episodes={len(expected)}', flush=True)
     try:
         with test_mode(bundle):
-            for k in k_values:
+            for k_position, k in enumerate(k_values, 1):
                 k_started = time.perf_counter()
                 subtotal, stats, keys = EpisodeAccumulator(), [], []
-                for draw in range(len(manifest['support_draws'][str(k)])):
+                draw_count = draw_counts[str(k)]
+                k_rate = RollingRate()
+                for draw in range(draw_count):
+                    draw_rate = RollingRate()
+                    query_index = 0
+                    interval = progress_interval(len(queries))
+                    print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
+                          f'draw={draw + 1}/{draw_count} | starting | queries={len(queries)}', flush=True)
                     episodes = [frozen_episode(q, train_by_id, manifest, k, draw_id=draw,
                         unseen_subjects=bundle.config['data']['unseen_subjects']) for q in queries]
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler):
@@ -209,12 +219,28 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                             keys.append(key)
                             if episode_callback is not None:
                                 episode_callback(row)
+                        query_index += len(rows)
+                        draw_rate.update(query_index)
+                        k_completed = draw * len(queries) + query_index
+                        k_rate.update(k_completed)
+                        if should_report(query_index, len(queries), interval):
+                            draw_eta = draw_rate.eta(len(queries) - query_index)
+                            k_eta = k_rate.eta(draw_count * len(queries) - k_completed)
+                            finish_eta = k_eta if k_eta is not None else draw_eta
+                            print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
+                                  f'draw={draw + 1}/{draw_count} | {query_index}/{len(queries)} | '
+                                  f'{100 * query_index / len(queries):.1f}%', flush=True)
+                            print(f'             ETA draw={format_eta(draw_eta)} | '
+                                  f'ETA K={format_eta(k_eta)} | '
+                                  f'finish~{format_finish_time(finish_eta)}', flush=True)
                         stats.append({'physical_batch_size': len(rows), **{
                             f'{branch}_{kind}_tokens': (sum(lengths) if kind == 'real' else len(rows)*max(lengths))
                             for branch in ('where', 'semantic')
                             for lengths in ([row.get(f'{branch}_length', 0) for row in rows],)
                             for kind in ('real', 'padded')}})
-                    print(f'[TEST][LOSS] K={k} | draw={draw + 1}/10 | queries={len(queries)}', flush=True)
+                    print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
+                          f'draw={draw + 1}/{draw_count} | {len(queries)}/{len(queries)} | 100.0% | complete',
+                          flush=True)
                 by_k[str(k)] = subtotal.finish(keys) | {'episodes': len(keys)}
                 k_times[str(k)] = time.perf_counter() - k_started
                 batch_stats[str(k)] = stats
@@ -223,6 +249,7 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
         cache.close()
     return {**overall.finish(expected), 'test_by_k': by_k, 'k_values': list(k_values),
             'test_queries': len(queries), 'test_episodes': len(expected),
+            'test_loss_traversals': sum(draw_counts.values()),
             'test_time_sec': time.perf_counter()-started, 'test_k_time_sec': k_times,
             'test_batches': batch_stats, 'test_cache': cache_stats,
             'test_loss_aggregation': 'episode_mean', 'test_kind': 'teacher_forced_response_nll',
