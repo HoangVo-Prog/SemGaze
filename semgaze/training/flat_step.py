@@ -64,7 +64,9 @@ def clip_and_check_gradients(bundle):
 
 def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
-                           where_batch=None, profiler=None):
+                           where_batch=None, profiler=None,
+                           audit_disable_where_attention_mask=False,
+                           audit_capture=None):
     """One vectorized WHERE and semantic forward, one backward per physical batch.
 
     A scalar episode keeps the public smoke/evaluation-facing result convention.
@@ -85,7 +87,15 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         bundle.projector.zero_grad(set_to_none=True)
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where'):
-        where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler)
+        where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
+                                    audit_disable_where_attention_mask=audit_disable_where_attention_mask)
+    if audit_capture is not None:
+        for state in where.states:
+            state.retain_grad()
+        audit_capture['rng_state_after_where_cpu'] = torch.get_rng_state().clone()
+        device = bundle.input_row.device
+        if device.type == 'cuda':
+            audit_capture['rng_state_after_where_cuda'] = torch.cuda.get_rng_state(device).clone()
     with stage('semantic'):
         # One shared projector on all valid states; no padding enters P_E.
         counts = [len(e.query.x_px) for e in episodes]
@@ -102,6 +112,18 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         raise RuntimeError('non-finite joint loss')
     with stage('backward'):
         (loss_total * loss_scale).backward()
+    if audit_capture is not None:
+        audit_capture.update({
+            'where_episode_losses': where.episode_losses.detach().clone(),
+            'where_states': [state.detach().clone() for state in where.states],
+            'loss_where': where.loss_where.detach().clone(),
+            'loss_flat': flat.loss.detach().clone(),
+            'loss_total': loss_total.detach().clone(),
+        })
+        audit_capture['state_gradients'] = [
+            state.grad.detach().clone() if state.grad is not None else None
+            for state in where.states
+        ]
     checks = check_gradients(bundle) if diagnostics else {}
     if optimizer_step:
         if bundle.optimizer is None:

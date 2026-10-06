@@ -213,3 +213,27 @@ def test_image_swap_cannot_contaminate_other_sample(tmp_path, episode):
         changed = forward_where_batch(bundle, episodes, batch=batch)
     torch.testing.assert_close(old.states[0], changed.states[0], rtol=0, atol=0)
     assert not torch.equal(old.states[1], changed.states[1])
+
+
+def test_attention_mask_audit_hook_is_where_only_and_captures_state_gradients(tmp_path, episode):
+    bundle = tiny_bundle(tmp_path, episode)
+    deterministic_train(bundle)
+    episodes = [episode, mixed_episode(episode)]
+    seen = []
+    handle = bundle.model.get_base_model().model.language_model.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.append(kwargs.get('attention_mask')),
+        with_kwargs=True)
+    capture = {}
+    try:
+        result = run_flat_training_step(bundle, episodes,
+            audit_disable_where_attention_mask=True, audit_capture=capture)
+    finally:
+        handle.remove()
+    assert result['physical_batch_size'] == 2
+    assert len(seen) == 2
+    assert seen[0] is None
+    assert seen[1] is not None
+    assert capture['where_episode_losses'].shape == (2,)
+    assert len(capture['where_states']) == len(capture['state_gradients']) == 2
+    assert all(g is not None and torch.isfinite(g).all() and g.ne(0).any()
+               for g in capture['state_gradients'])

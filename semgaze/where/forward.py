@@ -20,7 +20,8 @@ def forward_where(bundle, episode):
     return WhereOutput(result.loss_where, result.states[0], result.batch.samples[0], result.positions[0])
 
 
-def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_cache=None, use_cache=None):
+def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_cache=None, use_cache=None,
+                        audit_disable_where_attention_mask=False):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where_collation'):
         batch = batch if batch is not None else collate_where_batch(
@@ -32,6 +33,8 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
         features = None
         if visual_cache is not None:
             inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths])
+        if audit_disable_where_attention_mask:
+            inputs = {k: v for k, v in inputs.items() if k != 'attention_mask'}
         outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
                                   if use_cache is None else use_cache))
         loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'], bundle.model.get_output_embeddings())
