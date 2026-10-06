@@ -35,6 +35,7 @@ from semgaze.model.build import build_flat_model_bundle  # noqa: E402
 from semgaze.training.batching import sample_optimizer_batches  # noqa: E402
 from semgaze.training.flat_step import run_flat_training_step  # noqa: E402
 from semgaze.training.profiling import runtime_metadata  # noqa: E402
+from semgaze.where.collator import pack_where_batch  # noqa: E402
 
 SCHEMA_VERSION = 1
 VARIANTS = (
@@ -193,6 +194,8 @@ def select_real_b2_batch(bundle, sampler, *, batch_case, max_windows):
         raise ValueError('attention-mask audit requires physical B=2')
     rejected_total = 0
     inspected = 0
+    equal_candidates = {}
+    equal_candidate_count = 0
     for window in range(max_windows):
         if sampler.epoch == 0 or sampler.epoch_complete():
             sampler.start_epoch()
@@ -201,14 +204,58 @@ def select_real_b2_batch(bundle, sampler, *, batch_case, max_windows):
         for batch in batches:
             inspected += 1
             lengths = [row['where_length'] for row in batch.metadata]
+            if batch_case == 'equal':
+                if len(batch.episodes) == 2 and len({len(episode.supports) for episode in batch.episodes}) == 1 and lengths[0] == lengths[1]:
+                    return batch, {
+                        'search_windows': window + 1,
+                        'physical_batches_inspected': inspected,
+                        'rejected_where_episodes': rejected_total,
+                        'sampler_epoch': sampler.epoch,
+                        'sampler_cursor': sampler.cursor,
+                        'selection_case': batch_case,
+                        'repacked_from_real_samples': False,
+                    }
+                # Exact equal-length physical batches are uncommon when queries
+                # are sampled independently. Keep every real collated sample,
+                # including singleton K buckets, and repack the first matching
+                # same-K/same-length pair across source windows.
+                for episode, sample in zip(batch.episodes, batch.samples):
+                    equal_candidate_count += 1
+                    key = (len(episode.supports), int(sample.inputs['input_ids'].shape[1]))
+                    previous = equal_candidates.get(key)
+                    if previous is None:
+                        equal_candidates[key] = (episode, sample, batch.image_cache, window + 1)
+                        continue
+                    first_episode, first_sample, first_cache, first_window = previous
+                    if first_episode.query.record_id == episode.query.record_id:
+                        continue
+                    cache = dict(first_cache)
+                    cache.update(batch.image_cache)
+                    matched = pack_where_batch(
+                        bundle.processor,
+                        [first_episode, episode],
+                        [first_sample, sample],
+                        cache,
+                    )
+                    return matched, {
+                        'search_windows': window + 1,
+                        'physical_batches_inspected': inspected,
+                        'rejected_where_episodes': rejected_total,
+                        'sampler_epoch': sampler.epoch,
+                        'sampler_cursor': sampler.cursor,
+                        'selection_case': batch_case,
+                        'repacked_from_real_samples': True,
+                        'source_windows': [first_window, window + 1],
+                        'source_length_key': list(key),
+                        'real_collated_samples_considered': equal_candidate_count,
+                    }
+                continue
             if len(batch.episodes) != 2:
                 continue
             if len({len(episode.supports) for episode in batch.episodes}) != 1:
                 continue
             unequal = lengths[0] != lengths[1]
             if batch_case == 'unequal' and not unequal:
-                continue
-            if batch_case == 'equal' and unequal:
                 continue
             return batch, {
                 'search_windows': window + 1,
@@ -218,6 +265,12 @@ def select_real_b2_batch(bundle, sampler, *, batch_case, max_windows):
                 'sampler_cursor': sampler.cursor,
                 'selection_case': batch_case,
             }
+    if batch_case == 'equal':
+        raise RuntimeError(
+            f'no B=2 equal-length same-K pair found among {equal_candidate_count} '
+            f'real collated samples and {len(equal_candidates)} unique '
+            f'(K, sequence_length) keys in {max_windows} optimizer windows'
+        )
     raise RuntimeError(f'no B=2 {batch_case}-length same-K training batch found in {max_windows} optimizer windows')
 
 
