@@ -243,8 +243,8 @@ def test_relocated_dataset_duration_field_and_integrity(tmp_path):
     import shutil
     from PIL import Image
     from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
-    source = ROOT/'data/COCO_Search18/split_95_5'
-    root = tmp_path/'split_95_5/all'
+    source = ROOT/'data/COCO_Search18/split_subject_5_5'
+    root = tmp_path/'split_subject_5_5/all'
     root.mkdir(parents=True)
     for name in ('master_split_manifest.json', 'split_index.json'):
         shutil.copyfile(source/name, root.parent/name)

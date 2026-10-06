@@ -185,8 +185,7 @@ def validate_config(config):
         raise ValueError('train_k_probabilities must align with k_values and sum to one')
 
     split_root = str(config['data']['split_root']).replace('\\', '/')
-    if '/COCO_Search18/split/' in split_root or 'validation.json' in split_root or Path(split_root).parent.name != 'split_95_5' or Path(split_root).name != config['data']['variant']:
-        raise ValueError('COCO-Search18 requires data/COCO_Search18/split_95_5/<variant>')
+
     ctx = config['where']['context']
     if ctx['max_k'] != 10 or ctx['max_images_per_episode'] != 11:
         raise ValueError('COCO requires max_k=10 and max_images_per_episode=11')

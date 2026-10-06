@@ -25,14 +25,17 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where_collation'):
         batch = batch if batch is not None else collate_where_batch(
-            bundle.processor, episodes, bundle.end_fix_id, bundle.context_limit, config=bundle.config)
+            bundle.processor, episodes, bundle.end_fix_id, bundle.context_limit, config=bundle.config, image_cache=visual_cache)
     if tuple(episodes) != batch.episodes:
         raise ValueError('precollated WHERE batch does not match requested episodes')
-    inputs = to_model_device({k: v for k, v in batch.inputs.items() if k != 'labels'}, bundle.model)
+    cached_features = visual_cache is not None and visual_cache.features
+    inputs = to_model_device({k: v for k, v in batch.inputs.items()
+                              if k != 'labels' and not (cached_features and k == 'pixel_values')}, bundle.model)
     with stage('where_forward'):
         features = None
         if visual_cache is not None:
-            inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths])
+            inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths],
+                                                  host_pixel_values=batch.inputs['pixel_values'])
         if audit_disable_where_attention_mask:
             inputs = {k: v for k, v in inputs.items() if k != 'attention_mask'}
         outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']

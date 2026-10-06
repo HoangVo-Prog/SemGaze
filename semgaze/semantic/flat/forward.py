@@ -60,11 +60,12 @@ def frozen_vision_is_reusable(model):
     return True
 
 
-def prepare_semantic_batch(bundle, queries, states, *, where=None, generation_budget=None, reuse_query_vision=None):
+def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=None,
+                           generation_budget=None, reuse_query_vision=None):
     """One native prompt per sample, followed by differentiable batched assembly."""
     if not queries or len(queries) != len(states):
         raise ValueError('query/state batch counts differ')
-    reuse = (where is not None and (bundle.config['training'].get('reuse_query_vision', True)
+    reuse = ((where is not None or (visual_cache is not None and visual_cache.features)) and (bundle.config['training'].get('reuse_query_vision', True)
              if reuse_query_vision is None else reuse_query_vision)
              and frozen_vision_is_reusable(bundle.model))
     natives, embeddings, metadata = [], [], []
@@ -73,7 +74,7 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, generation_bu
         prompt = build_flat_prompt(query)
         native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
             build_flat_target(query.semantic) if generation_budget is None else None,
-            prompt=prompt, image_cache=image_cache)
+            prompt=prompt, image_cache=(visual_cache if visual_cache is not None else image_cache))
         n = len(query.x_px)
         length = native.inputs['input_ids'].shape[1]
         if length + n + (generation_budget or 0) > bundle.context_limit:
@@ -89,11 +90,16 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, generation_bu
         embedding = bundle.model.get_input_embeddings()(ids.to(bundle.input_row.device))
         if reuse:
             # Feature identity includes native preprocessing. Compare on host before reuse.
-            sample = where.batch.samples[b]
-            if sample.image_paths[-1] != query.image_path or not torch.equal(
-                    sample.inputs['pixel_values'][-1:], native.inputs['pixel_values']):
-                raise ValueError('WHERE/semantic query preprocessing differs; cannot reuse features')
-            features = where.query_image_features[b].to(embedding)
+            if where is not None:
+                sample = where.batch.samples[b]
+                if sample.image_paths[-1] != query.image_path or not torch.equal(
+                        sample.inputs['pixel_values'][-1:], native.inputs['pixel_values']):
+                    raise ValueError('WHERE/semantic query preprocessing differs; cannot reuse features')
+                features = where.query_image_features[b]
+            else:
+                features = visual_cache.get_or_compute_visual_features(bundle,
+                    paths=[query.image_path], host_pixel_values=native.inputs['pixel_values'])[0]
+            features = features.to(embedding)
             mask = (ids == bundle.processor.image_token_id)
             if int(mask.sum()) != features.shape[0]:
                 raise ValueError('semantic image placeholders do not match query features')

@@ -53,11 +53,15 @@ def generate_where_batch(bundle, episodes, *, cache=None):
         length = inputs['input_ids'].shape[1]
         if length + budget > bundle.context_limit:
             raise WhereContextOverflowError('frozen WHERE prefix + generation budget exceeds context limit')
-        inputs = to_model_device(inputs, bundle.model)
+        host_pixels = inputs['pixel_values']
+        cached_features = cache is not None and cache.features
+        inputs = to_model_device({k: v for k, v in inputs.items()
+                                  if not (cached_features and k == 'pixel_values')}, bundle.model)
         # Retain IDs for the original generation prefix/output contract while HF
         # uses cached multimodal embeddings only on its initial generation step.
         if cache is not None and cache.features:
-            fused, _ = cache.fuse(bundle, inputs, [p for s in samples for p in s.image_paths])
+            fused, _ = cache.fuse(bundle, inputs, [p for s in samples for p in s.image_paths],
+                                  host_pixel_values=host_pixels)
             inputs = fused | {'input_ids': inputs['input_ids']}
         output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
             eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
@@ -69,7 +73,10 @@ def generate_where_batch(bundle, episodes, *, cache=None):
 
 
 @torch.no_grad()
-def generate_where(bundle, episode):
+def generate_where(bundle, episode, *, cache=None):
+    if cache is not None:
+        bundle.model.eval()
+        return generate_where_batch(bundle, [episode], cache=cache)[0]
     bundle.model.eval()
     n = len(episode.query.x_px)
     tokenizer = bundle.processor.tokenizer

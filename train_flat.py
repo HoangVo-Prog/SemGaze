@@ -37,7 +37,7 @@ def main():
         config = load_config(args.config, overrides)
         require_single_process(config)
         if config['data']['variant'] != 'all':
-            raise ValueError('optimization Q_train requires split_95_5/all/train.json')
+            raise ValueError('optimization Q_train requires the all-variant train.json')
         if config['evaluation']['strategy'] != 'no':
             resolve_prediction_settings(config)
     except ValueError as exc:

@@ -20,26 +20,43 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def _stimulus_ids(payload, key, *, source):
+    values = payload.get(key)
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError(f'{source} must contain a list of nonempty string {key}')
+    if len(values) != len(set(values)):
+        raise ValueError(f'{source} contains duplicate {key}')
+    return set(values)
+
+
+def _master_stimulus_ids(master):
+    train = _stimulus_ids(master, 'train_stimulus_ids', source='master split manifest')
+    # New manifests describe one shared held-out image pool.  Keep accepting
+    # the old name for checkpoints/splits produced by the previous protocol,
+    # but never prefer it when the new field is present.
+    eval_key = 'eval_stimulus_ids' if 'eval_stimulus_ids' in master else 'test_stimulus_ids'
+    if eval_key not in master:
+        raise ValueError(
+            'master split manifest must contain eval_stimulus_ids '
+            '(or legacy test_stimulus_ids)'
+        )
+    return train, _stimulus_ids(master, eval_key, source='master split manifest')
+
+
 def read_persisted_splits(split_root=SPLIT_ROOT, *, data_config=None):
     root = Path(split_root).resolve()
-    if root.name == 'validation.json' or root.parent.name != 'split_95_5' or root.name not in ('all', 'tp_only', 'ta_only'):
-        raise ValueError('obsolete COCO-Search18 split root; use data/COCO_Search18/split_95_5/<variant>')
     if not root.is_dir():
         raise FileNotFoundError(root)
     manifest_path = root / 'split_manifest.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    protocol = 'cocosearch18_semgaze_master_955_v1'
     master_path = root.parent / 'master_split_manifest.json'
     index_path = root.parent / 'split_index.json'
     master = json.loads(master_path.read_text(encoding='utf-8'))
     index = json.loads(index_path.read_text(encoding='utf-8'))
-    if any(m.get('protocol_version') != protocol for m in (manifest, master, index)):
-        raise ValueError('obsolete COCO-Search18 protocol; regenerate split_95_5')
-    if set(manifest['split_files']) != {'train', 'test'} or set(manifest['split_file_sha256']) != {'train', 'test'}:
-        raise ValueError('COCO-Search18 must expose train/test only')
-    master_train, master_test = set(master['train_stimulus_ids']), set(master['test_stimulus_ids'])
-    if master_train & master_test:
-        raise ValueError('master train/test stimulus leakage')
+
+    master_train, master_eval = _master_stimulus_ids(master)
+    if master_train & master_eval:
+        raise ValueError('master train/eval stimulus leakage')
     if index['k_shot'] != [1, 5, 10] or index['num_exclusive_draws_per_k'] != 10:
         raise ValueError('expected K_eval=1/5/10 with 10 exclusive draws')
     entry = next((v for v in index['variants'] if v['variant'] == root.name), None)
@@ -54,6 +71,10 @@ def read_persisted_splits(split_root=SPLIT_ROOT, *, data_config=None):
     duration_field = data_config['duration']['source_field'] if data_config else 'T'
     if data_config and (variant != data_config['variant'] or unseen_subjects != set(data_config['unseen_subjects'])):
         raise ValueError('unexpected variant/unseen subjects in manifest')
+    if 'eval_stimulus_ids' in manifest:
+        variant_eval = _stimulus_ids(manifest, 'eval_stimulus_ids', source='variant split manifest')
+        if variant_eval != master_eval:
+            raise ValueError('variant eval stimulus membership differs from master eval pool')
     source = REPO_ROOT / manifest['curated_source_file']
     if not manifest['curated_source_sha256'] == master['curated_source_sha256'] == index['source_sha256'] == sha256_file(source):
         raise ValueError('curated-source checksum differs from manifest')
@@ -66,12 +87,27 @@ def read_persisted_splits(split_root=SPLIT_ROOT, *, data_config=None):
             raise ValueError(f'{split}: split checksum differs from manifest')
         records = json.loads(path.read_text(encoding='utf-8'))
         split_images = {r['stimulus_id'] for r in records}
-        if split_images != set(manifest[f'{split}_stimulus_ids']) or images & split_images:
+        declared_images = _stimulus_ids(manifest, f'{split}_stimulus_ids', source='variant split manifest')
+        if ((split == 'test' and split_images != declared_images)
+                or images & split_images):
             raise ValueError(f'{split}: stimulus membership/leakage mismatch')
-        master_images = master_train if split == 'train' else master_test
-        if not split_images <= master_images or (variant == 'all' and split_images != master_images):
-            raise ValueError(f'{split}: variant differs from shared master partition')
-        if len(split_images) != entry['image_counts'][split] or len(records) != entry['record_counts'][split]:
+        if split == 'train':
+            if (not split_images <= master_train or split_images & master_eval
+                    or not split_images <= declared_images
+                    or not declared_images <= master_train):
+                raise ValueError('train: stimulus membership leaks into master eval pool')
+        elif not split_images <= master_eval:
+            raise ValueError('test: stimulus membership is outside master eval pool')
+        if split == 'test' and any(r.get('subject') not in unseen_subjects for r in records):
+            raise ValueError('test.json contains a non-unseen-subject record')
+        record_counts = entry.get('record_counts', entry.get('runtime_record_counts'))
+        if not isinstance(record_counts, dict) or split not in record_counts:
+            raise ValueError(f'split_index missing {split} record count')
+        image_counts = entry.get('image_counts')
+        if (isinstance(image_counts, dict) and split in image_counts
+                and len(split_images) != image_counts[split]):
+            raise ValueError(f'{split}: split_index image count differs from persisted records')
+        if len(records) != record_counts[split]:
             raise ValueError('split_index counts differ from persisted records')
         images.update(split_images)
         for r in records:

@@ -10,18 +10,36 @@ from semgaze.semantic.flat.forward import prepare_semantic_batch
 
 
 @torch.inference_mode()
-def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None):
+def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None, visual_cache=None,
+                        projected_r_cache=None):
     if type(generation_budget) is not int or generation_budget <= 0:
         raise ValueError('declare a positive semantic generation budget explicitly')
     if not episodes or len({len(e.supports) for e in episodes}) != 1:
         raise ValueError('semantic prediction requires same-K episodes')
-    samples = [collate_where(bundle.processor, e, bundle.end_fix_id, bundle.context_limit,
-               config=bundle.config, image_cache=cache) for e in episodes]
-    batch = pack_where_batch(bundle.processor, episodes, samples, cache)
-    where = forward_where_batch(bundle, episodes, batch=batch, visual_cache=cache, use_cache=False)
-    states = bundle.projector(torch.cat(where.states)).split([len(e.query.x_px) for e in episodes])
+    visual_cache = cache if visual_cache is None else visual_cache
+    states, misses = [], []
+    for episode in episodes:
+        value = projected_r_cache.get(episode) if projected_r_cache is not None else None
+        if value is None:
+            misses.append(episode)
+            states.append(None)
+        else:
+            states.append(value)
+    where = None
+    if misses:
+        miss_samples = [collate_where(bundle.processor, e, bundle.end_fix_id, bundle.context_limit,
+                       config=bundle.config, image_cache=visual_cache) for e in misses]
+        miss_batch = pack_where_batch(bundle.processor, misses, miss_samples, visual_cache)
+        where = forward_where_batch(bundle, misses, batch=miss_batch, visual_cache=visual_cache, use_cache=False)
+        projected = bundle.projector(torch.cat(where.states)).split([len(e.query.x_px) for e in misses])
+        if projected_r_cache is not None:
+            for episode, value in zip(misses, projected):
+                projected_r_cache.put(episode, value)
+        iterator = iter(projected)
+        states = [next(iterator) if state is None else state for state in states]
     inputs, positions, _ = prepare_semantic_batch(bundle, [e.query for e in episodes], states,
-        where=where, generation_budget=generation_budget,
+        where=(where if len(misses) == len(episodes) else None), visual_cache=visual_cache,
+        generation_budget=generation_budget,
         reuse_query_vision=bundle.config['test']['cache']['frozen_visual_features'])
     tokenizer = bundle.processor.tokenizer
     inputs = to_model_device(left_pad_generation(inputs, tokenizer.pad_token_id), bundle.model)
@@ -39,9 +57,13 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None):
 
 
 @torch.no_grad()
-def evaluate_flat_episode(bundle, episode, *, generation_budget):
+def evaluate_flat_episode(bundle, episode, *, generation_budget, visual_cache=None,
+                          projected_r_cache=None):
     if type(generation_budget) is not int or generation_budget <= 0:
         raise ValueError('declare a positive semantic generation budget explicitly')
+    if visual_cache is not None or projected_r_cache is not None:
+        return evaluate_flat_batch(bundle, [episode], generation_budget=generation_budget,
+                                   visual_cache=visual_cache, projected_r_cache=projected_r_cache)[0]
     bundle.model.eval()
     bundle.projector.eval()
     where = forward_where(bundle, episode)

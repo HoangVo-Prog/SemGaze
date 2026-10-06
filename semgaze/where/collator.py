@@ -182,8 +182,8 @@ def pack_where_batch(processor, episodes, samples, image_cache=None):
                       image_cache if image_cache is not None else {})
 
 
-def collate_where_batch(processor, episodes, end_fix_id, context_limit=8192, *, config=None):
-    cache = {}
+def collate_where_batch(processor, episodes, end_fix_id, context_limit=8192, *, config=None, image_cache=None):
+    cache = {} if image_cache is None else image_cache
     samples = [collate_where(processor, e, end_fix_id, context_limit, config=config,
                              image_cache=cache) for e in episodes]
     return pack_where_batch(processor, episodes, samples, cache)

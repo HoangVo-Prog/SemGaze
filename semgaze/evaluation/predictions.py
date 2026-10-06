@@ -48,7 +48,7 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
             'where_generation': where, 'semantic_generation': semantic}
 
 
-def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
+def prediction_batches(bundle, episodes, *, budget, cache, path='both', projected_r_cache=None):
     """Yield canonical-order predictions while grouping same-K work internally.
 
     Index-based restoration permits repeated supplied training episodes.
@@ -71,11 +71,14 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
                 group = [block[i] for i in selected]
                 if settings['execution'] == 'serial':
                     generated = [(evaluate_where_episode(bundle, e) if path in ('where', 'both') else None,
-                                  evaluate_flat_episode(bundle, e, generation_budget=budget)
+                                  (evaluate_flat_batch(bundle, [e], generation_budget=budget, cache=cache,
+                                      projected_r_cache=projected_r_cache)[0] if projected_r_cache is not None else
+                                   evaluate_flat_episode(bundle, e, generation_budget=budget))
                                   if path in ('semantic', 'both') else None) for e in group]
                 else:
                     where = generate_where_batch(bundle, group, cache=cache) if path in ('where', 'both') else [None]*len(group)
-                    semantic = evaluate_flat_batch(bundle, group, generation_budget=budget, cache=cache) if path in ('semantic', 'both') else [None]*len(group)
+                    semantic = evaluate_flat_batch(bundle, group, generation_budget=budget, cache=cache,
+                                                   projected_r_cache=projected_r_cache) if path in ('semantic', 'both') else [None]*len(group)
                     generated = [({'oracle_length_conditioned': True, **w} if w is not None else None, f)
                                  for w, f in zip(where, semantic)]
                 results.update(zip(selected, generated))
@@ -86,7 +89,7 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
 
 
 def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
-                  epoch, step, split_manifest_identity):
+                  epoch, step, split_manifest_identity, visual_cache=None, projected_r_cache=None):
     """Exactly one supplied train batch; every unseen test query at every K.
 
     Episodes use same-K physical batches and retain full multi-image
@@ -115,8 +118,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     else:
         print('[EVAL][PRED] test predictions disabled', flush=True)
     cache_settings = bundle.config['test']['cache']
+    owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
-        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
+        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
     prediction_total = sum(len(queries) * len(manifest['support_draws'][str(k)]) for k in k_values)
     prediction_rate = RollingRate()
     prediction_completed = 0
@@ -125,6 +129,10 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
         # Greedy inference normally consumes no RNG. Preserve it explicitly so
         # even runtime-specific generation internals cannot change training draws.
         with torch.random.fork_rng(), test_mode(bundle):
+            cache.validate(bundle)
+            if projected_r_cache is not None:
+                projected_r_cache.validate(bundle, split_manifest_identity=split_manifest_identity,
+                                           cycle_id=(epoch, step), manifest=manifest)
             for split in ('train', 'test'):
                 path = directory / f'{split}.jsonl'
                 partial = path.with_suffix('.jsonl.partial')
@@ -135,7 +143,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                         interval = progress_interval(total)
                         train_rate = RollingRate()
                         for episode, generated in prediction_batches(bundle, train_batch,
-                                budget=settings['semantic_max_new_tokens'], cache=cache):
+                                budget=settings['semantic_max_new_tokens'], cache=cache,
+                                projected_r_cache=projected_r_cache):
                             count += 1
                             record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                 split=split, index=count, budget=settings['semantic_max_new_tokens'],
@@ -166,7 +175,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                 episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
                                     unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
                                 for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
-                                        budget=settings['semantic_max_new_tokens'], cache=cache), 1):
+                                        budget=settings['semantic_max_new_tokens'], cache=cache,
+                                        projected_r_cache=projected_r_cache), 1):
                                     count += 1
                                     record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                         split=split, index=count, budget=settings['semantic_max_new_tokens'],
@@ -209,7 +219,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                 partial.replace(path)
                 counts[split], paths[split] = count, str(path)
     finally:
-        cache.close()
+        if owns_cache:
+            cache.close()
         random.setstate(python_rng)
     prediction_time = time.perf_counter() - prediction_started
     print('[EVAL][PRED] complete', flush=True)

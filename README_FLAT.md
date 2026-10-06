@@ -124,11 +124,13 @@ retuning is selected without target measurements. See
 
 ### Query-coverage epochs, test evaluation and resume
 
-COCO-Search18 uses `data/COCO_Search18/split_95_5/all/train.json` and
-`test.json`, with a shared image partition in `master_split_manifest.json` and
-`split_index.json` in the parent directory. There is no validation split.
-The persisted master contains 4,048 train images / 213 test images and
-26,125 train records / 1,375 test records.
+COCO-Search18 uses `data/COCO_Search18/split_subject_5_5/all/train.json` and
+`test.json`, with a shared train/eval image partition in
+`master_split_manifest.json` and `split_index.json` in the parent directory.
+There is no validation split. The active runtime loader ignores the optional
+`test_seen.json`; current evaluation reads `test.json` only. The persisted
+master contains 3,519 train images / 742 held-out eval images, while the `all`
+variant contains 22,690 train records / 1,375 active test records.
 
 `Q_train` consists of every eligible train record whose subject is outside
 `{7,8,9}`. Each epoch shuffles this fixed universe and consumes every query once.

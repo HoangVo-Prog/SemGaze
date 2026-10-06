@@ -95,13 +95,16 @@ def serial_reference_losses(bundle, episode, *, batch=None):
     return values
 
 
-def batch_losses(bundle, episodes, *, batch=None, cache=None, profiler=None):
+def batch_losses(bundle, episodes, *, batch=None, cache=None, profiler=None, projected_r_cache=None):
     if not episodes or len({len(e.supports) for e in episodes}) != 1:
         raise ValueError('test requires a nonempty same-K batch')
     where = forward_where_batch(bundle, episodes, batch=batch, visual_cache=cache,
                                 profiler=profiler, use_cache=False)
     counts = [len(e.query.x_px) for e in episodes]
     states = bundle.projector(torch.cat(where.states)).split(counts)
+    if projected_r_cache is not None:
+        for episode, projected in zip(episodes, states):
+            projected_r_cache.put(episode, projected)
     flat, positions, metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
         where=where, profiler=profiler, response_offsets=True,
         reuse_query_vision=bundle.config.get('test', {}).get('cache', {}).get('frozen_visual_features', True))
@@ -177,14 +180,16 @@ def test_queries(train_by_id, test_records, manifest, unseen_subjects=None):
 
 
 
-def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_callback=None, profiler=None):
+def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_callback=None, profiler=None,
+                        visual_cache=None, projected_r_cache=None, cycle_id=None):
     """Full unseen-subject test queries at each of 10 frozen draws for K=1/5/10."""
     queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects'])
     k_values = bundle.config['evaluation']['k_values']
     settings = bundle.config['test']['loss']
     cache_settings = bundle.config['test']['cache']
+    owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
-        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
+        features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
     overall, by_k, k_times, batch_stats = EpisodeAccumulator(), {}, {}, {}
     draw_counts = {str(k): len(manifest['support_draws'][str(k)]) for k in k_values}
     expected = [f'{k}:{draw}:{q.record_id}' for k in k_values
@@ -194,6 +199,12 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
           f'episodes={len(expected)}', flush=True)
     try:
         with test_mode(bundle):
+            cache.validate(bundle)
+            if projected_r_cache is not None:
+                if cycle_id is None:
+                    projected_r_cache.validate(bundle, manifest=manifest)
+                else:
+                    projected_r_cache.validate(bundle, manifest=manifest, cycle_id=cycle_id)
             for k_position, k in enumerate(k_values, 1):
                 k_started = time.perf_counter()
                 subtotal, stats, keys = EpisodeAccumulator(), [], []
@@ -208,7 +219,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                     episodes = [frozen_episode(q, train_by_id, manifest, k, draw_id=draw,
                         unseen_subjects=bundle.config['data']['unseen_subjects']) for q in queries]
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler):
-                        rows = batch_losses(bundle, batch.episodes, batch=batch, cache=cache, profiler=profiler)
+                        rows = batch_losses(bundle, batch.episodes, batch=batch, cache=cache, profiler=profiler,
+                                            projected_r_cache=projected_r_cache)
                         if len(rows) != len(batch.episodes):
                             raise ValueError('test loss batch lost episodes')
                         for ep, row in zip(batch.episodes, rows):
@@ -246,7 +258,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                 batch_stats[str(k)] = stats
         cache_stats = cache.statistics()
     finally:
-        cache.close()
+        if owns_cache:
+            cache.close()
     return {**overall.finish(expected), 'test_by_k': by_k, 'k_values': list(k_values),
             'test_queries': len(queries), 'test_episodes': len(expected),
             'test_loss_traversals': sum(draw_counts.values()),

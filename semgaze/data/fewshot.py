@@ -9,7 +9,7 @@ class TrainingEpisodeSampler:
         from semgaze.model.config import default_section
         data_config = data_config if data_config is not None else default_section('data')
         if data_config['variant'] != 'all':
-            raise ValueError('Q_train must be built from split_95_5/all/train.json')
+            raise ValueError('Q_train must be built from the all-variant train.json')
 
         self.k_values = tuple(range(1, 11))
         self.probabilities = tuple(0.1 for _ in self.k_values)

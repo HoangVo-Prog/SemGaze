@@ -1,5 +1,6 @@
 """Query-coverage epochs; optimizer windows never cross epoch boundaries."""
 import json
+import inspect
 from pathlib import Path
 import time
 import torch
@@ -9,6 +10,8 @@ from semgaze.model.checkpoint import save_checkpoint
 from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
 from semgaze.training.batching import sample_optimizer_batches
 from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
+from semgaze.model.visual_cache import InferenceVisualCache
+from semgaze.evaluation.cache import ProjectedWhereCache
 
 
 def _format_loss(value):
@@ -171,25 +174,49 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             if should_evaluate:
                 evaluation_started = time.perf_counter()
                 print(f"[EVAL] starting epoch {sampler.epoch} evaluation", flush=True)
-                summary = {'event': 'epoch_test', 'step': step + 1,
-                           'epoch': sampler.epoch,
-                           **evaluate_test_epoch(bundle, train_by_id, test_records, manifest)}
                 has_predictions = settings['train_batches'] or settings['test_scope'] != 'none'
-                if not has_predictions:
-                    summary['evaluation_time_sec'] = time.perf_counter() - evaluation_started
-                bundle.trainer_history.append(summary)
-                stream.write(json.dumps(summary, allow_nan=False) + '\n')
-                stream.flush()
-                print(format_epoch_summary(summary), flush=True)
-                if has_predictions:
-                    predictions = predict_epoch(bundle, recent_episodes, train_by_id, test_records,
-                        manifest, epoch=summary['epoch'], step=step + 1,
-                        split_manifest_identity=split_manifest_identity)
-                    predictions['evaluation_time_sec'] = time.perf_counter() - evaluation_started
-                    bundle.trainer_history.append(predictions)
-                    stream.write(json.dumps(predictions, allow_nan=False) + '\n')
+                cache_settings = bundle.config['test']['cache']
+                shared_visual = InferenceVisualCache(
+                    preprocessing=cache_settings['support_preprocessing'],
+                    features=cache_settings['frozen_visual_features'],
+                    max_entries=cache_settings['max_entries']) if has_predictions else None
+                projected = ProjectedWhereCache(bundle=bundle,
+                    split_manifest_identity=split_manifest_identity,
+                    cycle_id=(sampler.epoch, step + 1)) if has_predictions else None
+                try:
+                    eval_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected,
+                                       cycle_id=(sampler.epoch, step + 1))
+                    eval_signature = inspect.signature(evaluate_test_epoch)
+                    if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in eval_signature.parameters.values()):
+                        eval_kwargs = {k: v for k, v in eval_kwargs.items() if k in eval_signature.parameters}
+                    summary = {'event': 'epoch_test', 'step': step + 1,
+                               'epoch': sampler.epoch,
+                               **evaluate_test_epoch(bundle, train_by_id, test_records, manifest, **eval_kwargs)}
+                    if not has_predictions:
+                        summary['evaluation_time_sec'] = time.perf_counter() - evaluation_started
+                    bundle.trainer_history.append(summary)
+                    stream.write(json.dumps(summary, allow_nan=False) + '\n')
                     stream.flush()
-                    print(format_prediction_summary(predictions), flush=True)
+                    print(format_epoch_summary(summary), flush=True)
+                    if has_predictions:
+                        prediction_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected)
+                        prediction_signature = inspect.signature(predict_epoch)
+                        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in prediction_signature.parameters.values()):
+                            prediction_kwargs = {k: v for k, v in prediction_kwargs.items() if k in prediction_signature.parameters}
+                        predictions = predict_epoch(bundle, recent_episodes, train_by_id, test_records,
+                            manifest, epoch=summary['epoch'], step=step + 1,
+                            split_manifest_identity=split_manifest_identity,
+                            **prediction_kwargs)
+                        predictions['evaluation_time_sec'] = time.perf_counter() - evaluation_started
+                        bundle.trainer_history.append(predictions)
+                        stream.write(json.dumps(predictions, allow_nan=False) + '\n')
+                        stream.flush()
+                        print(format_prediction_summary(predictions), flush=True)
+                finally:
+                    if projected is not None:
+                        projected.close()
+                    if shared_visual is not None:
+                        shared_visual.close()
                 print('[EVAL] complete', flush=True)
             # Save after test and generation, including at epoch ends even when the
             # ordinary step-based save interval does not land on the boundary.

@@ -1,10 +1,11 @@
 """Persisted master split and full real-record coverage without image/model IO."""
 from collections import Counter
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from semgaze.data.cocosearch18 import read_persisted_splits
+from semgaze.data.cocosearch18 import _master_stimulus_ids, read_persisted_splits
 from semgaze.data.fewshot import TrainingEpisodeSampler, frozen_episode
 from semgaze.model.config import ROOT, resolve_config
 from semgaze.training.loop import resolve_epoch_schedule
@@ -12,21 +13,29 @@ from semgaze.training.loop import resolve_epoch_schedule
 
 @pytest.fixture(scope='module')
 def persisted():
-    return {variant: read_persisted_splits(ROOT / 'data/COCO_Search18/split_95_5' / variant)
+    return {variant: read_persisted_splits(ROOT / 'data/COCO_Search18/split_subject_5_5' / variant)
             for variant in ('all', 'tp_only', 'ta_only')}
 
 
 def test_master_partition_and_frozen_draws(persisted):
-    master, _, _ = persisted['all']
-    assert {s: len(rows) for s, rows in master.items()} == {'train':26125, 'test':1375}
-    image_sets = {s: {r['stimulus_id'] for r in rows} for s, rows in master.items()}
-    assert [len(image_sets[s]) for s in ('train','test')] == [4048, 213]
-    assert not image_sets['train'] & image_sets['test']
+    master_path = ROOT / 'data/COCO_Search18/split_subject_5_5/master_split_manifest.json'
+    master = json.loads(master_path.read_text(encoding='utf-8'))
+    master_train, master_eval = _master_stimulus_ids(master)
     for variant, (raw, manifest, identity) in persisted.items():
         assert set(raw) == {'train', 'test'} and len(identity) == 64
         assert 'validation_supports' not in manifest
-        for split, rows in raw.items():
-            assert {r['stimulus_id'] for r in rows} <= image_sets[split]
+        variant_root = ROOT / 'data/COCO_Search18/split_subject_5_5' / variant
+        test_rows = json.loads((variant_root / 'test.json').read_text(encoding='utf-8'))
+        test_seen_rows = json.loads((variant_root / 'test_seen.json').read_text(encoding='utf-8'))
+        assert [r['record_id'] for r in raw['test']] == [r['record_id'] for r in test_rows]
+        assert not {r['record_id'] for r in raw['test']} & {r['record_id'] for r in test_seen_rows}
+        train_images = {r['stimulus_id'] for r in raw['train']}
+        test_images = {r['stimulus_id'] for r in raw['test']}
+        assert train_images <= master_train
+        assert test_images <= master_eval
+        assert not train_images & master_eval
+        assert {r['subject'] for r in raw['test']} <= {7, 8, 9}
+        assert test_images == set(manifest['test_stimulus_ids'])
         train = {r['record_id']: SimpleNamespace(**r) for r in raw['train']}
         queries = [SimpleNamespace(**r) for r in raw['test'] if r['subject'] in {7,8,9}]
         for k in (1,5,10):
@@ -68,10 +77,18 @@ def test_complete_real_query_universe_and_deterministic_resume(persisted):
 
 
 @pytest.mark.parametrize('path', ['data/COCO_Search18/split/all',
-                                  'data/COCO_Search18/split_95_5/all/validation.json'])
-def test_obsolete_paths_fail_before_io(path):
-    with pytest.raises(ValueError, match='obsolete'):
+                                  'data/COCO_Search18/split_subject_5_5/all/validation.json'])
+def test_non_directory_split_roots_fail_before_io(path):
+    with pytest.raises(FileNotFoundError):
         read_persisted_splits(ROOT / path)
+
+
+def test_master_manifest_compatibility_prefers_shared_eval_pool():
+    assert _master_stimulus_ids({'train_stimulus_ids': ['a'], 'test_stimulus_ids': ['old'],
+                                 'eval_stimulus_ids': ['new']}) == ({'a'}, {'new'})
+    assert _master_stimulus_ids({'train_stimulus_ids': ['a'], 'test_stimulus_ids': ['old']}) == ({'a'}, {'old'})
+    with pytest.raises(ValueError, match='eval_stimulus_ids'):
+        _master_stimulus_ids({'train_stimulus_ids': ['a']})
 
 
 def test_schedule_tail_debug_cap_and_distributed_fail_closed(monkeypatch):
