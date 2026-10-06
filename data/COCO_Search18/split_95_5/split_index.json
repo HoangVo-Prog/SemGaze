@@ -1,0 +1,73 @@
+{
+  "k_shot": [
+    1,
+    5,
+    10
+  ],
+  "master_attempt_id": 1397,
+  "master_image_counts": {
+    "test": 213,
+    "train": 4048
+  },
+  "master_selected_score": 1.1840762282116508,
+  "master_split_manifest": "data/COCO_Search18/split_95_5/master_split_manifest.json",
+  "num_exclusive_draws_per_k": 10,
+  "protocol_version": "cocosearch18_semgaze_master_955_v1",
+  "source_file": "data/COCO_Search18/COCOSearch-18.json",
+  "source_sha256": "bb80d858c390ee8ce03039fcc97da2d5430a5c8809c29551e99a0f4624f997d6",
+  "unseen_subject_ids": [
+    7,
+    8,
+    9
+  ],
+  "variants": [
+    {
+      "image_counts": {
+        "test": 119,
+        "train": 2100
+      },
+      "images": 2219,
+      "manifest_sha256": "6f4f77d77158bd3ea52941f1293ecf49e9e453cdc5ab7654bf4de4ebed4b31c5",
+      "output_dir": "data/COCO_Search18/split_95_5/tp_only",
+      "record_counts": {
+        "test": 744,
+        "train": 13256
+      },
+      "records": 14000,
+      "shared_support_distinct_images": 423,
+      "variant": "tp_only"
+    },
+    {
+      "image_counts": {
+        "test": 95,
+        "train": 1965
+      },
+      "images": 2060,
+      "manifest_sha256": "8afcf4096ab80c44c8a0c133f19bc82674b663ddb550ca6c4317ee11d89b1fd8",
+      "output_dir": "data/COCO_Search18/split_95_5/ta_only",
+      "record_counts": {
+        "test": 631,
+        "train": 12869
+      },
+      "records": 13500,
+      "shared_support_distinct_images": 405,
+      "variant": "ta_only"
+    },
+    {
+      "image_counts": {
+        "test": 213,
+        "train": 4048
+      },
+      "images": 4261,
+      "manifest_sha256": "29bd5188dcdde0dcdac4473b22c5be44bfc1aebffdf31bfcc0e08f8ace120be8",
+      "output_dir": "data/COCO_Search18/split_95_5/all",
+      "record_counts": {
+        "test": 1375,
+        "train": 26125
+      },
+      "records": 27500,
+      "shared_support_distinct_images": 826,
+      "variant": "all"
+    }
+  ]
+}

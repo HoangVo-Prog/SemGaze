@@ -116,8 +116,8 @@ def empty_result(variant):
 def scheduler_horizon(config, benchmark_steps):
     training = config['training']
     horizon = training['max_steps']
-    if horizon is None and training['epochs'] is not None and training['steps_per_epoch'] is not None:
-        horizon = training['epochs'] * training['steps_per_epoch']
+    if horizon is None:
+        horizon = training.get('total_optimizer_updates')
     if horizon is not None and horizon < benchmark_steps:
         raise ValueError('benchmark warmup + steps exceeds the configured training horizon; reduce benchmark steps')
     return benchmark_steps if horizon is None else horizon
@@ -225,11 +225,16 @@ def load_real_sampler(config):
     from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
     from semgaze.data.fewshot import TrainingEpisodeSampler
     data = config['data']
+    if data['variant'] != 'all':
+        raise ValueError('training benchmark requires split_95_5/all')
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
     adapter = CocoSearch18Adapter(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                                   duration_field=data['duration']['source_field'])
     records = [adapter(r) for r in raw['train'] if r['subject'] not in data['unseen_subjects']]
-    return TrainingEpisodeSampler(records, config['experiment']['seed'], data_config=data), dict(
+    from semgaze.training.loop import resolve_epoch_schedule
+    sampler = TrainingEpisodeSampler(records, config['experiment']['seed'], data_config=data)
+    resolve_epoch_schedule(config, sampler.query_count)
+    return sampler, dict(
         split_manifest_sha256=identity, train_record_count=len(records),
         train_subjects=sorted({r.subject for r in records}), split='train',
         k_values=data['fewshot']['k_values'], k_probabilities=data['fewshot']['train_k_probabilities'])
@@ -242,6 +247,8 @@ def run_measured_step(bundle, sampler, step, profiler, result):
     profiler.times = {}
     episode_rows, losses = [], []
     with profiler.stage('step'):
+        if sampler.epoch_complete():
+            sampler.start_epoch()
         with profiler.stage('sampling_collation'):
             batches, accepted, rejected = sample_optimizer_batches(
                 bundle, sampler, sampling_group_size=result['sampling_group_size'])
@@ -253,11 +260,11 @@ def run_measured_step(bundle, sampler, step, profiler, result):
         diagnose = step == 0 or (interval > 0 and (step + 1) % interval == 0)
         for micro, batch in enumerate(batches):
             output = run_flat_training_step(bundle, batch.episodes, where_batch=batch,
-                zero_grad=micro == 0, loss_scale=1 / len(batches), profiler=profiler,
+                zero_grad=micro == 0, loss_scale=len(batch.episodes) / len(accepted), profiler=profiler,
                 diagnostics=diagnose and micro == len(batches)-1)
             for e, metadata in zip(batch.episodes, output['episodes']):
                 episode_rows.append(metadata | episode_identity(e) | {'physical_batch_index': micro})
-            losses.append(output['loss_total'])
+            losses.append(output['loss_total'] * len(batch.episodes) / len(accepted))
         with profiler.stage('gradient_clipping'):
             clip_and_check_gradients(bundle)
         with profiler.stage('optimizer_step'):
@@ -265,7 +272,7 @@ def run_measured_step(bundle, sampler, step, profiler, result):
         with profiler.stage('scheduler_step'):
             bundle.scheduler.step()
     # CUDA is already synchronized by the outer boundary. Report I/O is excluded.
-    loss = float(sum(losses) / len(losses))
+    loss = float(sum(losses))
     if not math.isfinite(loss):
         raise RuntimeError('non-finite total loss')
     result.pop('inflight_episodes', None)

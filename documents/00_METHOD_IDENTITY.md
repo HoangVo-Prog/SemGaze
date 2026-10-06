@@ -47,7 +47,7 @@ $$
 (I_1,Q_1,S_1),\ldots,(I_K,Q_K,S_K)
 \right),
 \qquad
-K\in\{1,5,10\},
+1\le K\le K_{\max},
 $$
 
 and a new query:
@@ -55,6 +55,8 @@ and a new query:
 $$
 (I_q,Q_q).
 $$
+
+The method treats support cardinality as variable context rather than a method-specific discrete mode. In the current COCO-Search18 realization, training samples $K_{\mathrm{train}}\in\{1,\ldots,10\}$, while canonical test reporting evaluates $K_{\mathrm{eval}}\in\{1,5,10\}$. The train-time cardinality is not a coverage axis.
 
 Each support demonstration contains:
 
@@ -273,7 +275,9 @@ The branches share upstream exploration states but generate their targets indepe
 
 ## 8. High-level training flow
 
-For one training episode, the primary `multibranch` method-level flow is:
+Training is organized by **query-coverage epochs**. One epoch is one shuffled-without-replacement traversal of every eligible optimization query. For each query, train-time support cardinality and same-subject support identity/order are sampled stochastically; only query membership is guaranteed by the epoch.
+
+For one training episode within an epoch, the primary `multibranch` method-level flow is:
 
 ```text
 same-subject ordered support demonstrations
@@ -369,7 +373,7 @@ The current executable scope is COCO-Search18. Other datasets are outside the cu
 
 ### 11.2 Context cost
 
-Raw support images and support scanpaths increase multimodal context cost with $K$.
+Raw support images and support scanpaths increase multimodal context cost with $K$. The current implementation supports train-time cardinalities up to $K_{\max}=10$ under the frozen context budget; this is an implementation bound, not a claim that the method learns separate K-specific modes.
 
 ### 11.3 No support retrieval
 
@@ -402,6 +406,9 @@ The current WHERE protocol receives $N_q$, so autonomous stopping is outside the
 - **Dataset scope:** COCO-Search18 current protocol.
 - **Backbone:** shared `OpenGVLab/InternVL3_5-8B-HF` causal multimodal VLM.
 - **Personalization:** ordered raw same-subject image + task + observed-scanpath demonstrations.
+- **Train-time support cardinality:** stochastic $K_{\mathrm{train}}\in\{1,\ldots,10\}$; K is not a coverage axis.
+- **Evaluation shot settings:** $K_{\mathrm{eval}}\in\{1,5,10\}$.
+- **Training coverage unit:** one epoch = one shuffled-without-replacement traversal of all eligible optimization queries.
 - **Persistent user representation:** none.
 - **Test-time parameter update:** none.
 - **WHERE:** autoregressive `(x, y, duration)` scanpath language.

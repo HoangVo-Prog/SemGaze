@@ -6,7 +6,7 @@ This file is the canonical owner for the current SemGaze evaluation protocol, in
 
 It defines:
 
-- seen-subject validation for model selection;
+- epoch-end test evaluation after complete query coverage;
 - unseen-subject final evaluation;
 - the free-running WHERE evaluation path;
 - the GT-trajectory-conditioned semantic evaluation path for both semantic modes;
@@ -31,11 +31,11 @@ The current executable dataset/variant scope is:
 dataset = COCO-Search18
 runtime variant = all
 unseen subjects = {7, 8, 9}
-K = {1, 5, 10}
+evaluation K = {1, 5, 10}
 final support draws = 10 frozen exclusive draws per K
 ```
 
-Evaluation must consume the persisted split files and frozen support manifests produced by `01_FEWSHOT_SPEC.md`. It must not recreate split membership or resample frozen validation/final supports.
+Evaluation must consume the persisted split files and frozen support manifests produced by `01_FEWSHOT_SPEC.md`. It must not recreate split membership or resample frozen test supports.
 
 ---
 
@@ -196,44 +196,13 @@ The table above describes the primary `multibranch` branch inputs. The flat base
 
 ---
 
-## 4. Seen-subject validation for model selection
+## 4. Epoch-end test evaluation
 
-Validation follows the frozen protocol from `01_FEWSHOT_SPEC.md`.
-
-For every seen subject $u$ and every:
-
-$$
-K\in\{1,5,10\},
-$$
-
-use:
-
-```text
-support -> same seen subject, data/COCO_Search18/split/all/train.json
-query   -> same seen subject, data/COCO_Search18/split/all/validation.json
-```
-
-For fixed `(subject, K)`:
-
-- use the frozen ordered validation support set stored in the split manifest;
-- reuse that same support set for every validation query of the subject;
-- do not reshuffle or resample support per query;
-- evaluate the complete eligible validation query set for that subject;
-- do not use unseen-subject gaze for checkpoint selection, early stopping, hyperparameter selection, threshold selection, or metric configuration.
-
-The exact validation-support membership/order is data metadata owned by `01_FEWSHOT_SPEC.md`, not reconstructed here.
-
-### 4.1 Model-selection aggregation
-
-The exact scalar used for checkpoint selection must be declared in the resolved experiment configuration before training/evaluation begins.
-
-This specification does not silently convert several WHERE and semantic metrics into one undeclared composite score.
-
-If checkpoint selection uses a WHERE metric, the chosen metric and direction must be explicit.
-
-If semantic metrics are used for model selection in a future experiment, their aggregation must also be explicitly defined rather than inferred by implementation code.
-
----
+COCO-Search18 has no validation split. Complete the current query-coverage epoch,
+evaluate the unseen-subject test queries using the frozen draws below, log `test`
+metrics, then continue training. Epoch boundaries must not be defined by arbitrary
+optimizer-step counts. No automatic checkpoint-selection scalar is introduced.
+Test support membership and order are frozen and cannot be resampled on overflow.
 
 ## 5. Unseen-subject final evaluation
 
@@ -246,8 +215,8 @@ $$
 For final evaluation:
 
 ```text
-support source -> data/COCO_Search18/split/all/train.json
-query source   -> data/COCO_Search18/split/all/test.json
+support source -> data/COCO_Search18/split_95_5/all/train.json
+query source   -> data/COCO_Search18/split_95_5/all/test.json
 ```
 
 For each:
@@ -479,7 +448,7 @@ Use the canonical frozen same-subject support block for the query subject.
 
 Evaluate the corresponding non-personalized context with no support demonstrations.
 
-This is a control condition outside the canonical $K\in\{1,5,10\}$ personalized episode distribution and must be labeled as such.
+This is a control condition outside the canonical $K_{\mathrm{eval}}\in\{1,5,10\}$ personalized evaluation settings and must be labeled as such.
 
 ### 12.3 Shuffled-subject support control
 
@@ -675,8 +644,8 @@ These are evaluation-configuration decisions, not permission for runtime code to
 
 - Current dataset/variant is COCO-Search18 `all`.
 - Unseen subjects are exactly 7, 8, and 9.
-- $K\in\{1,5,10\}$.
-- Final evaluation uses 10 frozen exclusive support draws per $K$.
+- Canonical evaluation shot settings are $K_{\mathrm{eval}}\in\{1,5,10\}$; this does not define the train-time K distribution.
+- Final evaluation uses 10 frozen exclusive support draws per evaluation $K$.
 - One frozen support block is reused across the full corresponding query set.
 - Subjects 7, 8, and 9 use the same ordered support trial identities for a fixed `(K, draw_id)`, resolved to subject-specific scanpaths.
 - WHERE is free-running but oracle-length-conditioned.

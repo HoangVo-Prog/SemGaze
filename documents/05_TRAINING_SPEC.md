@@ -18,6 +18,7 @@ It defines:
 - gradient flow and backward/optimizer ordering;
 - the canonical trainable parameter set;
 - checkpoint/resume requirements;
+- epoch-based query coverage and sampler-state requirements;
 - training-time fail-fast assertions.
 
 
@@ -35,7 +36,7 @@ The flat baseline reuses the shared training infrastructure defined here: model 
 
 Upstream contracts are referenced rather than redefined:
 
-- curated benchmark materialization, train/validation/test split generation, subject partition, and episodic support/query sampling -> `01_FEWSHOT_SPEC.md`;
+- curated benchmark materialization, train/test split generation, subject partition, epoch-level query traversal, and stochastic support construction -> `01_FEWSHOT_SPEC.md`;
 - WHERE prompt, scanpath serializer, `<END_FIX>` placement, query-only WHERE target mask, and `L_WHERE` token definition -> `02_WHERE_SPEC.md`;
 - `<END_FIX>` hidden-state readout, shared projector `P_E`, branch-selected state interface, and direct continuous-state insertion -> `03_STATE_SPEC.md`;
 - primary multibranch WHAT/WHY/HOW target units, oracle WHY groups, branch prompts/targets, and semantic execution -> `multi/04_SEMANTIC_MULTI_SPEC.md`;
@@ -48,7 +49,8 @@ The high-level training path below is specifically the primary `multibranch` pat
 
 ```text
 curated SemGaze train split
-    -> same-subject K-shot episode
+    -> shuffled-without-replacement query epoch
+    -> variable-cardinality same-subject support episode
     -> teacher-forced WHERE forward
          -> L_WHERE
          -> query <END_FIX> hidden states F
@@ -60,8 +62,8 @@ curated SemGaze train split
          -> L_WHAT, L_WHY, L_HOW
     -> branch-balanced L_SEM
     -> L_total
-    -> one joint backward
-    -> one optimizer step
+    -> one joint backward / gradient accumulation
+    -> optimizer step on the configured accumulation boundary
 ```
 
 ---
@@ -80,7 +82,7 @@ raw COCO-Search18
     -> WHAT / WHY / HOW generation only for retained trials
     -> curated merged COCOSearch-18.json
     -> deterministic stimulus-level SemGaze split
-    -> data/COCO_Search18/split/all/train.json
+    -> data/COCO_Search18/split_95_5/all/train.json
     -> THIS TRAINING SPEC
 ```
 
@@ -88,7 +90,7 @@ raw COCO-Search18
 Training code must **not**:
 
 - read the original COCO-Search18 split files to assign membership;
-- recreate train/validation/test membership at runtime;
+- recreate train/test membership at runtime;
 - infer trial correctness from `answer`, `condition`, fixation text, WHAT text, or any other final annotation field;
 - regenerate WHAT/WHY/HOW online;
 - move records between splits to repair a coverage problem.
@@ -124,7 +126,7 @@ query = (I_q, Q_q, S_q, semantic_q)
 where:
 
 - support and query belong to the same seen subject;
-- `K in {1,5,10}` follows the sampling distribution in `01_FEWSHOT_SPEC.md`;
+- `K_train` is sampled from `Uniform({1,...,10})` under `01_FEWSHOT_SPEC.md` and is not a query-coverage axis;
 - supports use distinct stimulus images and exclude the query image;
 - support order is already final when handed to WHERE;
 - support semantic annotations are **not model inputs**;
@@ -134,7 +136,7 @@ Training must preserve the exact support membership and order supplied by `01_FE
 
 ### 2.4 Training context overflow
 
-If the complete canonical few-shot WHERE input exceeds the configured context budget, reject only that sampled training episode and resample according to `01_FEWSHOT_SPEC.md`.
+If the complete canonical few-shot WHERE input exceeds the configured context budget, keep the current epoch query and sampled `K_train` fixed and resample only the same-subject support realization/order according to `01_FEWSHOT_SPEC.md`. If the configured finite retry budget is exhausted, fail loudly.
 
 Context overflow never permits:
 
@@ -142,7 +144,9 @@ Context overflow never permits:
 - dropping a support;
 - reordering supports;
 - truncating one support scanpath;
-- substituting another support inside the already-constructed episode.
+- substituting another support inside the already-constructed episode after it has been accepted for execution;
+- replacing or skipping the current epoch query;
+- changing/resampling `K_train` as an overflow repair.
 
 Semantic context overflow is governed by the active semantic spec and is a hard error for that record; semantic targets/states are never silently truncated or pooled.
 
@@ -250,20 +254,73 @@ Do not create branch-specific projectors.
 
 ---
 
-## 4. Training episode construction
+## 4. Training epoch and episode construction
 
-Episode membership and stochastic sampling are owned by `01_FEWSHOT_SPEC.md`.
+Query membership, epoch traversal, and stochastic support construction are owned by `01_FEWSHOT_SPEC.md`.
 
-For each sampled episode:
+Let:
 
-1. select one seen subject;
-2. sample `K in {1,5,10}` according to the frozen few-shot distribution;
-3. sample one valid query from the persisted SemGaze train split;
-4. sample `K` same-subject support records under the image-identity constraints of `01_FEWSHOT_SPEC.md`;
-5. randomize support order according to `01_FEWSHOT_SPEC.md`;
-6. pass the ordered records unchanged to WHERE.
+$$
+\mathcal Q_{\mathrm{train}}
+$$
 
-The training adapter may batch multiple episodes only if the multimodal packing preserves each episode independently and all masks/state indices remain exact.
+be the complete eligible optimization-query universe and:
+
+$$
+N_Q=|\mathcal Q_{\mathrm{train}}|.
+$$
+
+### 4.1 Canonical training budget unit
+
+The canonical top-level training budget is **epoch-based**:
+
+```text
+num_train_epochs = E
+```
+
+One epoch is one shuffled-without-replacement traversal of all $N_Q$ optimization queries. `max_steps` or an arbitrary `steps_per_epoch` must not redefine data coverage in the canonical protocol.
+
+The three distinct units are:
+
+```text
+coverage unit  = one epoch = all optimization queries exactly once
+data unit      = one personalized query episode
+optimizer unit = one gradient-accumulated parameter update
+```
+
+An epoch is therefore not one optimizer step. Optimizer steps occur inside the epoch according to physical batch size and gradient accumulation.
+
+### 4.2 Epoch permutation
+
+At the beginning of epoch $e$, obtain the permutation $\Pi_e$ defined by `01_FEWSHOT_SPEC.md` and consume every query exactly once.
+
+For each query in that permutation:
+
+1. keep the current query fixed;
+2. sample `K_train ~ Uniform({1,...,10})`;
+3. sample `K_train` same-subject support records under the image-identity constraints of `01_FEWSHOT_SPEC.md`;
+4. randomize support order according to `01_FEWSHOT_SPEC.md`;
+5. pass the ordered records unchanged to WHERE.
+
+`K_train` and support identity/order are stochastic context augmentation. Neither K nor support combinations are coverage targets.
+
+### 4.3 Batching and incomplete final optimizer group
+
+The training adapter may batch multiple episodes only if multimodal packing preserves each episode independently and all masks/state indices remain exact.
+
+No batching or sharding strategy may drop or duplicate optimization queries. In particular, query-level `drop_last=True` is forbidden.
+
+If the final physical/gradient-accumulation group of an epoch contains fewer episodes than the configured effective batch, process those remaining episodes with correct loss scaling rather than carrying them into the next epoch or dropping them. This preserves the exact one-query-once epoch contract.
+
+For one device with physical episode batch size $B$ and gradient-accumulation factor $G$, the nominal optimizer updates per epoch are:
+
+$$
+T_{\mathrm{epoch}}
+=
+\left\lceil\frac{N_Q}{BG}\right\rceil,
+$$
+
+with the final update possibly containing fewer than $BG$ episodes. Under synchronized distributed training with world size $W$, replace $BG$ by $BGW$ for global update accounting; the global query-sharding contract in Section 15 still guarantees one visit per query.
 
 ---
 
@@ -647,11 +704,11 @@ For one `semantic_mode="multibranch"` episode, execute:
 12. Execute HOW semantic forward and compute L_HOW.
 13. Compute branch-balanced L_SEM.
 14. Compute L_total.
-15. Call backward once on L_total.
-16. Apply gradient clipping if configured.
-17. Optimizer step.
-18. Scheduler step.
-19. Zero gradients.
+15. Backpropagate the correctly scaled L_total into the current gradient-accumulation window.
+16. On an optimizer-update boundary (including the final partial window of an epoch), apply gradient clipping if configured.
+17. On that boundary, run optimizer step.
+18. On that boundary, run scheduler step.
+19. On that boundary, zero gradients.
 ```
 
 ### 10.2 One shared computation graph
@@ -785,7 +842,7 @@ Do not require every individual gradient element to be nonzero.
 
 ## 13. Optimizer and primary starting configuration
 
-The optimizer family, scheduler, and starting configuration in this section are shared infrastructure reused by both semantic modes. To stay close to the released DeepGaze3.5-VL recipe while adding the SemGaze-specific parameters, use:
+The optimizer family, scheduler, and starting configuration in this section are shared infrastructure reused by both semantic modes. The **training budget is expressed in epochs**, while the optimizer and scheduler still advance on optimizer-update steps. To stay close to the released DeepGaze3.5-VL recipe while adding the SemGaze-specific parameters, use:
 
 ```text
 optimizer        = AdamW
@@ -806,10 +863,24 @@ Framework defaults such as Adam betas, epsilon, weight decay, and max-grad-norm 
 
 Per-device episode batch size and gradient accumulation may be reduced/increased for available memory, provided:
 
-- the episode distribution from `01_FEWSHOT_SPEC.md` is unchanged;
+- the epoch-level query traversal from `01_FEWSHOT_SPEC.md` is preserved exactly;
+- no optimization query is dropped or duplicated;
+- the train-time K/support stochastic law is unchanged;
 - loss normalization from Sections 8-9 is unchanged;
 - support membership/order is unchanged;
 - direct semantic gradient flow to WHERE states is preserved.
+
+For `num_train_epochs = E`, total scheduler/optimizer updates are derived from the actual epoch traversal and batching configuration rather than supplied as an independent coverage budget. For physical episode batch size $B$ per device, gradient accumulation $G$, and world size $W$:
+
+$$
+T_{\mathrm{updates}}
+=
+E\left\lceil\frac{N_Q}{BGW}\right\rceil.
+$$
+
+For the current single-device setting, $W=1$.
+
+The cosine schedule and `warmup_ratio` are applied over these optimizer updates. Test evaluation/checkpoint cadence should be expressed in completed epochs (for example, every configured integer number of epochs), not by inventing a separate arbitrary `steps_per_epoch`.
 
 ---
 
@@ -830,6 +901,10 @@ scheduler state when resumable training is required
 resolved training configuration
 SemGaze split manifest identity / hash
 protocol version
+current epoch index
+current query cursor within the epoch permutation
+epoch permutation seed/state or equivalent deterministic regeneration state
+K/support RNG state needed for exact continuation
 ```
 
 When PEFT `trainable_token_indices` is used, save/load through the PEFT-supported adapter path so the selected vocabulary rows are part of the adapter state.
@@ -844,7 +919,9 @@ Resume order is normative:
 5. load adapter/trainable-token state
 6. reconstruct and load P_E
 7. restore optimizer/scheduler if resuming optimization
-8. verify END_FIX token ID and trainability assertions
+8. restore the exact epoch/query cursor and K/support RNG state
+9. regenerate/restore the same current-epoch query permutation
+10. verify END_FIX token ID and trainability assertions
 ```
 
 Fail resume if:
@@ -853,7 +930,8 @@ Fail resume if:
 - the selected SemGaze split manifest differs unexpectedly;
 - `P_E` is missing;
 - required trainable-token state is missing;
-- a row-selective checkpoint is silently loaded with the `<END_FIX>` row frozen.
+- a row-selective checkpoint is silently loaded with the `<END_FIX>` row frozen;
+- an exact-resume checkpoint cannot restore the current epoch/query cursor or stochastic support state.
 
 ---
 
@@ -873,7 +951,15 @@ HOW branch mean  = mean over valid HOW example losses
 
 If multiple episodes are accumulated before an optimizer step, average/sum them consistently with the framework's declared gradient-accumulation semantics. Do not allow trajectories with more fixations/groups to receive larger semantic weight merely because they create more branch examples.
 
-Worker/rank seeding may change the sampled episode sequence but must implement the exact probability law in `01_FEWSHOT_SPEC.md`. The resolved global seed and distributed world size must be logged for reproducibility.
+Distributed execution must preserve global query coverage. Construct or deterministically define one global epoch permutation, then shard it across ranks so that rank-local query sets are disjoint and their union is the complete epoch query set:
+
+$$
+\bigcup_r \mathcal Q_e^{(r)}=\mathcal Q_{\mathrm{train}},
+\qquad
+\mathcal Q_e^{(r)}\cap\mathcal Q_e^{(s)}=\varnothing\ \text{for }r\ne s.
+$$
+
+Ranks must not independently sample optimization queries with replacement. Worker/rank seeding may change K/support realizations only within the stochastic law in `01_FEWSHOT_SPEC.md`. The resolved global seed and distributed world size must be logged for reproducibility.
 
 ---
 
@@ -883,6 +969,8 @@ Training must stop rather than guess or silently repair when any of the followin
 
 - runtime data was loaded from raw/original benchmark splits instead of the persisted SemGaze split artifact;
 - a train query belongs to an unseen subject;
+- an epoch drops, duplicates, or replaces an optimization query;
+- an epoch completes without visiting every optimization query exactly once;
 - support/query membership violates `01_FEWSHOT_SPEC.md`;
 - support order changes between sampler output and WHERE rendering;
 - support semantic annotations are inserted into the WHERE support turns;
@@ -899,6 +987,7 @@ Training must stop rather than guess or silently repair when any of the followin
 - semantic context overflow is repaired by dropping/pooling states;
 - `P_E` is omitted from the optimizer;
 - checkpoint saving omits required `<END_FIX>` trainable state or `P_E`;
+- an exact-resume checkpoint omits epoch/query sampler state;
 - a structured-output `L_STRUCT` path is still active.
 
 ---
@@ -938,7 +1027,9 @@ The following are non-negotiable for the primary `multibranch` implementation; s
 
 - runtime optimization uses only the persisted **curated SemGaze train split**;
 - raw/original COCO-Search18 membership is not consulted at runtime;
-- seen/unseen subject partition and episodic sampling come from `01_FEWSHOT_SPEC.md`;
+- seen/unseen subject partition, query-coverage epochs, and stochastic support construction come from `01_FEWSHOT_SPEC.md`;
+- one completed epoch visits every eligible optimization query exactly once in shuffled order;
+- train-time K is sampled from `1..10` as stochastic context cardinality and is not a coverage axis;
 - raw same-subject supports remain in the WHERE causal context;
 - support assistant labels are masked, not deleted;
 - final query scanpath is the only directly supervised WHERE response;
@@ -955,7 +1046,7 @@ The following are non-negotiable for the primary `multibranch` implementation; s
 - semantic loss is branch-balanced after within-branch averaging;
 - `L_total = L_WHERE + L_SEM` under the primary unit weights;
 - `F` and `R` are never detached before semantic supervision;
-- primary execution uses one joint backward and one optimizer step per optimization unit;
+- the canonical training-budget/coverage unit is the epoch; optimizer updates occur within epochs according to physical batch size and gradient accumulation;
 - DeepGaze-style LoRA targets remain `q/k/v/o + gate/up/down`;
 - native vision tower/projector stay frozen in the primary configuration;
 - `<END_FIX>` row(s), LoRA adapters, and `P_E` are saved/restored in checkpoints.

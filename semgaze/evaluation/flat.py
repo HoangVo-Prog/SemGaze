@@ -22,7 +22,7 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None):
     states = bundle.projector(torch.cat(where.states)).split([len(e.query.x_px) for e in episodes])
     inputs, positions, _ = prepare_semantic_batch(bundle, [e.query for e in episodes], states,
         where=where, generation_budget=generation_budget,
-        reuse_query_vision=bundle.config['validation']['cache']['frozen_visual_features'])
+        reuse_query_vision=bundle.config['test']['cache']['frozen_visual_features'])
     tokenizer = bundle.processor.tokenizer
     inputs = to_model_device(left_pad_generation(inputs, tokenizer.pad_token_id), bundle.model)
     output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,

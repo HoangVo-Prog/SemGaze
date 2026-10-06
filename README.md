@@ -1,12 +1,15 @@
 # SemGaze
 
-Training samples one K from the configured distribution per physical episode
-batch. All episodes in that batch share K; subject, query, support selection and
-support order retain their existing conditional sampling. WHERE context-overflow
-retries keep that K. `per_device_train_batch_size` is physical B and
-`gradient_accumulation_steps` is the number of physical batches per optimizer
-update. Length sorting stays within a same-K batch.
+COCO-Search18 uses the persisted 95/5 train/test split under
+`data/COCO_Search18/split_95_5/`. Each training epoch visits all 18,508 eligible
+seen-subject train records exactly once in shuffled order. Every query draws K
+uniformly from 1..10 and distinct same-subject train supports. Overflow retries
+retain the query and K. Same-K physical batching preserves these episode draws,
+including the final partial optimizer window.
 
-See [the A100 benchmark guide](documents/A100_BENCHMARK.md) for the B=1 baseline,
-B=2 same-K and optional B=4 same-K comparison, server command, padding statistics,
-and JSON/CSV outputs. Target-hardware results must be measured on the server.
+After each complete epoch, test evaluation uses unseen subjects 7/8/9, K=1/5/10,
+and ten frozen support draws per K. There is no validation split.
+
+See [training and evaluation usage](README_FLAT.md) and
+[migration details](documents/COCO_955_MIGRATION.md). GPU throughput must be measured
+again under this sampling protocol; earlier benchmark reports are historical.

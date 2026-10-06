@@ -43,7 +43,7 @@ def tiny_bundle(tmp_path, episode, *, tied=False, bare=False):
     messages, _ = build_where_conversation(episode)
     text = [m['content'] if isinstance(m['content'], str) else m['content'][1]['text'] for m in messages]
     text += [build_flat_prompt(episode.query).text, build_flat_target(episode.query.semantic), 'assistant\nuser\n']
-    backend.train_from_iterator(text, trainers.BpeTrainer(vocab_size=400, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), special_tokens=specials))
+    backend.train_from_iterator(text, trainers.BpeTrainer(show_progress=False, vocab_size=400, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), special_tokens=specials))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, eos_token='<|im_end|>', pad_token='<|endoftext|>',
         additional_special_tokens=specials[1:])
     for key, token in {'start_image_token': '<img>', 'end_image_token': '</img>',

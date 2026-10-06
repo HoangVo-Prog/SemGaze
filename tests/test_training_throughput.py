@@ -145,17 +145,13 @@ def test_sampling_invariance_and_optimizer_membership(tmp_path, episode):
     records = [replace(episode.query, subject=u, record_id=f'{u}:{i}', stimulus_id=f'{u}:{i}')
                for u in (1, 2) for i in range(12)]
     old, new = (TrainingEpisodeSampler(records, 42) for _ in range(2))
-    expected = []
-    for _ in range(3):
-        first = old.sample()
-        expected.extend([first, old.sample(k=len(first.supports))])
+    expected = [old.sample() for _ in range(6)]
     batches, original, rejected = sample_optimizer_batches(bundle, new)
     assert original == expected and rejected == 0
     assert new.state_dict() == old.state_dict()
     actual = [e for b in batches for e in b.episodes]
     assert sorted(actual, key=repr) == sorted(expected, key=repr)
-    assert all(len(b.episodes) == 2 for b in batches)
-    assert [len(b.episodes[0].supports) for b in batches] == [len(e.supports) for e in expected[::2]]
+    assert all(1 <= len(b.episodes) <= 2 for b in batches)
     assert all(len({len(e.supports) for e in b.episodes}) == 1 for b in batches)
 
 

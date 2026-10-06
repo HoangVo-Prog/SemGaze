@@ -7,7 +7,7 @@ from semgaze.data.fewshot import frozen_episode
 from semgaze.model.checkpoint import load_checkpoint_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.evaluation.predictions import prediction_batches
-from semgaze.evaluation.validation import validation_mode
+from semgaze.evaluation.test import test_mode
 from semgaze.model.visual_cache import InferenceVisualCache
 
 
@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--config', type=Path, help='Evaluation/runtime overrides of checkpoint configuration')
-    parser.add_argument('--split', choices=('validation', 'test'), required=True)
+    parser.add_argument('--split', choices=('test',), required=True)
     parser.add_argument('--path', choices=('where', 'semantic', 'both'), required=True)
     parser.add_argument('--semantic-max-new-tokens', type=int,
                         help='Must be explicitly selected; canonical semantic decoding budget is not frozen')
@@ -25,8 +25,8 @@ def main():
     if args.config:
         import yaml
         overrides = yaml.safe_load(args.config.read_text(encoding='utf-8'))
-        if set(overrides) - {'runtime', 'evaluation', 'validation'}:
-            parser.error('evaluation overrides may change runtime/evaluation/validation; model/data settings belong to the checkpoint')
+        if set(overrides) - {'runtime', 'evaluation', 'test'}:
+            parser.error('evaluation overrides may change runtime/evaluation settings; model/data settings belong to the checkpoint')
         from semgaze.model.config import resolve_config
         config = resolve_config(config, overrides)
     if args.semantic_max_new_tokens is not None:
@@ -49,20 +49,19 @@ def main():
     adapter = CocoSearch18Adapter(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                                   duration_field=data['duration']['source_field'])
     train = {r['record_id']: adapter(r) for r in raw['train']}
-    queries = [adapter(r) for r in raw[args.split] if
-               (r['subject'] in data['unseen_subjects']) == (args.split == 'test')]
+    queries = [adapter(r) for r in raw['test'] if r['subject'] in data['unseen_subjects']]
     policy = {'split': args.split, 'path': args.path, 'semantic_max_new_tokens': budget,
               'do_sample': False, 'split_manifest_identity': identity,
               'report_kind': 'prediction_and_validity_diagnostics',
               'metrics_gate': 'SM/MM/SED implementations and invalid treatment, semantic metrics and selection scalar require explicit protocol choices'}
     (output_dir / 'evaluation_config.json').write_text(json.dumps(policy, indent=2), encoding='utf-8')
     summary = {}
-    cache_settings = config['validation']['cache']
+    cache_settings = config['test']['cache']
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
-    with validation_mode(bundle), (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
+    with test_mode(bundle), (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
         for k in config['evaluation']['k_values']:
-            draws = range(len(manifest['support_draws'][str(k)])) if args.split == 'test' else (None,)
+            draws = range(len(manifest['support_draws'][str(k)]))
             draw_rates = []
             for draw_id in draws:
                 counts = {'queries': 0}

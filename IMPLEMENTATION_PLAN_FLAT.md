@@ -1,3 +1,5 @@
+> Historical implementation/performance report. Split, sampling, schedule and evaluation examples below predate the 95/5 query-coverage migration. Use [COCO_955_MIGRATION.md](documents/COCO_955_MIGRATION.md) and the current YAML/CLI for new runs. Historical measurements are not evidence for current sampling throughput.
+
 # SemGaze Flat Single-Output Baseline — Implementation Plan
 
 ## Status

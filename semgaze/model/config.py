@@ -68,7 +68,7 @@ def validate_config(config):
         'where.duration.text_width': 3,
         'where.duration.non_integer_rounding': 'nearest_python_round',
         'where.context.visual_policy': 'one_448x448_tile_per_image',
-        'where.context.overflow_training': 'reject_and_resample_complete_episode',
+        'where.context.overflow_training': 'resample_supports_same_query_and_k',
         'where.supervision.support_assistant_labels': 'ignore',
         'where.supervision.query_assistant_labels': 'supervise',
         'where.supervision.supervise_query_end_fix': True,
@@ -130,6 +130,15 @@ def validate_config(config):
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']
+    if 'validation' in config or 'validation_scope' in evaluation['predictions']:
+        raise ValueError('obsolete validation configuration; use test/test_scope')
+    if any(key in t for key in ('steps_per_epoch', 'epochs')):
+        raise ValueError('use num_train_epochs; optimizer updates are derived from Q_train')
+    if evaluation['k_values'] != [1, 5, 10]:
+        raise ValueError('canonical K_eval must remain [1,5,10]')
+    if config['data']['unseen_subjects'] != [7, 8, 9]:
+        raise ValueError('unseen subjects must remain [7,8,9]')
+
     if model['adapter_load_mode'] not in ('fresh', 'continue_trainable'):
         raise ValueError('adapter_load_mode supports fresh or continue_trainable')
     if model['adapter_load_mode'] == 'continue_trainable' and not model['initialization_adapter']:
@@ -151,8 +160,8 @@ def validate_config(config):
         raise ValueError('unsupported learning-rate scheduler')
     for key in ('per_device_train_batch_size', 'gradient_accumulation_steps', 'max_episode_retries'):
         positive_int(t[key], 'training.' + key)
-    for key in ('steps_per_epoch', 'epochs', 'max_steps'):
-        positive_int(t[key], 'training.' + key, allow_none=True)
+    for key in ('max_steps', 'num_train_epochs'):
+        positive_int(t[key], 'training.' + key, allow_none=(key == 'max_steps'))
     for key in ('learning_rate', 'weight_decay', 'adam_beta1', 'adam_beta2', 'adam_epsilon', 'warmup_ratio', 'lambda_where', 'lambda_sem'):
         value = t[key]
         if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
@@ -163,9 +172,8 @@ def validate_config(config):
         raise ValueError('max_grad_norm must be positive or null (disabled)')
     if type(t['gradient_checkpointing']) is not bool:
         raise ValueError('gradient_checkpointing must be an explicit boolean')
-    if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
-        raise ValueError('evaluation.strategy supports epoch, steps or no')
-    positive_int(evaluation['every_steps'], 'evaluation.every_steps')
+    if evaluation['strategy'] not in ('epoch', 'no'):
+        raise ValueError('evaluation.strategy supports epoch or no (smoke/benchmark only)')
     for name, values in [('data.fewshot.k_values',config['data']['fewshot']['k_values']), ('evaluation.k_values',evaluation['k_values'])]:
         if not isinstance(values, list) or not values or len(set(values)) != len(values):
             raise ValueError(f'{name} must be a nonempty list of unique positive integers')
@@ -174,7 +182,14 @@ def validate_config(config):
     probs = config['data']['fewshot']['train_k_probabilities']
     if len(probs) != len(config['data']['fewshot']['k_values']) or any(not math.isfinite(p) or p < 0 for p in probs) or not math.isclose(sum(probs), 1, abs_tol=1e-8):
         raise ValueError('train_k_probabilities must align with k_values and sum to one')
+    if config['data']['fewshot']['k_values'] != list(range(1, 11)) or any(abs(p - 0.1) > 1e-8 for p in probs):
+        raise ValueError('COCO-Search18 training K must be Uniform({1,...,10})')
+    split_root = str(config['data']['split_root']).replace('\\', '/')
+    if '/COCO_Search18/split/' in split_root or 'validation.json' in split_root or Path(split_root).parent.name != 'split_95_5' or Path(split_root).name != config['data']['variant']:
+        raise ValueError('COCO-Search18 requires data/COCO_Search18/split_95_5/<variant>')
     ctx = config['where']['context']
+    if ctx['max_k'] != 10 or ctx['max_images_per_episode'] != 11:
+        raise ValueError('COCO requires max_k=10 and max_images_per_episode=11')
     for key in ('max_k', 'max_images_per_episode', 'max_total_sequence_length'):
         positive_int(ctx[key], 'where.context.' + key)
     if max(config['data']['fewshot']['k_values'] + evaluation['k_values']) > min(ctx['max_k'], ctx['max_images_per_episode'] - 1):
@@ -182,28 +197,28 @@ def validate_config(config):
     if not isinstance(config['where']['end_fix_token'], str) or not config['where']['end_fix_token'].strip():
         raise ValueError('end_fix_token must be nonempty')
     predictions = evaluation['predictions']
-    validation = config['validation']
+    test = config['test']
     for branch in ('loss', 'prediction'):
-        settings = validation[branch]
+        settings = test[branch]
         if settings['execution'] not in ('serial', 'same_k_batched'):
-            raise ValueError('validation execution must be serial or same_k_batched')
+            raise ValueError('test execution must be serial or same_k_batched')
         from semgaze.evaluation.batching import physical_size
         for k in evaluation['k_values']:
             physical_size(settings, k)
-        positive_int(settings['bucket_window'], 'validation.bucket_window')
+        positive_int(settings['bucket_window'], 'test.bucket_window')
         if type(settings['bucket_by_length']) is not bool:
             raise ValueError('bucket_by_length must be boolean')
-    cache = validation['cache']
-    positive_int(cache['max_entries'], 'validation.cache.max_entries')
+    cache = test['cache']
+    positive_int(cache['max_entries'], 'test.cache.max_entries')
     for flag in ('frozen_visual_features', 'support_preprocessing', 'prefix_kv'):
         if type(cache[flag]) is not bool:
-            raise ValueError('validation cache flags must be boolean')
+            raise ValueError('test cache flags must be boolean')
     if cache['prefix_kv']:
         raise ValueError('prefix KV caching requires separate server profiling and parity')
     positive_int(predictions['train_batches'], 'evaluation.predictions.train_batches', minimum=0)
     positive_int(predictions['semantic_max_new_tokens'], 'semantic_max_new_tokens', allow_none=True)
-    if predictions['validation_scope'] not in ('all_seen', 'none'):
-        raise ValueError('validation_scope supports all_seen or none')
+    if predictions['test_scope'] not in ('all_unseen', 'none'):
+        raise ValueError('test_scope supports all_unseen or none')
     positive_int(config['checkpoint']['save_every'], 'checkpoint.save_every', allow_none=True)
     positive_int(config['logging']['every_steps'], 'logging.every_steps')
     subjects = config['data']['unseen_subjects']

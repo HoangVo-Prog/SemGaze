@@ -503,8 +503,8 @@ The exact processor arguments used to realize the one-tile policy are adapter-sp
 
 After native chat rendering and multimodal preprocessing, the full episode must fit the 8192-token limit. Overflow handling is split-specific:
 
-- training: reject only that sampled episode and resample from the same normative training distribution;
-- validation/final evaluation: fail the run because frozen episode membership/order must not be altered or resampled.
+- training: preserve the current epoch query and its already sampled $K$; resample only the same-subject support realization/order under `01_FEWSHOT_SPEC.md`. If the configured finite retry budget is exhausted, fail rather than replacing/skipping the query or changing $K$;
+- test evaluation: fail the run because frozen episode membership/order must not be altered or resampled.
 
 Low-level patch packing, tensor collation, and the exact processor argument names remain owned by the model/training adapter / `05_TRAINING_SPEC.md`; they may not change the behavioral contract above.
 
@@ -1105,7 +1105,7 @@ The following conditions must hold in every primary WHERE implementation:
 - WHERE uses `OpenGVLab/InternVL3_5-8B-HF` with the checkpoint's native Hugging Face chat template rather than a custom SemGaze personalization `P_sys`.
 - Personalized input uses raw same-observer demonstrations, not a subject-ID token, user embedding, stitched support image, or pooled support representation.
 - WHERE is generated autoregressively by the VLM decoder.
-- Primary few-shot episodes use at most one 448x448 visual tile per image and an 8192-token maximum context; support membership must never be silently reduced to fit the budget.
+- Primary few-shot episodes use at most one 448x448 visual tile per image and an 8192-token maximum context; support membership must never be silently reduced to fit the budget. During training, overflow recovery must also preserve the current epoch query and sampled K.
 - The default training loss is token-level causal LM loss on the final query assistant scanpath response only; support assistant responses are context and receive ignored labels.
 - No separate coordinate, duration, saccade, personalization, or stopping loss is part of the canonical WHERE branch.
 - The primary baseline uses oracle trajectory-length conditioning rather than predicting autonomous termination.

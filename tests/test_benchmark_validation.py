@@ -2,7 +2,7 @@
 from copy import deepcopy
 import json
 import pytest
-from scripts import benchmark_validation_a100 as benchmark
+from scripts import benchmark_test_a100 as benchmark
 
 
 def report():
@@ -17,10 +17,10 @@ def test_episode_parity_not_aggregate_only(tmp_path):
     actual['episodes'].reverse()
     result = benchmark.compare_reports(reference, actual, 1e-5)
     assert result['passed']
-    actual['episodes'][0]['eval_flat'] += .01
-    actual['episodes'][1]['eval_flat'] -= .01
+    actual['episodes'][0]['test_flat'] += .01
+    actual['episodes'][1]['test_flat'] -= .01
     result = benchmark.compare_reports(reference, actual, 1e-5)
-    assert not result['passed'] and result['metrics']['eval_flat']['max_absolute_difference'] > .009
+    assert not result['passed'] and result['metrics']['test_flat']['max_absolute_difference'] > .009
     benchmark.write_parity(tmp_path, result)
     assert 'FAIL' in (tmp_path/'parity_quick.md').read_text()
     assert not json.loads((tmp_path/'parity_quick.json').read_text())['passed']
@@ -39,7 +39,7 @@ def test_parity_missing_duplicate_nonfinite_and_state_failures():
     for mutation in (lambda r: r['episodes'].pop(),
                      lambda r: r['episodes'].append(r['episodes'][0]),
                      lambda r: r['episodes'][0].update(state_count=100),
-                     lambda r: r['episodes'][0].update(eval_flat=float('nan'))):
+                     lambda r: r['episodes'][0].update(test_flat=float('nan'))):
         changed = report()
         mutation(changed)
         with pytest.raises(ValueError):
@@ -92,16 +92,16 @@ def test_report_pipeline_with_cpu_model_and_mock_cuda_telemetry(tmp_path, monkey
     from pathlib import Path
     import torch
     from test_model_path import tiny_bundle
-    from test_epoch_validation import validation_data
+    from test_epoch_validation import evaluation_data
     from semgaze.data.schema import normalized_episode_from_dict
     from semgaze.data import cocosearch18
     from semgaze.model import checkpoint
     episode = normalized_episode_from_dict(json.loads((benchmark.ROOT/'tests/fixtures/flat_episode.json').read_text()))
     bundle = tiny_bundle(tmp_path,episode)
-    train,queries,manifest=validation_data(episode)
+    train,queries,manifest=evaluation_data(episode)
     queries.append(replace(queries[0],record_id='q2',stimulus_id='q2'))
-    manifest['validation_stimulus_ids'].append('q2')
-    raw=dict(train=[dict(record_id=r.record_id,record=r) for r in train.values()],validation=queries)
+    manifest['test_stimulus_ids'].append('q2')
+    raw=dict(train=[dict(record_id=r.record_id,record=r) for r in train.values()],test=queries)
     monkeypatch.setattr(cocosearch18,'read_persisted_splits',lambda *a,**kw:(raw,manifest,'fixture'))
     monkeypatch.setattr(cocosearch18,'CocoSearch18Adapter',lambda *a,**kw:lambda r:r['record'] if isinstance(r,dict) else r)
     monkeypatch.setattr(checkpoint,'load_checkpoint_bundle',lambda *a,**kw:bundle)
@@ -122,7 +122,7 @@ def test_report_pipeline_with_cpu_model_and_mock_cuda_telemetry(tmp_path, monkey
         assert benchmark.main(['--checkpoint',str(saved),'--output-dir',str(output),'--mode',mode,
                               '--batch-k1','2','--batch-k5','2','--batch-k10','2','--bucket',*reference_args])==0
         report=json.loads((output/'report.json').read_text())
-        assert report['episode_count_total']==len(report['episodes'])==6
+        assert report['episode_count_total']==len(report['episodes'])==60
         assert set(report['by_k'])=={'1','5','10'}
         assert all(r['mean_actual_batch_size']==(1 if mode=='serial' else 2) for r in report['by_k'].values())
         if mode != 'serial':

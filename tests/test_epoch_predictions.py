@@ -8,7 +8,7 @@ import torch
 
 pytest.importorskip('peft')
 from test_model_path import tiny_bundle, episode
-from test_epoch_validation import validation_data, FixedSampler
+from test_epoch_validation import evaluation_data, FixedSampler
 from semgaze.evaluation import predictions
 from semgaze.evaluation.predictions import predict_epoch, resolve_prediction_settings, format_prediction_summary
 from semgaze.evaluation import flat as flat_evaluation
@@ -26,13 +26,13 @@ def read_records(path):
 
 def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
-    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
+    bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 8)
     bundle.config['training']['per_device_train_batch_size'] = 2
-    train, queries, manifest = validation_data(episode)
-    queries.append(replace(episode.query, record_id='second', stimulus_id='second-image'))
-    manifest['validation_stimulus_ids'].append('second-image')
-    queries.append(replace(episode.query, subject=7, record_id='unseen'))
+    train, queries, manifest = evaluation_data(episode)
+    queries.append(replace(queries[0], record_id='second', stimulus_id='second-image'))
+    manifest['test_stimulus_ids'].append('second-image')
+    queries.append(replace(episode.query, subject=1, record_id='seen'))
     calls = []
     def where(bundle, ep):
         assert not bundle.model.training and not torch.is_grad_enabled()
@@ -47,31 +47,31 @@ def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatc
     result = predict_epoch(bundle, [episode, episode], train, queries, manifest,
         epoch=1, step=2, split_manifest_identity='fixture')
     train_rows = read_records(result['prediction_files']['train'])
-    val_rows = read_records(result['prediction_files']['validation'])
+    val_rows = read_records(result['prediction_files']['test'])
     assert len(train_rows) == 2
-    assert len(val_rows) == result['validation_prediction_episodes'] == 6
-    assert result['validation_prediction_queries'] == 2
+    assert len(val_rows) == result['test_prediction_episodes'] == 60
+    assert result['test_prediction_queries'] == 2
     assert [(r['query_id'], r['k']) for r in val_rows] == [
-        (q.record_id, k) for k in (1, 5, 10) for q in queries[:2]]
-    assert [c[0] for c in calls] == ['where', 'semantic'] * 8
+        (q.record_id, k) for k in (1, 5, 10) for draw in range(10) for q in queries[:2]]
+    assert [c[0] for c in calls] == ['where', 'semantic'] * 62
     for row in train_rows + val_rows:
         assert row['WHERE'] == {'GT': serialize_xyd_record(episode.query), 'PRED': 'malformed raw WHERE'}
         assert row['SEMANTIC'] == {'GT': build_flat_target(episode.query.semantic), 'PRED': 'unrepaired\nWHAT: text'}
         assert row['split_manifest_identity'] == 'fixture'
         assert row['epoch'] == 1 and row['step'] == 2
     for row in val_rows:
-        assert row['support_ids'] == [e['record_id'] for e in manifest['validation_supports']['1'][str(row['k'])]]
+        assert row['support_ids'] == [e['resolved_record_id_by_subject']['7'] for e in manifest['support_draws'][str(row['k'])][row['draw_id']]]
     assert 'train: 1 batch (2 queries)' in format_prediction_summary(result)
-    assert 'validation: 2 seen queries x K=1,5,10 (6 episodes)' in format_prediction_summary(result)
+    assert 'test: 2 unseen queries x K=1,5,10 (60 episodes)' in format_prediction_summary(result)
     assert not list(tmp_path.rglob('*.partial'))
 
 
 def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
-    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
+    bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)  # explicit small test budget
     run_flat_training_step(bundle, episode)
-    train, queries, manifest = validation_data(episode)
+    train, queries, manifest = evaluation_data(episode)
     parameters = [(p, p.detach().clone(), None if p.grad is None else p.grad.clone())
                   for root in (bundle.model, bundle.projector) for p in root.parameters()]
     bundle.model.get_base_model().model.vision_tower.eval()
@@ -95,7 +95,7 @@ def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path,
             assert 'inputs_embeds' in kwargs and kwargs['max_new_tokens'] == 4
         return generate(**kwargs)
     from semgaze.data.fewshot import frozen_episode
-    gt_episodes = [episode] + [frozen_episode(queries[0], train, manifest, k) for k in (1, 5, 10)]
+    gt_episodes = [episode] + [frozen_episode(queries[0], train, manifest, k, draw_id=d) for k in (1, 5, 10) for d in range(10)]
     forward_where = flat_evaluation.forward_where
     def observed_gt_states(bundle, ep):
         gt_state_queries.append(ep)
@@ -113,9 +113,9 @@ def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path,
     monkeypatch.setattr(flat_evaluation, 'prepare_flat_inputs', observed_semantic_inputs)
     result = predict_epoch(bundle, [episode], train, queries, manifest,
         epoch=1, step=2, split_manifest_identity='fixture')
-    assert generation_calls == ['WHERE', 'SEMANTIC'] * 4
+    assert generation_calls == ['WHERE', 'SEMANTIC'] * 31
     assert gt_state_queries == gt_episodes
-    for split in ('train', 'validation'):
+    for split in ('train', 'test'):
         for row in read_records(result['prediction_files'][split]):
             assert row['where_generation']['oracle_length_conditioned'] is True
             assert row['semantic_generation']['state_source'] == 'teacher_forced_GT_XYD'
@@ -132,21 +132,20 @@ def test_real_hf_predictions_generate_separately_and_preserve_training(tmp_path,
 
 def test_train_predictions_stop_at_first_batch_not_accumulation(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
-    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
+    bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)
-    loop.resolve_epoch_schedule(bundle.config, 2, 2)
     bundle.config['training'].update(per_device_train_batch_size=2, gradient_accumulation_steps=3)
     bundle.optimizer = make_optimizer(bundle)
     bundle.scheduler = torch.optim.lr_scheduler.LambdaLR(bundle.optimizer, lambda _: 1)
     class SequentialSampler(FixedSampler):
-        def sample(self, *, k=None):
-            ep = super().sample(k=k)
+        def sample(self):
+            ep = super().sample()
             return replace(ep, query=replace(ep.query, record_id=f'train-query-{self.calls}'))
-    sampler = SequentialSampler(episode)
-    train, queries, manifest = validation_data(episode)
+    sampler = SequentialSampler(episode, count=12)
+    train, queries, manifest = evaluation_data(episode)
     monkeypatch.setattr(loop, 'run_flat_training_step', lambda *a, **kw: {'loss_total': 1.0})
-    monkeypatch.setattr(loop, 'validate_epoch', lambda *a: {
-        **{key: 1.0 for key in loop.EVAL_KEYS}, 'eval_queries': 1, 'eval_episodes': 3})
+    monkeypatch.setattr(loop, 'evaluate_test_epoch', lambda *a: {
+        **{key: 1.0 for key in loop.EVAL_KEYS}, 'test_queries': 1, 'test_episodes': 3})
     monkeypatch.setattr(predictions, 'evaluate_where_episode', lambda *a: {'text': 'where'})
     monkeypatch.setattr(predictions, 'evaluate_flat_episode', lambda *a, **kw: {'text': 'semantic'})
     loop.run_training_loop(bundle, sampler, train, queries, manifest,
@@ -155,15 +154,15 @@ def test_train_predictions_stop_at_first_batch_not_accumulation(tmp_path, episod
     summary = bundle.trainer_history[-1]
     assert summary['event'] == 'epoch_predictions'
     assert [r['query_id'] for r in read_records(summary['prediction_files']['train'])] == [
-        'train-query-7', 'train-query-8']  # first batch of final step, no second batch
-    assert len(read_records(summary['prediction_files']['validation'])) == 3
+        'train-query-11', 'train-query-12']  # first batch of final step, no second batch
+    assert len(read_records(summary['prediction_files']['test'])) == 30
 
 
 def test_prediction_failure_restores_modes_rng_and_keeps_partial_file(tmp_path, episode, monkeypatch):
     bundle = tiny_bundle(tmp_path, episode)
-    bundle.config['validation']['prediction']['execution'] = 'serial'  # retained reference API
+    bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 4)
-    train, queries, manifest = validation_data(episode)
+    train, queries, manifest = evaluation_data(episode)
     rng, python_rng = torch.get_rng_state().clone(), random.getstate()
     modes = [m.training for root in (bundle.model, bundle.projector) for m in root.modules()]
     def fail(*args):

@@ -12,7 +12,7 @@ experiment:
 data:
   dataset: COCO-Search18
   variant: all
-  split_root: data/COCO_Search18/split/all
+  split_root: data/COCO_Search18/split_95_5/all
   images_root: data/COCO_Search18/images
   # Declare original_image only when these are the original annotation images,
   # or provide a verified {width: ..., height: ...} coordinate frame.
@@ -26,8 +26,8 @@ data:
     conversion_to_ms: identity
 
   fewshot:
-    k_values: [1, 5, 10]
-    train_k_probabilities: [0.3333333333, 0.3333333333, 0.3333333334]
+    k_values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    train_k_probabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     require_same_subject: true
     require_distinct_support_stimuli: true
     exclude_query_stimulus: true
@@ -85,7 +85,7 @@ where:
     max_images_per_episode: 11
     max_total_sequence_length: 8192
     visual_policy: one_448x448_tile_per_image
-    overflow_training: reject_and_resample_complete_episode
+    overflow_training: resample_supports_same_query_and_k
 
   supervision:
     support_assistant_labels: ignore
@@ -126,11 +126,9 @@ training:
   warmup_ratio: 0.10
   precision: bf16
 
-  # Episodes are sampled with replacement. Declare the optimizer-step epoch
-  # length here or with --steps-per-epoch; sampling probabilities stay unchanged.
-  steps_per_epoch: null
-  epochs: null
-  max_steps: null
+  # One epoch is one complete traversal of the seen-subject train query universe.
+  num_train_epochs: 1
+  max_steps: null # debugging override only
   max_episode_retries: 1000
 
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
@@ -152,27 +150,26 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: epoch # epoch | steps | no
-  every_steps: 100
+  strategy: epoch # epoch | no (smoke/benchmark only)
   k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:
     train_batches: 1
-    validation_scope: all_seen
+    test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
     semantic_max_new_tokens: null
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
 
-validation:
+test:
   loss:
     execution: same_k_batched
-    batch_size_by_k: {'1': 1, '5': 1, '10': 1} # conservative; select on A100
+    batch_size_by_k: {'1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, '10': 1} # conservative; select on A100
     bucket_by_length: false # enable after measuring padding
     bucket_window: 64
   prediction:
     execution: same_k_batched
-    batch_size_by_k: {'1': 1, '5': 1, '10': 1}
+    batch_size_by_k: {'1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, '10': 1}
     bucket_by_length: false
     bucket_window: 64
   cache:

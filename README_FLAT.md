@@ -52,8 +52,8 @@ or unresolved frame metadata fail explicitly.
 ## Training and resume
 
 ```powershell
-.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/experiment --max-steps 1000 --steps-per-epoch 100 --semantic-max-new-tokens 512
-.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/resumed --max-steps 1000 --steps-per-epoch 100 --semantic-max-new-tokens 512 --resume runs/experiment/checkpoint-100
+.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/experiment --num-train-epochs 10 --semantic-max-new-tokens 512
+.venv/Scripts/python train_flat.py --config configs/flat_single.yaml --output-dir runs/resumed --num-train-epochs 10 --semantic-max-new-tokens 512 --resume runs/experiment/checkpoint-100
 ```
 
 These are example horizons, not scientific defaults. Every training run executes
@@ -122,96 +122,58 @@ or speed. No attention backend, allocator, optimizer precision, or checkpointing
 retuning is selected without target measurements. See
 `documents/TRAINING_THROUGHPUT_AUDIT.md` and `documents/TRAINING_THROUGHPUT_RESULTS.md`.
 
-### Epoch validation and logging
+### Query-coverage epochs, test evaluation and resume
 
-The sampler draws episodes with replacement, so epochs are explicitly bounded by
-optimizer steps. Set `training.steps_per_epoch` or `--steps-per-epoch`; the example
-above defines ten epochs of 100 optimizer steps each. Set `training.max_steps`, or `training.epochs` together with `steps_per_epoch`. An explicit max-steps horizon takes precedence and may end in a partial epoch. This changes neither subject/K/query sampling nor accumulation.
-`evaluation.strategy: epoch` validates at the end of **every** epoch, before the
-epoch checkpoint is saved when `checkpoint.save_at_epoch_end` is enabled. `evaluation.strategy` also supports `steps` with `evaluation.every_steps`, or the quoted string `"no"` to disable evaluation.
+COCO-Search18 uses `data/COCO_Search18/split_95_5/all/train.json` and
+`test.json`, with a shared image partition in `master_split_manifest.json` and
+`split_index.json` in the parent directory. There is no validation split.
+The persisted master contains 4,048 train images / 213 test images and
+26,125 train records / 1,375 test records.
 
-Validation uses the full seen-subject validation query set at `evaluation.k_values` (default 1/5/10), with frozen same-subject train supports from the configured manifest. It never resamples/truncates frozen
-episodes or uses unseen subjects for validation. No gradients or updates occur;
-model/projector train/eval modes are restored even if validation fails.
+`Q_train` consists of every eligible train record whose subject is outside
+`{7,8,9}`. Each epoch shuffles this fixed universe and consumes every query once.
+Each query independently draws K uniformly from 1..10, then distinct same-subject
+train support images excluding the query image, one record per image, and a
+random support order. Overflow retries retain the query and K and resample only
+supports. Exhausting the retry budget fails with the query ID and K.
 
-The human-readable epoch summary and `trainer_log.jsonl` expose:
+Set `training.num_train_epochs` or `--num-train-epochs`. `--epochs` is an equivalent
+CLI spelling. `--max-steps` is a debugging cap; a partial epoch never triggers
+epoch-end evaluation. The removed `steps_per_epoch` configuration is rejected.
 
-- `eval_where`: existing query-response WHERE mean NLL;
-- `eval_what`, `eval_why`, `eval_how`: diagnostic token-NLL means for the respective
-  sections of the **same single teacher-forced flat response**;
-- `eval_flat`: existing full flat response-token mean NLL;
-- `eval_total`: `lambda_where * eval_where + lambda_sem * eval_flat`.
+An optimizer window takes at most B*G consecutive queries and groups their
+already constructed episodes by K into physical batches of at most B. This can
+require more than G physical forwards when K differs. Each batch is weighted by
+its actual episode count. The tail is retained; no query is padded or dropped.
+Scheduler length and warmup derive from `ceil(|Q_train|/(B*G))*num_train_epochs`.
 
-Section diagnostics include ordinary line prefixes and their trailing newlines;
-native EOS belongs to HOW. A tokenizer token spanning a section boundary is
-assigned by its starting character. All supervised flat tokens are counted exactly
-once. These diagnostics do not add semantic forwards, rebalance the flat loss,
-or define generation-quality metrics. All reported epoch losses are means of
-per-episode losses, with additional per-K summaries in `eval_by_k`. No automatic
-best-checkpoint selection is introduced.
+After each completed epoch, `evaluation.strategy: epoch` evaluates unseen-subject
+test queries at K=1/5/10, with all ten persisted exclusive draws per K. Frozen
+support order is preserved. `test_where`, `test_flat`, `test_total`, and
+`test_what/why/how` describe the existing teacher-forced losses; section metrics
+are diagnostic slices of one flat response. They do not change the objective or
+add a checkpoint selection rule. `test.loss`, `test.prediction`, and `test.cache`
+configure execution. `evaluation.strategy: 'no'` is available for smoke tests
+and throughput benchmarks.
 
-Each checkpoint includes `trainer_state.json` with the complete structured
-`log_history`. Resume carries that history into the new run's JSONL log and resumes
-the absolute epoch schedule without repeating completed epoch evaluations.
+Optional generation uses the same test draws and writes
+`predictions/epoch-0001/{train,test}.jsonl`. Test rows include `draw_id` and ordered
+support IDs. Training predictions reuse the most recent accepted episodes, up
+to `train_batches*B`; they never consume the sampler. An interrupted run may
+have fewer recent examples after resume. `train_batches: 0` and
+`test_scope: none` disable generation while retaining test loss evaluation.
+`semantic_max_new_tokens` remains an explicit run choice. WHERE generation and
+GT-WHERE-conditioned semantic generation retain their existing definitions.
 
-### Epoch autoregressive predictions
+Checkpoints save epoch index, cursor, exact query permutation, query IDs, K/support
+RNG, optimizer, scheduler and model RNG state. Resume continues the next query.
+Old samplers/checkpoints without coverage state fail clearly. Training schedule
+and optimizer-window geometry must match on resume. The current trainer supports
+one process; distributed launches fail before training because uneven-rank
+execution is not implemented. No distributed sampler pads or drops queries.
 
-With the reference prediction settings, every evaluation generates:
-
-- Train: exactly one batch of `per_device_train_batch_size` episodes, reusing the
-  first batch of accepted episodes from that epoch's final optimizer step. Later
-  gradient-accumulation batches are excluded. There are no extra sampler draws.
-- Validation: every seen query at K=1/5/10 with the same frozen supports as loss
-  validation. No sampling, truncation, or cap is applied to validation coverage.
-
-Both responses use native HF autoregressive generation separately: WHERE receives
-no query GT coordinates/durations; semantic output uses states from GT WHERE and
-gold WHY groups, as required by the primary inference contract. Predicted WHERE
-is never passed to semantic inference. Generation preserves parameters, gradients,
-module modes and training RNG. Context overflow fails without skipping a query.
-
-Declare `evaluation.predictions.semantic_max_new_tokens` or pass
-`--semantic-max-new-tokens`; the example 512 above is an explicit runtime choice,
-not a canonical default. The resolved choice is saved and may change on resume.
-The WHERE budget retains its existing tokenizer-measured policy.
-
-Each epoch writes `predictions/epoch-0001/{train,validation}.jsonl`. Each line has
-query/subject/K, ordered support IDs, split identity, and `WHERE: {GT, PRED}` and
-`SEMANTIC: {GT, PRED}`, plus existing parser diagnostics and conditioning provenance.
-Raw malformed predictions are preserved. Files are streamed through `.partial`
-paths and renamed on successful completion. A failed generation emits no success
-event or completed epoch checkpoint. Text is stored in full in the files; the
-console prints counts and paths:
-
-```text
-Epoch 1 | step 100 | autoregressive predictions:
-  train: 1 batch (1 queries) -> .../predictions/epoch-0001/train.jsonl
-  validation: 2 seen queries x K=1,5,10 (6 episodes) -> .../predictions/epoch-0001/validation.jsonl
-  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.
-```
-
-The counts above illustrate a two-query fixture, not the benchmark size.
-The `epoch_predictions` event in `trainer_log.jsonl` and checkpoint
-`trainer_state.json` records counts, absolute file paths, budget and conditioning.
-Prediction files remain in the run directory; retain that directory alongside
-checkpoints when moving runs. Resume retains earlier history and generates only
-new epochs. Training losses and the existing `epoch_validation` event are unchanged.
-
-Configuration follows `YAML -> missing-field defaults -> CLI overrides -> validation -> runtime`.
-`configs/defaults.yaml` supplies only absent fields; explicit `null` values are never
-silently replaced. The reference experiment now declares its optimizer engineering
-values explicitly. `max_grad_norm: null` disables clipping; unresolved required
-values fail with a field-specific error. Each run saves `resolved_config.json`.
-`runtime.output_dir`, `logging.every_steps`, `logging.filename`, checkpoint save
-cadence/components, and prediction batch count/scope can all be set in YAML.
-Prediction `train_batches: 0` and `validation_scope: none` disable generation without
-disabling loss validation. Multiple train batches reuse accepted training episodes,
-without extra sampling. Step-based predictions use distinct `predictions/step-*`
-directories. Batch size and accumulation contribute their product to the optimizer
-step's episode mean; episodes run sequentially to retain their multimodal contexts.
-
-See [the configuration audit](documents/CONFIGURATION_AUDIT.md) for the complete
-field-to-consumer inventory, removed enforcement, and remaining implementation limits.
+See [the protocol migration notes](documents/COCO_955_MIGRATION.md) for validation
+and remaining runtime limits.
 
 ## Evaluation
 

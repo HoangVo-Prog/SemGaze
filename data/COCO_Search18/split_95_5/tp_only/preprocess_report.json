@@ -1,0 +1,142 @@
+{
+  "condition_counts": {
+    "present": 14000
+  },
+  "condition_record_counts_by_split": {
+    "test": {
+      "present": 744
+    },
+    "train": {
+      "present": 13256
+    }
+  },
+  "coverage_errors": [],
+  "image_counts_by_split": {
+    "test": 119,
+    "train": 2100
+  },
+  "image_ratio_by_split": {
+    "test": 0.05362776025236593,
+    "train": 0.9463722397476341
+  },
+  "master_attempt_id": 1397,
+  "master_selected_score": 1.1840762282116508,
+  "protocol_version": "cocosearch18_semgaze_master_955_v1",
+  "record_counts_by_split": {
+    "test": 744,
+    "train": 13256
+  },
+  "record_ratio_by_split": {
+    "test": 0.053142857142857144,
+    "train": 0.9468571428571428
+  },
+  "shared_train_support_distinct_images": 423,
+  "shared_train_support_trial_keys": 435,
+  "split_file_sha256": {
+    "test": "93965e0663da43ccf7c06cd9a14eabb30bec6128a82516ed2bd6c14c556598ce",
+    "train": "217a10e389fab39d1c7c9e251f61a4c5ca7cafd52139578ab65a5ffc14c69675"
+  },
+  "subject_record_counts": {
+    "1": 1578,
+    "10": 1300,
+    "2": 1434,
+    "3": 1438,
+    "4": 1259,
+    "5": 1521,
+    "6": 1516,
+    "7": 1322,
+    "8": 1345,
+    "9": 1287
+  },
+  "subject_record_counts_by_split": {
+    "test": {
+      "1": 91,
+      "10": 75,
+      "2": 71,
+      "3": 76,
+      "4": 63,
+      "5": 78,
+      "6": 74,
+      "7": 76,
+      "8": 70,
+      "9": 70
+    },
+    "train": {
+      "1": 1487,
+      "10": 1225,
+      "2": 1363,
+      "3": 1362,
+      "4": 1196,
+      "5": 1443,
+      "6": 1442,
+      "7": 1246,
+      "8": 1275,
+      "9": 1217
+    }
+  },
+  "task_record_counts": {
+    "bottle": 773,
+    "bowl": 637,
+    "car": 548,
+    "chair": 1188,
+    "clock": 588,
+    "cup": 1272,
+    "fork": 1028,
+    "keyboard": 695,
+    "knife": 720,
+    "laptop": 601,
+    "microwave": 789,
+    "mouse": 494,
+    "oven": 526,
+    "potted plant": 729,
+    "sink": 1226,
+    "stop sign": 490,
+    "toilet": 485,
+    "tv": 1211
+  },
+  "task_record_counts_by_split": {
+    "test": {
+      "bottle": 47,
+      "bowl": 40,
+      "car": 30,
+      "chair": 59,
+      "clock": 11,
+      "cup": 69,
+      "fork": 49,
+      "keyboard": 43,
+      "knife": 46,
+      "laptop": 34,
+      "microwave": 32,
+      "mouse": 24,
+      "oven": 20,
+      "potted plant": 53,
+      "sink": 72,
+      "stop sign": 26,
+      "toilet": 20,
+      "tv": 69
+    },
+    "train": {
+      "bottle": 726,
+      "bowl": 597,
+      "car": 518,
+      "chair": 1129,
+      "clock": 577,
+      "cup": 1203,
+      "fork": 979,
+      "keyboard": 652,
+      "knife": 674,
+      "laptop": 567,
+      "microwave": 757,
+      "mouse": 470,
+      "oven": 506,
+      "potted plant": 676,
+      "sink": 1154,
+      "stop sign": 464,
+      "toilet": 465,
+      "tv": 1142
+    }
+  },
+  "total_records": 14000,
+  "total_unique_images": 2219,
+  "variant": "tp_only"
+}

@@ -10,7 +10,7 @@ from semgaze.where.generation import generate_where_batch
 from semgaze.evaluation.batching import physical_size
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.where import evaluate_where_episode
-from semgaze.evaluation.validation import validation_mode, validation_queries
+from semgaze.evaluation.test import test_mode, test_queries
 from semgaze.semantic.flat.target import build_flat_target
 from semgaze.where.serialization import serialize_xyd_record
 from semgaze.evaluation.progress import format_duration, progress_interval, should_report
@@ -19,10 +19,10 @@ from semgaze.evaluation.progress import format_duration, progress_interval, shou
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
     settings = config.setdefault('evaluation', {}).setdefault('predictions', {})
     settings.setdefault('train_batches', 1)
-    settings.setdefault('validation_scope', 'all_seen')
-    if type(settings['train_batches']) is not int or settings['train_batches'] < 0 or settings['validation_scope'] not in ('all_seen', 'none'):
-        raise ValueError('predictions require nonnegative train_batches and validation_scope all_seen or none')
-    if not settings['train_batches'] and settings['validation_scope'] == 'none':
+    settings.setdefault('test_scope', 'all_unseen')
+    if type(settings['train_batches']) is not int or settings['train_batches'] < 0 or settings['test_scope'] not in ('all_unseen', 'none'):
+        raise ValueError('predictions require nonnegative train_batches and test_scope all_unseen or none')
+    if not settings['train_batches'] and settings['test_scope'] == 'none':
         return settings
     budget = semantic_max_new_tokens if semantic_max_new_tokens is not None else settings.get('semantic_max_new_tokens')
     if type(budget) is not int or budget < 1:
@@ -52,7 +52,7 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
 
     Index-based restoration permits repeated supplied training episodes.
     """
-    settings = bundle.config['validation']['prediction']
+    settings = bundle.config['test']['prediction']
     window = settings['bucket_window']
     for start in range(0, len(episodes), window):
         block = episodes[start:start+window]
@@ -64,7 +64,7 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
                 indices.sort(key=lambda i: collate_where(bundle.processor, block[i], bundle.end_fix_id,
                     bundle.context_limit, teacher_forcing=False, config=bundle.config,
                     image_cache=cache).inputs['input_ids'].shape[1])
-            size = physical_size(settings, k)
+            size = physical_size(settings, k) if str(k) in settings['batch_size_by_k'] or k in settings['batch_size_by_k'] else 1
             for offset in range(0, len(indices), size):
                 selected = indices[offset:offset+size]
                 group = [block[i] for i in selected]
@@ -84,9 +84,9 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both'):
             yield e, results[i]
 
 
-def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest, *,
+def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                   epoch, step, split_manifest_identity):
-    """Exactly one supplied train batch; every seen validation query at every K.
+    """Exactly one supplied train batch; every unseen test query at every K.
 
     Episodes use same-K physical batches and retain full multi-image
     contexts. No training sampler is consumed. Partial files remain identifiable
@@ -94,11 +94,11 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
     """
     settings = resolve_prediction_settings(bundle.config)
     batch_size = bundle.config['training']['per_device_train_batch_size']
-    if len(train_batch) != batch_size * settings['train_batches']:
+    if len(train_batch) > batch_size * settings['train_batches']:
         raise ValueError('train predictions require the configured number of complete batches')
     if any(ep.query.subject in bundle.config['data']['unseen_subjects'] for ep in train_batch):
         raise ValueError('unseen query in train prediction batch')
-    queries = validation_queries(train_by_id, validation_records, manifest, bundle.config['data']['unseen_subjects']) if settings['validation_scope'] == 'all_seen' else ()
+    queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects']) if settings['test_scope'] == 'all_unseen' else ()
     k_values = bundle.config['evaluation']['k_values']
     tag = f'epoch-{epoch:04d}' if bundle.config['evaluation']['strategy'] == 'epoch' else f'step-{step:08d}'
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
@@ -108,19 +108,19 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
     prediction_started = time.perf_counter()
     print(f"[EVAL][PRED] starting training predictions | episodes={len(train_batch)}", flush=True)
     if queries:
-        print(f"[EVAL][PRED] starting validation predictions | queries={len(queries)} | "
+        print(f"[EVAL][PRED] starting test predictions | queries={len(queries)} | "
               f"K={list(k_values)} | total_episodes={len(queries) * len(k_values)}", flush=True)
     else:
-        print('[EVAL][PRED] validation predictions disabled', flush=True)
-    cache_settings = bundle.config['validation']['cache']
+        print('[EVAL][PRED] test predictions disabled', flush=True)
+    cache_settings = bundle.config['test']['cache']
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
     python_rng = random.getstate()
     try:
         # Greedy inference normally consumes no RNG. Preserve it explicitly so
         # even runtime-specific generation internals cannot change training draws.
-        with torch.random.fork_rng(), validation_mode(bundle):
-            for split in ('train', 'validation'):
+        with torch.random.fork_rng(), test_mode(bundle):
+            for split in ('train', 'test'):
                 path = directory / f'{split}.jsonl'
                 partial = path.with_suffix('.jsonl.partial')
                 count = 0
@@ -146,24 +146,26 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
                         for k in k_values:
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
-                            episodes = [frozen_episode(query, train_by_id, manifest, k,
-                                unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
-                            for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
-                                    budget=settings['semantic_max_new_tokens'], cache=cache), 1):
-                                count += 1
-                                record = _prediction_record(bundle, episode, epoch=epoch, step=step,
-                                    split=split, index=count, budget=settings['semantic_max_new_tokens'],
-                                    split_manifest_identity=split_manifest_identity, generated=generated)
-                                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
-                                stream.flush()
-                                if should_report(query_index, len(queries), interval):
-                                    elapsed = time.perf_counter() - k_started
-                                    print(f"[EVAL][PRED] K={k} | {query_index}/{len(queries)} | "
-                                          f"{100 * query_index / len(queries):.1f}% | "
-                                          f"elapsed={format_duration(elapsed)} | "
-                                          f"ETA={format_duration(elapsed / query_index * (len(queries) - query_index))}", flush=True)
+                            for draw in range(len(manifest['support_draws'][str(k)])):
+                                episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
+                                    unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
+                                for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
+                                        budget=settings['semantic_max_new_tokens'], cache=cache), 1):
+                                    count += 1
+                                    record = _prediction_record(bundle, episode, epoch=epoch, step=step,
+                                        split=split, index=count, budget=settings['semantic_max_new_tokens'],
+                                        split_manifest_identity=split_manifest_identity, generated=generated)
+                                    record['draw_id'] = draw
+                                    stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+                                    stream.flush()
+                                    if should_report(query_index, len(queries), interval):
+                                        elapsed = time.perf_counter() - k_started
+                                        print(f"[EVAL][PRED] K={k} | {query_index}/{len(queries)} | "
+                                              f"{100 * query_index / len(queries):.1f}% | "
+                                              f"elapsed={format_duration(elapsed)} | "
+                                              f"ETA={format_duration(elapsed / query_index * (len(queries) - query_index))}", flush=True)
                             k_time = time.perf_counter() - k_started
-                            prediction_by_k[str(k)] = {'episodes': len(queries), 'prediction_k_time_sec': k_time}
+                            prediction_by_k[str(k)] = {'episodes': len(queries) * len(manifest['support_draws'][str(k)]), 'prediction_k_time_sec': k_time}
                             print(f"[EVAL][PRED] K={k} | done | time={k_time:.2f}s", flush=True)
                 partial.replace(path)
                 counts[split], paths[split] = count, str(path)
@@ -175,8 +177,8 @@ def predict_epoch(bundle, train_batch, train_by_id, validation_records, manifest
     return {'event': 'epoch_predictions', 'epoch': epoch, 'step': step,
             'train_prediction_batches': settings['train_batches'], 'train_prediction_episodes': counts['train'],
             'train_prediction_source': 'final_training_batches_before_evaluation',
-            'validation_prediction_queries': len(queries),
-            'validation_prediction_episodes': counts['validation'], 'k_values': list(k_values),
+            'test_prediction_queries': len(queries),
+            'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
             'prediction_time_sec': prediction_time, 'prediction_by_k': prediction_by_k,
             'where_conditioning': 'oracle_length; no query GT trajectory',
@@ -191,7 +193,8 @@ def format_prediction_summary(entry):
     return (f"[EVAL][PRED] epoch {entry['epoch']} | step {entry['step']} | "
             f"autoregressive predictions | time={entry.get('prediction_time_sec', 0.0):.2f}s:\n"
             f"  train: {batches} {batch_word} ({entry['train_prediction_episodes']} queries) -> {paths['train']}\n"
-            f"  validation: {entry['validation_prediction_queries']} seen queries x K={k_text} "
-            f"({entry['validation_prediction_episodes']} episodes) -> {paths['validation']}\n"
+            f"  test: {entry['test_prediction_queries']} unseen queries x K={k_text} "
+            f"({entry['test_prediction_episodes']} episodes) -> {paths['test']}\n"
             '  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. '
             'WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.')
+

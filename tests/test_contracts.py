@@ -86,12 +86,14 @@ def test_sampling_and_rng_resume(payload):
     sampler = TrainingEpisodeSampler(records, 42)
     seen_k = set()
     for _ in range(100):
+        if sampler.epoch_complete():
+            sampler.start_epoch()
         episode = sampler.sample()
         assert episode.query.subject in (1, 2)
         seen_k.add(len(episode.supports))
-    assert seen_k == {1, 5, 10}
+    assert seen_k == set(range(1, 11))
     state = sampler.state_dict()
     expected = sampler.sample()
     sampler.load_state_dict(state)
     assert sampler.sample() == expected
-    with pytest.raises(ValueError, match='empty valid query'): TrainingEpisodeSampler(records[:5], 42)
+    with pytest.raises(ValueError, match='11 distinct train images'): TrainingEpisodeSampler(records[:5], 42)

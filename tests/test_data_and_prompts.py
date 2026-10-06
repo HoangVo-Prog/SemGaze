@@ -62,7 +62,7 @@ def test_frozen_manifest_order_is_used():
     query = replace(e.query, subject=7)
     support = replace(e.supports[0], subject=7)
     entry = {'image_name': support.stimulus_id, 'task': support.task, 'resolved_record_id_by_subject': {'7': support.record_id}}
-    manifest = {'support_draws': {'1': [[entry]] * 10}}
+    manifest = {'support_draws': {'1': [[entry]] * 10}, 'test_stimulus_ids': [query.stimulus_id], 'train_stimulus_ids': [support.stimulus_id]}
     got = frozen_episode(query, {support.record_id: support}, manifest, 1, draw_id=3)
     assert got.supports == (support,)
 

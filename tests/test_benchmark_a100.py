@@ -199,7 +199,7 @@ def test_scheduler_horizon_preserves_configured_schedule():
     assert bench.scheduler_horizon(config, 33) == 1000
     with pytest.raises(ValueError, match='exceeds'):
         bench.scheduler_horizon(config, 1001)
-    config['training'].update(max_steps=None, epochs=10, steps_per_epoch=100)
+    config['training'].update(max_steps=None, total_optimizer_updates=1000)
     assert bench.scheduler_horizon(config, 33) == 1000
 
 
@@ -224,7 +224,8 @@ def test_offline_step_uses_real_training_batch_and_accumulation(tmp_path, physic
     result = bench.empty_result(next(v for v in bench.variant_matrix(4, include_b4=True)
                                    if v['physical_batch_size'] == physical_batch))
     try:
-        row = bench.run_measured_step(bundle, SimpleNamespace(sample=lambda **kw: episode), 0, profiler, result)
+        from test_epoch_validation import FixedSampler
+        row = bench.run_measured_step(bundle, FixedSampler(episode, count=4), 0, profiler, result)
     finally:
         hook.remove()
     assert calls == [physical_batch] * (2 * (4 // physical_batch))

@@ -18,7 +18,6 @@ def sampler_factory():
     records = [replace(episode.query, subject=u, stimulus_id=f'{u}:{i}', record_id=f'{u}:{i}:{r}')
                for u in (1, 2) for i in range(12) for r in range(2)]
     data = default_section('data')
-    data['fewshot'].update(k_values=[1, 5, 10], train_k_probabilities=[0.25, 0.75, 0.0])
     return lambda seed=42: TrainingEpisodeSampler(records, seed, data_config=data)
 
 
@@ -36,105 +35,109 @@ def bundle(monkeypatch):
                                  length_aware_batching=True, max_episode_retries=10)})
 
 
-def reference_sample(sampler, k=None):
-    """Original sampler, with only the optional K draw omitted for batch members."""
-    rng = sampler.rng
-    subject = rng.choice(sampler.subjects)
-    if k is None:
-        k = rng.choices(sampler.k_values, weights=sampler.probabilities, k=1)[0]
-    query = rng.choice(sampler.queries[subject, k])
-    images = rng.sample([i for i in sampler.images[subject] if i != query.stimulus_id], k)
-    supports = [rng.choice(sampler.images[subject][i]) for i in images]
-    rng.shuffle(supports)
-    return FlatEpisode(tuple(supports), query)
+def test_coverage_and_reshuffle(sampler_factory):
+    sampler = sampler_factory()
+    orders = []
+    for epoch in range(1, 4):
+        sampler.start_epoch()
+        episodes = [sampler.sample() for _ in range(sampler.query_count)]
+        ids = [e.query.record_id for e in episodes]
+        assert len(ids) == len(set(ids)) == sampler.query_count
+        assert set(ids) == set(sampler.query_ids)
+        assert sampler.epoch == epoch and sampler.epoch_complete()
+        assert all(1 <= len(e.supports) <= 10 for e in episodes)
+        orders.append(ids)
+        with pytest.raises(StopIteration):
+            sampler.sample()
+    assert orders[0] != orders[1] != orders[2]
+    with pytest.raises(ValueError, match='forced K'):
+        sampler.sample(k=5)
 
 
-def test_conditional_sampling_and_original_b1_rng_order(sampler_factory):
-    actual, reference = sampler_factory(), sampler_factory()
-    for k in [None, 1, 5, None] * 30:
-        assert actual.sample(k=k) == reference_sample(reference, k)
-        assert actual.state_dict() == reference.state_dict()
-    for invalid in [0, 10, 2, True, 1.0]:
-        state = actual.state_dict()
-        with pytest.raises(ValueError, match='not enabled'):
-            actual.sample(k=invalid)
-        assert actual.state_dict() == state
-
-
-@pytest.mark.parametrize('size', [1, 2, 4])
+@pytest.mark.parametrize('size', [1, 2, 4, 7])
 @pytest.mark.parametrize('length_sort', [False, True])
-def test_same_k_preserves_batch_order_membership_and_resume(bundle, sampler_factory, size, length_sort):
+def test_same_k_preserves_membership_tail_and_resume(bundle, sampler_factory, size, length_sort):
     bundle.config['training'].update(per_device_train_batch_size=size, length_aware_batching=length_sort)
     actual, reference = sampler_factory(), sampler_factory()
-    for _ in range(4):
-        expected_groups = []
-        for _ in range(3):
-            first = reference_sample(reference)
-            expected_groups.append([first] + [reference_sample(reference, len(first.supports)) for _ in range(size-1)])
+    covered = []
+    while not actual.epoch_complete():
+        n = min(size * 3, actual.remaining)
+        expected = [reference.sample() for _ in range(n)]
         batches, original, rejected = batching.sample_optimizer_batches(bundle, actual)
-        assert rejected == 0
-        assert original == [e for group in expected_groups for e in group]
-        for batch, expected in zip(batches, expected_groups):
-            assert len(batch.episodes) == size
-            assert {len(e.supports) for e in batch.episodes} == {len(expected[0].supports)}
-            assert sorted(batch.episodes, key=repr) == sorted(expected, key=repr)
+        assert rejected == 0 and original == expected
+        packed = [e for b in batches for e in b.episodes]
+        assert sorted(packed, key=repr) == sorted(expected, key=repr)
+        assert all(0 < len(b.episodes) <= size and len({len(e.supports) for e in b.episodes}) == 1 for b in batches)
         assert actual.state_dict() == reference.state_dict()
-    resumed = sampler_factory(seed=999)
-    resumed.load_state_dict(actual.state_dict())
-    assert batching.sample_optimizer_batches(bundle, resumed)[1:] == batching.sample_optimizer_batches(bundle, actual)[1:]
+        covered.extend(e.query.record_id for e in original)
+        resumed = sampler_factory(seed=999)
+        resumed.load_state_dict(actual.state_dict())
+        actual = resumed
+    assert len(covered) == len(set(covered)) == actual.query_count
 
 
-def test_k_draws_use_configured_batch_distribution(bundle, sampler_factory):
+def test_k_is_uniform_per_query(sampler_factory):
     sampler = sampler_factory()
-    bundle.config['training']['gradient_accumulation_steps'] = 2000
-    batches, _, _ = batching.sample_optimizer_batches(bundle, sampler)
-    counts = Counter(len(b.episodes[0].supports) for b in batches)
-    assert set(counts) == {1, 5}
-    assert counts[1] / len(batches) == pytest.approx(0.25, abs=0.035)
-    order = [len(b.episodes[0].supports) for b in batches]
-    assert order != sorted(order)  # no global K sort across physical batches
+    counts = Counter()
+    for _ in range(100):
+        sampler.start_epoch()
+        counts.update(len(sampler.sample().supports) for _ in range(sampler.query_count))
+    assert set(counts) == set(range(1, 11))
+    for n in counts.values():
+        assert n / sum(counts.values()) == pytest.approx(0.1, abs=0.02)
 
 
-def test_overflow_retries_keep_initial_k_and_bound_failure(bundle, sampler_factory, monkeypatch):
+def test_overflow_retains_query_and_k_and_rolls_back_on_failure(bundle, sampler_factory, monkeypatch):
     sampler, reference = sampler_factory(), sampler_factory()
-    rejected = reference_sample(reference)
-    k = len(rejected.supports)
+    first = reference.sample()
+    retry = reference.sample_for_query(first.query, k=len(first.supports))
+    expected = [retry, reference.sample()]
     bundle.config['training']['gradient_accumulation_steps'] = 1
-    expected = [reference_sample(reference, k), reference_sample(reference, k)]
     original_collate = batching.collate_where
     calls = []
     def collate(processor, episode, *args, **kwargs):
         calls.append(episode)
         if len(calls) == 1:
-            raise batching.WhereContextOverflowError('test overflow')
+            raise batching.WhereContextOverflowError('overflow')
         return original_collate(processor, episode, *args, **kwargs)
     monkeypatch.setattr(batching, 'collate_where', collate)
     _, accepted, retries = batching.sample_optimizer_batches(bundle, sampler)
     assert retries == 1 and accepted == expected
-    assert {len(e.supports) for e in calls} == {k}
+    assert calls[0].query == calls[1].query and len(calls[0].supports) == len(calls[1].supports)
     assert sampler.state_dict() == reference.state_dict()
+    before = sampler.state_dict()
     calls.clear()
-    def always_overflow(processor, episode, *args, **kwargs):
-        calls.append(len(episode.supports))
-        raise batching.WhereContextOverflowError('test overflow')
-    monkeypatch.setattr(batching, 'collate_where', always_overflow)
-    with pytest.raises(RuntimeError, match='at K='):
+    def overflow(processor, episode, *args, **kwargs):
+        calls.append(episode)
+        raise batching.WhereContextOverflowError('overflow')
+    monkeypatch.setattr(batching, 'collate_where', overflow)
+    with pytest.raises(RuntimeError, match='K_train='):
         batching.sample_optimizer_batches(bundle, sampler)
-    assert len(calls) == 10 and len(set(calls)) == 1
+    assert len(calls) == 10
+    assert len({(e.query.record_id, len(e.supports)) for e in calls}) == 1
+    assert sampler.state_dict() == before
 
 
-def test_benchmark_replays_same_real_episode_identities_across_sizes(bundle, sampler_factory):
-    workloads, states, packed = [], [], []
+def test_resume_rejects_old_and_corrupt_state(sampler_factory):
+    sampler = sampler_factory()
+    sampler.sample()
+    state = sampler.state_dict()
+    with pytest.raises(RuntimeError, match='partially consumed'):
+        sampler.start_epoch()
+    with pytest.raises(ValueError, match='query-coverage'):
+        sampler.load_state_dict(state['rng'])
+    state['permutation'][0] = state['permutation'][1]
+    with pytest.raises(ValueError, match='permutation'):
+        sampler.load_state_dict(state)
+
+
+def test_benchmark_replays_identical_work_across_sizes(bundle, sampler_factory):
+    workloads, states = [], []
     for size in (1, 2, 4):
         sampler = sampler_factory()
         bundle.config['training'].update(per_device_train_batch_size=size, gradient_accumulation_steps=8//size)
         batches, accepted, _ = batching.sample_optimizer_batches(bundle, sampler, sampling_group_size=4)
         workloads.append(accepted)
         states.append(sampler.state_dict())
-        packed.append([e for batch in batches for e in batch.episodes])
-        assert all(len({len(e.supports) for e in batch.episodes}) == 1 for batch in batches)
     assert workloads[0] == workloads[1] == workloads[2]
-    assert packed[0] == packed[1] == packed[2]
     assert states[0] == states[1] == states[2]
-    with pytest.raises(ValueError, match='sampling_group_size'):
-        batching.sample_optimizer_batches(bundle, sampler, sampling_group_size=3)

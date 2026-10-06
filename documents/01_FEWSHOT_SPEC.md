@@ -10,8 +10,9 @@ The current executable benchmark scope is:
 dataset: COCO-Search18
 runtime variant: all
 unseen subjects: 7, 8, 9
-K: 1, 5, 10
-split ratio: 81 / 9 / 10 by unique stimulus image
+train K: uniformly sampled from 1..10 (not a coverage axis)
+evaluation K: 1, 5, 10
+split ratio: 95 / 5 (train / test; no validation) by unique stimulus image
 final support draws: 10 exclusive draws per K
 ```
 
@@ -26,13 +27,13 @@ data/COCO_Search18/COCOSearch-18.json
 The root-level split builder is:
 
 ```text
-prepare_cocosearch18_splits.py
+prepare_cocosearch18_splits_95_5.py
 ```
 
-The authoritative runtime split for training, validation, and final evaluation is:
+The authoritative runtime split for training and test evaluation is:
 
 ```text
-data/COCO_Search18/split/all/
+data/COCO_Search18/split_95_5/all/
 ```
 
 The split builder may also materialize `tp_only` and `ta_only` artifacts, but those variants are **not consumed by the current SemGaze training/evaluation runtime**. Runtime code must not silently switch away from `all`.
@@ -45,10 +46,10 @@ raw/original COCO-Search18
     -> generate WHAT / WHY / HOW only for retained records
     -> validate curated semantic records
     -> data/COCO_Search18/COCOSearch-18.json
-    -> prepare_cocosearch18_splits.py
-    -> data/COCO_Search18/split/all/{train,validation,test}.json
+    -> prepare_cocosearch18_splits_95_5.py
+    -> data/COCO_Search18/split_95_5/all/{train,test}.json
     -> few-shot episode construction
-    -> training / validation / final evaluation
+    -> training / test evaluation
 ```
 
 The upstream correctness-filtering and semantic-annotation procedure is an offline dataset-creation stage. This file does **not** recreate that filter from the final semantic JSON. In particular, the split preprocessor must never infer correctness from `answer == condition`, generated WHAT/WHY/HOW text, or the final fixation text.
@@ -117,7 +118,7 @@ $$
 Subject partitioning and image partitioning are independent axes:
 
 - seen/unseen determines whether a subject may contribute optimization queries;
-- train/validation/test determines the role of a stimulus image.
+- train/test determines the role of a stimulus image.
 
 ### 2.3 Canonical record
 
@@ -197,21 +198,29 @@ $$
 
 During training, the query additionally has the ground-truth targets required by the owner components. Their serialization is not defined here.
 
-### 2.6 Shot count
+### 2.6 Support cardinality and evaluation shot settings
 
-The supported few-shot settings are:
-
-$$
-K\in\{1,5,10\}.
-$$
+SemGaze separates **train-time support cardinality** from **evaluation shot settings**.
 
 At train time:
 
 $$
-P(K=1)=P(K=5)=P(K=10)=\frac13.
+K_{\mathrm{train}}\sim\operatorname{Uniform}\{1,\ldots,10\}.
 $$
 
-At validation and final evaluation, all three values are evaluated separately.
+Train-time $K$ is stochastic context cardinality only. It is **not** a coverage dimension, is not stratified, and does not determine query membership. A query is considered covered when it has appeared as an optimization query, regardless of the sampled $K$ for that occurrence.
+
+At test evaluation, the canonical reported shot settings remain:
+
+$$
+K_{\mathrm{eval}}\in\{1,5,10\}.
+$$
+
+All three evaluation values are evaluated separately under the frozen support protocol in Section 5. The current maximum train-time cardinality is:
+
+$$
+K_{\max}^{\mathrm{train}}=10.
+$$
 
 ### 2.7 Curated artifact and structural validation
 
@@ -354,15 +363,15 @@ Failure policy:
 - never reorder supports to satisfy batching constraints;
 - never silently reduce $K$;
 - never silently truncate a support scanpath;
-- never resample frozen validation/final supports because of implementation overflow.
+- never resample frozen test supports because of implementation overflow.
 
-For **training**, if the complete causal input exceeds the allowed context budget, reject only that sampled training episode and sample a new episode from the same normative distribution.
+For **training**, context overflow must never replace or skip the current epoch query. Keep the query and sampled $K$ fixed, resample only the same-subject support realization/order, and retry. If no valid realization is found within the configured finite retry budget, fail loudly. Do not lower or resample $K$ to repair overflow.
 
-For **validation/final evaluation**, all frozen support/query contexts must be preflight-checked. Any invalid context is a hard failure requiring an explicit configuration change; frozen membership/order must not be mutated.
+For **test evaluation**, all frozen support/query contexts must be preflight-checked. Any invalid context is a hard failure requiring an explicit configuration change; frozen membership/order must not be mutated.
 
 ---
 
-## 4. Train-time episodic construction
+## 4. Train-time query-coverage construction
 
 Training uses only:
 
@@ -384,58 +393,89 @@ For COCO-Search18:
 support image identity = name = stimulus_id
 ```
 
-For a seen subject $u$ and candidate query $q$, let $\mathcal I_{u,q}^{\mathrm{sup}}$ be the set of distinct eligible train-split image identities for subject $u$ after removing the query image.
+For a seen-subject query $q$ with subject $u$, let $\mathcal I_{u,q}^{\mathrm{sup}}$ be the set of distinct eligible train-split image identities for subject $u$ after removing the query image.
 
 A selected support image must resolve to at least one eligible record from the same subject. If an image has multiple eligible records, one record is sampled uniformly among records for that selected image.
 
-Therefore every train episode has:
+For a sampled train-time cardinality $K$, every training episode has:
 
 - exactly $K$ support records;
 - exactly $K$ distinct support images;
 - no support image equal to the query image.
 
-### 4.2 Precomputed valid-query pools
+### 4.2 Optimization-query universe
 
-For every seen subject $u$ and $K\in\{1,5,10\}$, precompute:
+Define the complete optimization-query universe:
 
 $$
-\mathcal Q_{u,K}^{\mathrm{valid}}
+\mathcal Q_{\mathrm{train}}
 =
-\{q: |\mathcal I_{u,q}^{\mathrm{sup}}|\ge K\}.
+\{q:\ q\in \texttt{all/train.json},\ \operatorname{subject}(q)\in\mathcal U_{\mathrm{train}}\}.
 $$
 
-Only queries in this valid pool may be sampled for `(subject, K)`.
+Query membership is independent of $K$. There are no `(subject, K)` valid-query pools in the canonical training protocol.
 
-Before training starts, assert:
-
-$$
-|\mathcal Q_{u,K}^{\mathrm{valid}}|>0
-$$
-
-for every seen subject and supported $K$.
-
-If any required pool is empty, fail. Runtime must not repair this by changing subject distribution, lowering $K$, allowing same-image support/query pairs, or sampling support images with replacement.
-
-### 4.3 Sampling distribution
-
-Each train episode is constructed as follows:
-
-1. sample subject uniformly:
+Before training starts, assert for every $q\in\mathcal Q_{\mathrm{train}}$:
 
 $$
-u\sim\operatorname{Uniform}(\mathcal U_{\mathrm{train}});
+|\mathcal I_{u(q),q}^{\mathrm{sup}}|\ge K_{\max}^{\mathrm{train}}=10.
 $$
 
-2. sample $K$ uniformly from $\{1,5,10\}$;
-3. sample query uniformly from $\mathcal Q_{u,K}^{\mathrm{valid}}$;
-4. construct same-subject train-split support-image candidates excluding the query image;
-5. sample $K$ distinct support images uniformly without replacement;
-6. for each selected image, sample one eligible same-subject record uniformly if multiple records resolve to that image;
-7. uniformly randomize the resulting $K$ support records before handing them to WHERE.
+The current split construction already requires at least 11 distinct train stimulus images for every seen subject, so excluding the query image leaves at least ten candidate support images.
+
+If any optimization query fails this requirement, fail loudly. Runtime must not repair it by dropping the query, changing subject distribution, lowering $K$, allowing same-image support/query pairs, or sampling support images with replacement.
+
+### 4.3 Query-coverage epoch
+
+A **training epoch** is exactly one shuffled-without-replacement traversal of $\mathcal Q_{\mathrm{train}}$.
+
+For epoch $e$, draw one permutation:
+
+$$
+\Pi_e
+=
+\operatorname{Shuffle}(\mathcal Q_{\mathrm{train}};\,\mathrm{seed}_e)
+=
+(q_1,\ldots,q_{N_Q}),
+$$
+
+where:
+
+$$
+N_Q=|\mathcal Q_{\mathrm{train}}|.
+$$
+
+Therefore every optimization query appears **exactly once per completed epoch**. Query sampling with replacement inside an epoch is forbidden. A new permutation is created for each new epoch.
+
+Subject frequency is induced by the query set itself:
+
+$$
+P_e(u)=\frac{|\{q\in\mathcal Q_{\mathrm{train}}:\operatorname{subject}(q)=u\}|}{N_Q}.
+$$
+
+Subjects are not sampled uniformly before queries in the canonical training protocol.
+
+### 4.4 Per-query stochastic support construction
+
+For each query $q_i$ in the current epoch permutation:
+
+1. keep $q_i$ fixed as the optimization query;
+2. sample:
+
+$$
+K_i\sim\operatorname{Uniform}\{1,\ldots,10\};
+$$
+
+3. construct same-subject train-split support-image candidates excluding the query image;
+4. sample $K_i$ distinct support images uniformly without replacement;
+5. for each selected image, sample one eligible same-subject record uniformly if multiple records resolve to that image;
+6. uniformly randomize the resulting $K_i$ support records before handing them to WHERE.
 
 The query record itself can never appear in support, no support may share the query image, and no two train supports may share an image.
 
-### 4.4 Training support order
+The only guaranteed train-time coverage axis is **query identity**. The protocol does not guarantee query-by-K coverage, K-frequency equality within one finite epoch, support-combination coverage, or support-record coverage. Those quantities arise stochastically from repeated epochs.
+
+### 4.5 Training support order
 
 For sampled support demonstrations, draw:
 
@@ -445,42 +485,18 @@ $$
 
 Support order is randomized independently for training episodes so sequence position is not a stable subject cue.
 
-Worker seeding and distributed-RNG derivation are owned by `05_TRAINING_SPEC.md`; the probability law above is normative here.
+Worker seeding and distributed-RNG derivation are owned by `05_TRAINING_SPEC.md`; they must preserve the epoch-level no-replacement query traversal and the stochastic support law above.
 
 ---
 
-## 5. Validation and final evaluation
+## 5. Test evaluation
 
-### 5.1 Seen-subject validation for model selection
+### 5.1 Epoch-end evaluation
 
-Validation mirrors the train-support / held-out-query structure without using unseen-subject gaze.
-
-For each seen subject $u$ and each $K\in\{1,5,10\}$:
-
-- support comes only from eligible `all/train.json` records of subject $u$;
-- queries are the full eligible `all/validation.json` query set of subject $u$;
-- exactly one ordered validation support set is frozen for `(subject, K)`;
-- that support set is reused for every validation query of that subject;
-- support identity is `trial_key = (task, image_name)`;
-- validation support images must be distinct within one $K$-shot set;
-- support order is frozen and never reshuffled per validation query;
-- unseen-subject gaze must not affect checkpoint selection, early stopping, hyperparameter selection, or threshold selection.
-
-Deterministic validation support construction:
-
-```python
-units = sorted(candidate_validation_support_trial_keys)
-rng = random.Random(1000 + K)
-rng.shuffle(units)
-
-# Scan in shuffled order and keep a trial only when its image_name
-# has not already been selected for this support set.
-ordered_validation_supports = take_first_K_distinct_images(units, K)
-```
-
-Require at least $K$ valid support units and at least one validation query for every seen subject included in validation.
-
-All three $K$ values are evaluated for model selection. Metric definition and aggregation are owned by `06_EVALUATION_SPEC.md`.
+After every completed query-coverage epoch, evaluate the unseen-subject test
+queries using the same frozen protocol as final evaluation below. There is no
+validation split, no seen-subject validation support table, and no implicit
+best-checkpoint selection. Test metrics are logged with the `test` namespace.
 
 ### 5.2 Unseen-subject final evaluation
 
@@ -493,8 +509,8 @@ $$
 final evaluation uses disjoint stimulus pools:
 
 ```text
-support source -> data/COCO_Search18/split/all/train.json
-query source   -> data/COCO_Search18/split/all/test.json
+support source -> data/COCO_Search18/split_95_5/all/train.json
+query source   -> data/COCO_Search18/split_95_5/all/test.json
 ```
 
 For fixed `(K, draw_id)`, one frozen ordered support set is reused for every final-test query of that subject. Support is never resampled per query.
@@ -573,7 +589,7 @@ The representation consumed by a baseline may differ, but the underlying selecte
 
 ### 6.1 Protocol identity
 
-SemGaze does **not** use the original COCO-Search18 train/validation/test split files at runtime.
+SemGaze does **not** use the original COCO-Search18 train/test split files at runtime.
 
 The curated source is:
 
@@ -590,261 +606,64 @@ all := every curated record, including both present and absent conditions
 The split builder is:
 
 ```text
-prepare_cocosearch18_splits.py
+prepare_cocosearch18_splits_95_5.py
 ```
 
 The builder may create `tp_only`, `ta_only`, and `all`, but this specification treats only:
 
 ```text
-data/COCO_Search18/split/all/
+data/COCO_Search18/split_95_5/all/
 ```
 
 as authoritative runtime input.
 
-### 6.2 Deterministic image-level split
+### 6.2 Shared master image partition
 
-Split by unique:
+Protocol version is `cocosearch18_semgaze_master_955_v1`. The builder searches
+deterministically over master image partitions with 95% train and 5% test,
+checks coverage, and selects the valid candidate with the best distribution
+score. All variants are filters of the selected master partition; they are
+never independently split. The existing artifacts are authoritative and must
+not be regenerated during training.
 
-```text
-stimulus_id = name
-```
-
-Never split trajectory rows independently.
-
-All records sharing one image inherit the same split.
-
-Frozen protocol version:
-
-```text
-protocol_version = "cocosearch18_semgaze_81910_v1"
-variant = "all"
-image_ratio = [0.81, 0.09, 0.10]
-```
-
-For integer `attempt_id >= 0` and image name `x`, rank images by:
-
-```text
-SHA256(f"{protocol_version}|all|{attempt_id}|image::{x}")
-```
-
-For $N_I$ unique images:
-
-```text
-n_train = floor(0.81 * N_I)
-n_val   = floor(0.09 * N_I)
-n_test  = N_I - n_train - n_val
-```
-
-Assign:
-
-```text
-first n_train images -> train
-next n_val images    -> validation
-remaining images     -> test
-```
-
-Start from `attempt_id = 0` and choose the first attempt satisfying every coverage requirement below. Store the chosen `attempt_id` in the manifest. Runtime never searches for another split.
+Current master: 4,048 train images and 213 test images; 26,125 train records and
+1,375 test records in `all`. The split unit is `stimulus_id = name`.
 
 ### 6.3 Coverage requirements
 
-A candidate `all` split is valid only if all conditions hold.
+Optimization queries are all eligible seen-subject `all/train.json` records.
+They must have enough same-subject distinct train images for any K_train in
+1..10 after excluding their own image; failure must not filter query membership.
+Unseen train records are evaluation support only. Test records never become
+optimization queries or support examples.
 
-For every seen subject:
-
-```text
->= 11 distinct train stimulus_ids
->= 1 validation query record
-```
-
-The 11-image minimum guarantees that a training query can still have ten different support images after excluding its own image.
-
-For every unseen subject in `{7,8,9}`:
+### 6.4 Persisted artifacts and runtime variants
 
 ```text
->= 1 test query record
+data/COCO_Search18/split_95_5/master_split_manifest.json
+data/COCO_Search18/split_95_5/split_index.json
+data/COCO_Search18/split_95_5/{all,tp_only,ta_only}/train.json
+data/COCO_Search18/split_95_5/{all,tp_only,ta_only}/test.json
+data/COCO_Search18/split_95_5/{all,tp_only,ta_only}/split_manifest.json
 ```
 
-For shared final support:
-
-```text
->= 100 eligible shared trial keys with 100 distinct image names
-```
-
-If a candidate attempt fails any rule, try the next attempt. Do not manually move records/images between splits.
-
-### 6.4 Persisted split artifacts
-
-Canonical output directory:
-
-```text
-data/COCO_Search18/split/all/
-```
-
-Required files:
-
-```text
-data/COCO_Search18/split/all/train.json
-data/COCO_Search18/split/all/validation.json
-data/COCO_Search18/split/all/test.json
-data/COCO_Search18/split/all/split_manifest.json
-data/COCO_Search18/split/all/preprocess_report.json
-```
-
-Each split file is a JSON list of complete curated records assigned to that split.
-
-Each persisted record must include at least:
-
-```text
-record_id
-stimulus_id
-trial_key
-split
-variant
-name
-subject
-task
-condition
-X
-Y
-T
-answer
-prediction
-```
-
-For every runtime record:
-
-```text
-variant == "all"
-```
-
-The semantic payload under `prediction` is copied from the curated artifact; split preprocessing does not regenerate or rewrite it.
-
-`split_manifest.json` is authoritative for membership and frozen supports.
-
-`preprocess_report.json` is diagnostic only and must not be used as a runtime membership source.
-
-### 6.5 Optimization and validation usage
-
-Optimization:
-
-```text
-subject not in {7,8,9}
-AND record in data/COCO_Search18/split/all/train.json
-```
-
-Validation:
-
-```text
-support -> same seen subject, all/train.json
-query   -> same seen subject, all/validation.json
-```
-
-Final evaluation:
-
-```text
-support -> unseen subject, all/train.json
-query   -> same unseen subject, all/test.json
-```
-
-No unseen-subject record may influence optimization or model selection.
-
-### 6.6 Runtime variant selection
-
-The current training/evaluation stack must explicitly bind to:
-
-```text
-variant = "all"
-```
-
-The following are forbidden:
-
-- auto-detecting a variant directory;
-- selecting the first available split folder;
-- using `tp_only` because it matches an ISP-SENet target-present setting;
-- using `ta_only` for any current training/evaluation path;
-- merging the three generated variant folders at runtime.
-
-If `data/COCO_Search18/split/all/` is missing or invalid, runtime must fail loudly.
-
----
+Training requires `all`; the loader and evaluation can inspect the other variants
+under the same master partition. There is no `validation.json` artifact.
 
 ## 7. Frozen split/draw manifest
 
-Canonical manifest:
+Each variant manifest records the protocol version, curated-source checksum,
+train/test file checksums and stimulus IDs, seen/unseen subject IDs, and
+`support_draws`. The shared index verifies variant manifest checksums and counts;
+the master manifest owns image membership. Runtime checks all three metadata
+files and includes their combined identity in checkpoints.
 
-```text
-data/COCO_Search18/split/all/split_manifest.json
-```
-
-Minimum schema:
-
-```json
-{
-  "protocol_version": "cocosearch18_semgaze_81910_v1",
-  "dataset": "COCO-Search18",
-  "benchmark_kind": "SemGaze-curated",
-  "variant": "all",
-  "condition_filter": "all curated records",
-  "curated_source_file": "data/COCO_Search18/COCOSearch-18.json",
-  "curated_source_sha256": null,
-  "split_generation": {
-    "algorithm": "SHA256 ranking over unique stimulus_id=name",
-    "attempt_id": 0,
-    "image_ratio": [0.81, 0.09, 0.10],
-    "split_unit": "stimulus_id=name",
-    "variant_split_independently": true
-  },
-  "split_files": {
-    "train": "data/COCO_Search18/split/all/train.json",
-    "validation": "data/COCO_Search18/split/all/validation.json",
-    "test": "data/COCO_Search18/split/all/test.json"
-  },
-  "split_file_sha256": {
-    "train": null,
-    "validation": null,
-    "test": null
-  },
-  "train_stimulus_ids": [],
-  "validation_stimulus_ids": [],
-  "test_stimulus_ids": [],
-  "seen_subject_ids": [],
-  "unseen_subject_ids": [7, 8, 9],
-  "validation_supports": {},
-  "support_sampling": {
-    "unit": "trial_key=(task,image_name)",
-    "same_trial_keys_for_unseen_subjects": true,
-    "distinct_image_within_block": true,
-    "exclusive_across_draws_within_k": true,
-    "num_draws_per_k": 10,
-    "python_random_seed_by_k": {
-      "1": 1,
-      "5": 5,
-      "10": 10
-    },
-    "nested_k": false
-  },
-  "support_draws": {
-    "1": [],
-    "5": [],
-    "10": []
-  }
-}
-```
-
-The actual `attempt_id`, concrete image membership, subject IDs, validation supports, support blocks, source checksum, and split-file checksums stored in the generated manifest are frozen benchmark metadata, not experiment hyperparameters.
-
-Each final support entry stores enough information to resolve exactly:
-
-```text
-task
-image_name
-trial_key
-resolved_record_id_by_subject
-```
-
-Runtime must read the manifest rather than reconstructing frozen validation or final supports.
-
----
+For each K_eval in 1/5/10, `support_draws[str(K)]` contains ten ordered blocks.
+Each entry contains `image_name`, `task`, `trial_key`, and
+`resolved_record_id_by_subject` for subjects 7/8/9. All entries resolve to train
+records. Images are exclusive across the ten draws within a K family. One block
+is reused unchanged across its full test query set. There is no
+`validation_supports` field.
 
 ## 8. Runtime assertions and failure policy
 
@@ -863,7 +682,7 @@ Split materialization must fail loudly if:
 - no attempted deterministic split satisfies coverage requirements;
 - a shared `(task, image_name)` trial does not resolve uniquely for each unseen subject 7, 8, and 9;
 - fewer than `10K` exclusive support images exist for a required final-evaluation $K$;
-- train/validation/test do not exactly partition the `all` variant records.
+- train/test do not exactly partition the `all` variant records.
 
 Do not silently drop malformed curated records to make preprocessing succeed.
 
@@ -871,24 +690,24 @@ Do not silently drop malformed curated records to make preprocessing succeed.
 
 Training/evaluation must fail loudly if:
 
-- `data/COCO_Search18/split/all/` is missing;
+- `data/COCO_Search18/split_95_5/all/` is missing;
 - a required split file is missing;
 - the loaded manifest has `variant != "all"`;
 - the loaded manifest has unexpected unseen subject IDs;
 - a split-file checksum differs from the manifest;
 - the curated-source checksum is inconsistent with the materialized benchmark version;
 - a required frozen support list is missing;
-- any required $\mathcal Q_{u,K}^{\mathrm{valid}}$ is empty before training;
+- any optimization query has fewer than $K_{\max}^{\mathrm{train}}=10$ eligible same-subject support images after excluding its query image;
 - a supposedly valid support unit cannot resolve to the expected same-subject record;
 - a frozen support record is not in `all/train.json`;
-- a validation query is not in `all/validation.json`;
+- a test query is not in `all/test.json`;
 - a final query is not in `all/test.json`;
 - two records with the same `stimulus_id` appear in different split files;
 - final support blocks overlap where exclusivity is required;
-- a validation/final causal input exceeds the allowed model context;
+- a test causal input exceeds the allowed model context;
 - WHERE rendering changes support membership or support order.
 
-Training context overflow is handled only by rejecting the sampled episode and drawing another episode from the same valid training distribution.
+Training context overflow must preserve the current epoch query and sampled $K$: resample only the support realization/order. If the configured finite retry budget is exhausted, fail loudly rather than skipping the query, replacing the query, or changing $K$.
 
 ### 8.3 Forbidden runtime behavior
 
@@ -899,14 +718,15 @@ No runtime path may:
 - re-filter by `condition` after loading the `all` split;
 - recompute correctness filtering;
 - regenerate WHAT/WHY/HOW;
-- recompute train/validation/test membership;
+- recompute train/test membership;
 - move a record/image between split files;
-- resample validation/final supports;
+- resample test supports;
 - lower $K$;
 - sample train support images with replacement;
 - permit same-image train support/query leakage;
-- reorder a frozen validation/evaluation support list;
+- reorder a frozen test evaluation support list;
 - drop a support because of batching or `drop_last`;
+- drop or duplicate an optimization query because of batching, sharding, `drop_last`, or context-overflow recovery;
 - truncate support content;
 - replace independent K-specific draw families with nested/prefix supports.
 
@@ -918,11 +738,11 @@ No runtime path may:
 - Current runtime variant is `all` only.
 - Air-D is not part of the current implementation/evaluation scope.
 - Both target-present and target-absent curated records are retained in `all`.
-- Runtime data comes from persisted `data/COCO_Search18/split/all/*` files.
+- Runtime data comes from persisted `data/COCO_Search18/split_95_5/all/*` files.
 - Correctness filtering occurs upstream before WHAT/WHY/HOW generation.
 - Split preprocessing does not infer correctness from final semantic JSON.
-- Train/validation/test splitting is by `stimulus_id=name`, never by trajectory row.
-- Split ratio is 81/9/10 by unique image using floor/floor/remainder.
+- Train/test splitting is by `stimulus_id=name`, never by trajectory row.
+- Split ratio is 95/5 by unique image, shared across all variants.
 - Every record sharing one image belongs to exactly one split.
 - Split membership is deterministic, checksummed, and frozen.
 - Unseen subjects are exactly 7, 8, and 9.
@@ -930,14 +750,18 @@ No runtime path may:
 - Support content exposed to WHERE is image + task + observed scanpath only.
 - Support semantic labels are not replayed to WHERE.
 - Subject identity is never supplied as a model token.
-- $K\in\{1,5,10\}$.
-- Train-time K is sampled uniformly over the three supported values.
-- Train subjects are sampled uniformly before query/support sampling.
-- Every `(seen_subject, K)` valid-query pool is precomputed and non-empty.
+- Train-time support cardinality satisfies $K_{\mathrm{train}}\sim\operatorname{Uniform}\{1,\ldots,10\}$.
+- Canonical test evaluation shot settings are $K_{\mathrm{eval}}\in\{1,5,10\}$.
+- Train-time K is stochastic context cardinality, not a coverage axis.
+- The optimization-query universe is independent of K.
+- One completed training epoch visits every optimization query exactly once in shuffled order.
+- Training queries are shuffled without replacement within each epoch.
+- Subject frequency during training is induced by query membership; subjects are not sampled uniformly first.
+- Every optimization query has at least ten eligible same-subject support images after excluding its query image.
 - Train supports use $K$ distinct images sampled without replacement.
 - No train support shares the query image.
 - Training support order is randomized per episode.
-- Validation uses seen subjects only: support from `all/train`, query from `all/validation`.
+- Epoch-end evaluation uses unseen subjects: support from `all/train`, query from `all/test`.
 - Unseen-subject gaze is never used for model selection.
 - Final evaluation support comes only from `all/train`.
 - Final evaluation query comes only from `all/test`.
@@ -947,7 +771,7 @@ No runtime path may:
 - A frozen support set is reused across the corresponding full query set.
 - COCO unseen-subject supports are frozen by `(task, image_name)` and resolved to subject-specific records.
 - Raw support/query images remain separate multimodal inputs.
-- Frozen validation/final contexts must fit without truncating, dropping, reordering, or resampling supports.
+- Frozen test contexts must fit without truncating, dropping, reordering, or resampling supports.
 
 ---
 
@@ -957,13 +781,12 @@ The canonical few-shot data contract consists of the following persisted artifac
 
 ```text
 data/COCO_Search18/COCOSearch-18.json
-prepare_cocosearch18_splits.py
+prepare_cocosearch18_splits_95_5.py
 
-data/COCO_Search18/split/all/train.json
-data/COCO_Search18/split/all/validation.json
-data/COCO_Search18/split/all/test.json
-data/COCO_Search18/split/all/split_manifest.json
-data/COCO_Search18/split/all/preprocess_report.json
+data/COCO_Search18/split_95_5/all/train.json
+data/COCO_Search18/split_95_5/all/test.json
+data/COCO_Search18/split_95_5/all/split_manifest.json
+data/COCO_Search18/split_95_5/all/preprocess_report.json
 ```
 
 The runtime system additionally depends on:

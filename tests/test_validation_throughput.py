@@ -5,8 +5,8 @@ import pytest
 import torch
 from test_model_path import tiny_bundle, episode
 from test_training_throughput import mixed_episode
-from test_epoch_validation import validation_data
-from semgaze.evaluation import validation
+from test_epoch_validation import evaluation_data
+from semgaze.evaluation import test as validation
 from semgaze.evaluation.batching import schedule_batches, episode_id
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.where.generation import generate_where, generate_where_batch
@@ -22,9 +22,9 @@ def same_k_pair(episode):
 @pytest.mark.parametrize('bucket', [False, True])
 def test_scheduler_all_k_complete_and_partial(tmp_path, episode, bucket):
     bundle = tiny_bundle(tmp_path, episode)
-    train, queries, manifest = validation_data(episode)
+    train, queries, manifest = evaluation_data(episode)
     from semgaze.data.fewshot import frozen_episode
-    episodes = [frozen_episode(replace(queries[0], record_id=f'q{i}'), train, manifest, k)
+    episodes = [frozen_episode(replace(queries[0], record_id=f'q{i}'), train, manifest, k, draw_id=0)
                 for i in range(5) for k in (1, 5, 10)]
     settings = dict(batch_size_by_k={1: 4, 5: 2, 10: 3}, bucket_by_length=bucket, bucket_window=5)
     batches = list(schedule_batches(bundle, episodes, settings))
@@ -40,7 +40,7 @@ def test_episode_accumulator_unequal_batches():
     for batch in ([1., 2., 3., 4.], [100.]):
         for value in batch:
             acc.add(str(value), {key: value for key in validation.EVAL_KEYS})
-    assert acc.finish(['1.0','2.0','3.0','4.0','100.0'])['eval_total'] == 22
+    assert acc.finish(['1.0','2.0','3.0','4.0','100.0'])['test_total'] == 22
     with pytest.raises(ValueError, match='count'):
         acc.finish(['1.0'])
     with pytest.raises(ValueError, match='duplicate'):
@@ -51,10 +51,10 @@ def test_episode_accumulator_unequal_batches():
 
 def test_batch_size_config_survives_json_and_yaml_keys():
     from semgaze.model.config import resolve_config
-    config = resolve_config({'validation': {'loss': {'batch_size_by_k': {1: 4, 5: 2, 10: 1}}}})
+    config = resolve_config({'test': {'loss': {'batch_size_by_k': {1: 4, 5: 2, 10: 1}}}})
     assert config == resolve_config(json.loads(json.dumps(config)))
-    changed = resolve_config(config, {'validation': {'loss': {'batch_size_by_k': {1: 8}}}})
-    assert changed['validation']['loss']['batch_size_by_k'] == {'1':8,'5':2,'10':1}
+    changed = resolve_config(config, {'test': {'loss': {'batch_size_by_k': {1: 8}}}})
+    assert {k:changed['test']['loss']['batch_size_by_k'][k] for k in ('1','5','10')} == {'1':8,'5':2,'10':1}
 
 
 def test_synthetic_state_and_image_mapping_isolation(tmp_path, episode):
@@ -88,7 +88,7 @@ def test_cache_rejects_training_and_bounds_storage(tmp_path,episode):
     inputs=to_model_device(batch.inputs,bundle.model)
     with pytest.raises(ValueError,match='inference'):
         cache.fuse(bundle,inputs,batch.samples[0].image_paths)
-    with validation.validation_mode(bundle):
+    with validation.test_mode(bundle):
         cache.fuse(bundle,inputs,batch.samples[0].image_paths)
     assert len(cache.visual)==len(cache.pixels)==len(cache)==1
     row=next(iter(cache.visual.values()))
@@ -102,7 +102,7 @@ def test_native_serial_component_parity_and_reuse_contract(tmp_path, episode, ca
     cache = InferenceVisualCache(preprocessing=cache_enabled, features=cache_enabled, max_entries=2)
     settings = dict(batch_size_by_k={len(episode.supports): 2})
     calls, heads = [], []
-    with validation.validation_mode(bundle):
+    with validation.test_mode(bundle):
         reference = [validation.serial_reference_losses(bundle, e) for e in episodes]
         hook = bundle.model.get_base_model().model.register_forward_pre_hook(lambda *a: calls.append(1))
         head = bundle.model.get_output_embeddings().register_forward_pre_hook(lambda m,a: heads.append(a[0].shape))
@@ -118,7 +118,7 @@ def test_native_serial_component_parity_and_reuse_contract(tmp_path, episode, ca
             assert observed['state_count'] == expected['state_count']
         again = validation.batch_losses(bundle, episodes, batch=batch, cache=cache)
         for a,b in zip(actual,again):
-            assert a['eval_total'] == b['eval_total']
+            assert a['test_total'] == b['test_total']
         if cache_enabled:
             assert cache.statistics()['visual']['hits'] > 0
             assert cache.statistics()['preprocessing']['hits'] > 0
@@ -129,16 +129,16 @@ def test_native_serial_component_parity_and_reuse_contract(tmp_path, episode, ca
 
 def test_epoch_b4_plus_b1_is_episode_mean(tmp_path, episode):
     bundle = tiny_bundle(tmp_path, episode)
-    train, queries, manifest = validation_data(episode)
+    train, queries, manifest = evaluation_data(episode)
     queries = [replace(queries[0], record_id=f'q{i}', stimulus_id=f'val{i}') for i in range(5)]
-    manifest['validation_stimulus_ids'] = [q.stimulus_id for q in queries]
-    bundle.config['validation']['loss'].update(batch_size_by_k={1: 4, 5: 4, 10: 4}, bucket_by_length=True)
+    manifest['test_stimulus_ids'] = [q.stimulus_id for q in queries]
+    bundle.config['test']['loss'].update(batch_size_by_k={1: 4, 5: 4, 10: 4}, bucket_by_length=True)
     rows = []
-    result = validation.validate_epoch(bundle, train, queries, manifest, episode_callback=rows.append)
-    assert len(rows) == result['eval_episodes'] == 15
+    result = validation.evaluate_test_epoch(bundle, train, queries, manifest, episode_callback=rows.append)
+    assert len(rows) == result['test_episodes'] == 150
     for key in validation.EVAL_KEYS:
         assert result[key] == pytest.approx(sum(row[key] for row in rows)/len(rows))
-    assert len({r['episode_id'] for r in rows}) == 15
+    assert len({r['episode_id'] for r in rows}) == 150
 
 
 @pytest.mark.parametrize('cache_enabled', [False, True])
@@ -154,7 +154,7 @@ def test_generation_matches_serial_with_left_padding_and_budgets(tmp_path, episo
     def observed(**kwargs):
         calls.append(kwargs['attention_mask'].shape[0])
         return generate(**kwargs)
-    with validation.validation_mode(bundle):
+    with validation.test_mode(bundle):
         old_where = [generate_where(bundle, e) for e in episodes]
         old_flat = [evaluate_flat_episode(bundle, e, generation_budget=6) for e in episodes]
         bundle.model.generate = observed
@@ -168,11 +168,11 @@ def test_generation_matches_serial_with_left_padding_and_budgets(tmp_path, episo
 def test_batched_epoch_prediction_order_coverage(tmp_path, episode):
     bundle = tiny_bundle(tmp_path, episode)
     resolve_prediction_settings(bundle.config, 3)
-    train, queries, manifest = validation_data(episode)
+    train, queries, manifest = evaluation_data(episode)
     queries += [replace(queries[0], record_id='second', stimulus_id='second')]
-    manifest['validation_stimulus_ids'].append('second')
-    bundle.config['validation']['prediction'].update(batch_size_by_k={1: 2, 5: 2, 10: 2}, bucket_by_length=True)
+    manifest['test_stimulus_ids'].append('second')
+    bundle.config['test']['prediction'].update(batch_size_by_k={1: 2, 5: 2, 10: 2}, bucket_by_length=True)
     result = predict_epoch(bundle, [episode], train, queries, manifest, epoch=1, step=1, split_manifest_identity='test')
-    rows = [json.loads(line) for line in open(result['prediction_files']['validation'], encoding='utf-8')]
-    assert [(r['query_id'],r['k']) for r in rows] == [(q.record_id,k) for k in (1,5,10) for q in queries]
+    rows = [json.loads(line) for line in open(result['prediction_files']['test'], encoding='utf-8')]
+    assert [(r['query_id'],r['k']) for r in rows] == [(q.record_id,k) for k in (1,5,10) for d in range(10) for q in queries]
     assert all(r['semantic_generation']['inserted_state_count'] == 4 for r in rows)

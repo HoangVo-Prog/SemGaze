@@ -1,3 +1,5 @@
+> Historical implementation/performance report. Split, sampling, schedule and evaluation examples below predate the 95/5 query-coverage migration. Use [COCO_955_MIGRATION.md](COCO_955_MIGRATION.md) and the current YAML/CLI for new runs. Historical measurements are not evidence for current sampling throughput.
+
 # Section A implementation and verification
 
 Status: physical batching and exact-objective patches implemented. **A100 40GB

@@ -67,7 +67,7 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            where_batch=None, profiler=None):
     """One vectorized WHERE and semantic forward, one backward per physical batch.
 
-    A scalar episode keeps the public smoke/validation-facing result convention.
+    A scalar episode keeps the public smoke/evaluation-facing result convention.
     Lists/tuples are physical batches, never sequential model execution.
     """
     bundle = model_bundle

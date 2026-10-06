@@ -45,6 +45,7 @@ class NormalizedRecord:
 class FlatEpisode:
     supports: tuple[NormalizedRecord, ...]
     query: NormalizedRecord
+    draw_id: int | None = None
 
     def __post_init__(self):
         if not self.supports:

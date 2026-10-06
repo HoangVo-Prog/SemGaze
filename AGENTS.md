@@ -1,973 +1,574 @@
-# AGENTS.md — SemGaze Validation Parity Root-Cause Audit
+# AGENTS.md
 
-## Objective
+## Scope
+These instructions apply to the SemGaze repository, with emphasis on the COCO-Search18 data, training-sampling, and evaluation pipeline.
 
-Audit the current SemGaze validation pipeline and identify the **first concrete cause** of the parity failure between:
+The current COCO-Search18 protocol combines two changes that must be implemented together:
 
-- serial validation, and
-- same-K physically batched validation.
+1. the dataset split is now **95% train / 5% test**, with no validation split;
+2. training is now **query-coverage epoch based**, not random-with-replacement episode sampling.
 
-The current observed failure already includes a non-trivial difference in:
+Do not implement only one of these changes while leaving assumptions from the old protocol elsewhere in the repository.
 
-```text
-eval_where max diff ~= 0.0241
-```
+## COCO-Search18 Split Protocol
+COCO-Search18 no longer uses `train / validation / test` for the SemGaze split.
 
-Therefore, the investigation must start from the **WHERE path**.
+Use only:
 
-Do **not** begin by auditing WHAT/WHY/HOW metric slicing, final aggregation, or tolerance settings unless the WHERE path has first been proven equivalent.
+- `train`: 95%
+- `test`: 5%
+- no validation split
 
-The main deliverable is a **server-runnable benchmark/report** that isolates the root cause with the smallest possible number of experiments.
+The split unit is the image/stimulus (`stimulus_id = image name`). Train and test images must be strictly disjoint.
 
-Do not modify the training or validation scientific behavior yet.
+Current master split:
 
----
+- train images: 4048
+- test images: 213
+- train records: 26125
+- test records: 1375
 
-# 1. Scope and Constraints
-
-## Primary scope
-
-Audit:
-
-```text
-serial validation
-vs
-same-K batched validation
-```
-
-with special attention to:
+Protocol version:
 
 ```text
-WHERE forward
-visual preprocessing/cache
-visual feature cache
-physical batching
-padding / masks
-per-episode WHERE loss
-semantic path only after WHERE parity is established
+cocosearch18_semgaze_master_955_v1
 ```
 
-## Files available for benchmark/instrumentation
-
-Prefer modifying:
-
-```text
-scripts/benchmark_validation_a100.py
-```
-
-Only modify another script if absolutely necessary:
-
-```text
-scripts/benchmark_a100.py
-scripts/profile_training.py
-scripts/smoke_flat.py
-```
-
-Do not change the actual SemGaze training/evaluation implementation merely to make parity pass.
-
-Instrumentation changes inside library code are allowed only if they are:
-
-1. audit-only,
-2. gated behind an explicit debug/audit flag,
-3. behavior-preserving when disabled.
-
-Prefer keeping all instrumentation in `scripts/benchmark_validation_a100.py`.
-
----
-
-# 2. Existing Evidence That Must Guide the Audit
-
-Do not restart the investigation from every possible hypothesis.
-
-The current evidence already narrows the problem substantially.
-
-## 2.1 WHERE is the first known divergence
-
-Serial and batched validation already disagree on:
-
-```text
-eval_where
-```
-
-Therefore the initial discrepancy occurs before:
-
-```text
-WHAT slicing
-WHY slicing
-HOW slicing
-semantic metric aggregation
-final averaging
-```
-
-Do not spend time on those downstream components until WHERE parity is understood.
-
-## 2.2 Low-priority suspects
-
-The following should not be treated as primary hypotheses unless new evidence directly points back to them:
-
-```text
-episode reorder from bucketing
-dropout / train-vs-eval mode mismatch
-final episode averaging
-WHAT/WHY/HOW offset slicing
-generic Python overhead
-```
-
-The current code already contains substantial checks around these areas.
-
-## 2.3 Highest-priority validation suspects
-
-Investigate in this order:
-
-### H1 — Different validation implementation even at physical B=1
-
-The serial reference and batched evaluator do not necessarily execute identical code paths.
-
-A same-K batched run with:
-
-```text
-physical batch = 1
-cache = off
-bucket = off
-```
-
-must therefore be tested before attributing the mismatch to actual multi-example batching.
-
-### H2 — Visual feature cache changes the model execution path
-
-The current validation cache can call:
-
-```text
-get_image_features(...)
-```
-
-separately and later fuse the cached visual features into the language-model input.
-
-That is not equivalent to merely caching decoded/preprocessed images.
-
-The current CLI also appears to couple:
-
-```text
-preprocessing cache
-visual feature cache
-```
-
-under one cache flag.
-
-These two caches must be isolatable.
-
-### H3 — Physical B>1 changes WHERE numerics
-
-If:
-
-```text
-serial cache-off
-vs
-batched-B1 cache-off
-```
-
-passes, but:
-
-```text
-batched-B2/B4 cache-off
-```
-
-fails, investigate:
-
-```text
-padding
-attention masks
-position-related inputs
-image ordering / image offsets
-pixel slices
-batch-shape-dependent BF16 kernels
-per-episode hidden states / token NLL
-```
-
-Do not immediately call the difference "expected BF16 noise".
-
-A max WHERE loss difference around `0.024` is too large to waive without locating the first divergent tensor.
-
----
-
-# 3. Required Audit Strategy
-
-The audit must be **decision-tree based**, not an open-ended profiler exercise.
-
-The goal is to stop as soon as one branch clearly identifies the source.
-
-Implement the following benchmark modes in:
-
-```text
-scripts/benchmark_validation_a100.py
-```
-
-if they are not already directly supported.
-
----
-
-# 4. Required Experiment Matrix
-
-Use the exact same checkpoint, dataset subset, support sets, episode IDs, and deterministic ordering for every comparison.
-
-## A — Serial baseline
-
-```text
-mode: serial
-cache: off
-bucket: off
-```
-
-Output directory example:
-
-```text
-runs/parity-a-serial
-```
-
-This is the reference.
-
----
-
-## B0 — Batched implementation, physical B=1
-
-```text
-mode: same-k-batched
-physical batch: 1
-cache: off
-bucket: off
-```
-
-Compare episode-by-episode against A.
-
-This is the highest-value discriminator.
-
-### Interpretation
-
-If B0 fails WHERE parity:
-
-```text
-The problem is NOT physical batching.
-There is a code-path difference between serial validation and the batched evaluator.
-```
-
-Stop and trace that difference before testing B2/B4.
-
-If WHERE passes but semantic losses fail:
-
-```text
-The WHERE path is equivalent.
-The discrepancy is downstream in the semantic serial-reference vs selected-loss/batched semantic path.
-```
-
-Only then audit semantic parity.
-
-If B0 fully passes:
-
-```text
-Proceed to physical batching.
-```
-
----
-
-## B1 — Batched physical B>1, cache OFF
-
-Use the production candidate batch sizes:
-
-```text
-K=1  -> B=4
-K=5  -> B=2
-K=10 -> B=2
-```
-
-or allow explicit CLI override.
-
-Keep:
-
-```text
-cache: off
-bucket: off
-```
-
-Compare episode-by-episode against A.
-
-### Interpretation
-
-If B0 passes but B1 fails:
-
-```text
-The root cause is triggered by physical batching itself:
-padding / masks / image packing / batch-dependent kernels / numerical behavior.
-```
-
-If B1 passes:
-
-```text
-Physical batching itself is parity-safe.
-Proceed to cache isolation.
-```
-
----
-
-## C — Bucketing only
-
-Only run if B1 passes.
-
+## New COCO-Search18 Paths
 Use:
 
 ```text
-same physical batch sizes
-cache: off
-bucket: on
+data/COCO_Search18/split_95_5/
 ```
 
-If C fails while B1 passes:
+Main `all` variant:
 
 ```text
-The problem is scheduling / packing / bucket-order related.
+data/COCO_Search18/split_95_5/all/train.json
+data/COCO_Search18/split_95_5/all/test.json
 ```
 
-Do not investigate cache until this is resolved.
-
----
-
-## D — Preprocessing cache only
-
-Add independent cache controls if they do not already exist:
+Other variants:
 
 ```text
---preprocess-cache on/off
---visual-cache on/off
+data/COCO_Search18/split_95_5/tp_only/train.json
+data/COCO_Search18/split_95_5/tp_only/test.json
+
+data/COCO_Search18/split_95_5/ta_only/train.json
+data/COCO_Search18/split_95_5/ta_only/test.json
 ```
 
-Run:
+Shared metadata:
 
 ```text
-preprocess cache: on
-visual feature cache: off
+data/COCO_Search18/split_95_5/master_split_manifest.json
+data/COCO_Search18/split_95_5/split_index.json
 ```
 
-All other settings should match the passing B1/C configuration.
-
-If D passes:
+Do not use the old root:
 
 ```text
-Image decoding / preprocessing caching is parity-safe.
+data/COCO_Search18/split/
 ```
 
----
+Do not expect or open `validation.json` for the new COCO-Search18 protocol.
 
-## E — Visual feature cache enabled
-
-Run:
+## Optimization Query Universe
+For COCO-Search18, define the optimization-query universe once from the persisted `all/train.json` split:
 
 ```text
-preprocess cache: on
-visual feature cache: on
+Q_train =
+    every eligible record in data/COCO_Search18/split_95_5/all/train.json
+    whose subject is a seen/training subject
 ```
 
-If D passes but E fails:
+The unseen subjects remain:
 
 ```text
-The root cause is localized to the visual-feature cache path,
-most likely get_image_features()/feature reuse/fusion or batch-shape-dependent vision features.
+{7, 8, 9}
 ```
 
-This should be considered a strong localization result.
+Records from unseen subjects whose images are in the train split may be used as few-shot support for final evaluation, but they must never be optimization queries.
 
----
+Query membership must **not** depend on `K`.
 
-# 5. Required First-Divergence Trace
-
-Do not compare only final scalar losses.
-
-For a tiny deterministic fixture of 2–4 same-K episodes, implement an optional audit mode such as:
-
-```bash
---trace-parity
-```
-
-The trace should compare one target episode run:
+Do not create or use separate optimization pools such as:
 
 ```text
-alone
+Q_valid[subject, K]
+Q_train_K1
+Q_train_K5
+Q_train_K10
 ```
 
-versus the exact same episode embedded inside a physical batch.
+unless they are diagnostics only and do not affect membership or sampling.
 
-Use a short and a long episode in the same batch if possible.
-
-Before the model forward, verify exact equality for the target episode.
-
-Required checks:
+The training coverage target is:
 
 ```text
-episode_id
-K
-support_ids
-input_ids over the real sequence
-attention_mask over the real sequence
-labels over the real sequence
-padding tail
-pixel_values for the episode
-image paths
-image ordering
-image offsets / image boundaries
-supervised WHERE token positions
-state count
+query coverage only
 ```
 
-Padding invariants must be explicitly checked:
+`K`, support identity, and support order are stochastic context variables, not coverage axes.
+
+## Query-Coverage Epoch Sampling
+One training epoch is defined as exactly one shuffled-without-replacement traversal of `Q_train`.
+
+At the beginning of epoch `e`:
 
 ```text
-attention_mask == 0 on padded tokens
-labels == -100 on padded tokens
+epoch_queries = shuffled permutation of Q_train
 ```
 
-Report PASS/FAIL for each invariant.
-
----
-
-# 6. Tensor-Level Trace Order
-
-If inputs are identical but WHERE output differs, compare tensors in this order and stop at the first meaningful divergence:
+Then process every query exactly once:
 
 ```text
-1. visual features per image
-2. fused multimodal input / image-inserted embeddings if accessible
-3. final WHERE hidden states at supervised token positions
-4. WHERE supervised-token logits or selected logits if available
-5. WHERE per-token NLL
-6. WHERE per-episode loss
-7. query <END_FIX> hidden/state representation
-8. projected R states
-9. semantic fused inputs
-10. semantic supervised logits
-11. semantic per-token NLL
-12. WHAT / WHY / HOW losses
+for q in epoch_queries:
+    sample K_train
+    sample same-subject train supports
+    randomize support order
+    emit one training episode for q
 ```
 
-The report must explicitly say:
+Required invariant:
 
 ```text
-FIRST_DIVERGENCE = <stage>
+each q in Q_train appears exactly once in every completed epoch
 ```
 
-Do not dump huge tensors.
+Therefore:
 
-For each compared tensor report:
+- do not sample optimization queries with replacement;
+- do not uniformly sample a subject first and then sample a query;
+- do not use `query x K` as the coverage target;
+- do not repeat a query merely to fill a preferred batch shape;
+- do not omit a query because its batch is incomplete;
+- do not use `drop_last=True` in a way that drops optimization queries.
+
+Subject frequency during optimization is induced by the query universe:
 
 ```text
-shape
-dtype
-max_abs_diff
-mean_abs_diff
-allclose result
-first differing index if practical
+P(subject=u) = number_of_queries_for_u / |Q_train|
 ```
 
-If exact tensor access requires touching library code, prefer lightweight forward hooks or audit-only helper functions rather than changing model behavior.
+There is no separate uniform-subject sampling requirement.
 
----
+Query order must be reshuffled between epochs using reproducible RNG/seeding.
 
-# 7. BF16 Numerical-Difference Test
+## Train-Time K Sampling
+Training and evaluation use different roles for `K`.
 
-Only consider "batch-shape-dependent BF16 numerics" after proving all of the following for the target episode:
+### Training
+
+Train-time support cardinality is sampled independently for each query:
 
 ```text
-input_ids identical
-attention_mask identical
-labels identical
-pixel_values identical
-image order identical
-image offsets identical
-supervised token positions identical
+K_train ~ Uniform({1, 2, ..., 10})
 ```
 
-Then locate the first model tensor that diverges.
-
-If the first divergence occurs inside a standard model forward while all inputs are identical, record:
+Equivalent mathematical form:
 
 ```text
-candidate cause:
-batch-shape-dependent BF16 / CUDA kernel numerical behavior
+P(K_train = k) = 1/10,  k in {1, ..., 10}
 ```
 
-But do not automatically declare it acceptable.
+Important:
 
-Report both:
+- `K_train` is **not** a coverage dimension;
+- do not guarantee every query is paired with every K;
+- do not stratify or enumerate `query x K`;
+- do not create a larger epoch because there are multiple K values;
+- adding more possible train-time K values must not change the definition of query coverage.
+
+A complete epoch still contains exactly:
 
 ```text
-absolute error
-relative error
-effect on final episode loss
+|Q_train| training episodes
 ```
 
-The report should distinguish:
+before accounting for any hard-failure condition.
+
+### Evaluation
+
+Canonical evaluation shot settings remain:
 
 ```text
-bitwise mismatch
-small numerical mismatch
-scientifically/materially significant mismatch
+K_eval = {1, 5, 10}
 ```
 
-Do not change the parity tolerance as part of this audit.
+These values remain benchmark/reporting settings. Do not change them because train-time K is variable.
 
----
+## Train-Time Support Sampling
+For each current query `q`:
 
-# 8. Visual Cache Audit Requirements
+1. keep the query fixed;
+2. sample `K_train`;
+3. construct support candidates from the **same subject** and **train split only**;
+4. exclude the query stimulus image;
+5. sample exactly `K_train` distinct support images without replacement;
+6. resolve one eligible same-subject record per selected support image;
+7. uniformly randomize the support-record order;
+8. pass the ordered support list unchanged to WHERE.
 
-If visual feature cache is implicated, inspect and report:
+Required support invariants:
 
 ```text
-whether serial and cached paths invoke the same vision model operations
-whether vision features are computed at B=1 vs B>1
-feature tensor shape per image
-feature dtype
-feature device
-feature ordering
-feature reuse key
-fusion/insertion offsets
-whether cached features are detached
-whether cached feature values differ from direct forward features
+support subject == query subject
+support split == train
+support stimulus_id != query stimulus_id
+all support stimulus_ids are distinct within the episode
+support count == K_train
 ```
 
-For the same image, compare:
+Support examples are random context augmentation. There is no requirement to cover every support sample or support combination within one epoch.
+
+The current 95/5 split has enough train support coverage for the configured maximum `K_train=10`. Do not weaken distinct-image or same-subject support constraints.
+
+## Context-Overflow Handling
+Training context overflow must **not** destroy query coverage.
+
+If the current query with a sampled `K_train` produces an over-budget context:
 
 ```text
-direct feature computation
-vs
-cached feature computation
+keep the same query
+keep the same sampled K_train
+resample only the support realization
 ```
 
-under the same checkpoint and preprocessing.
+Do not:
 
-Also compare the same image when feature extraction is performed:
+- replace the query with another query;
+- mark the query as covered without training on it;
+- silently lower `K_train`;
+- drop a support;
+- truncate a support scanpath;
+- reorder a frozen evaluation support block.
+
+If no valid support realization can satisfy the configured context budget for that query and sampled `K_train`, fail clearly rather than silently changing the training distribution.
+
+Validation/final-evaluation support blocks remain frozen and must never be resampled to repair overflow.
+
+## Same-K Batching and Physical Batching
+Same-K batching is an implementation optimization only. It is **not** the sampling law.
+
+Do not alter query coverage or K sampling merely to build same-K batches.
+
+In particular:
+
+- never resample a query to obtain a desired K;
+- never skip a query because its K does not match nearby episodes;
+- never force K to `{1,5,10}` only to simplify batching;
+- never duplicate a query to fill a same-K batch.
+
+If physical batch size is 1, no K-grouping is required.
+
+If physical batch size is greater than 1, bucketing/reordering pending episodes is allowed only if it preserves:
 
 ```text
-alone
-vs
-inside a larger image batch
+one occurrence of every query per epoch
+the configured K_train distribution
+the sampled support membership of each emitted episode
 ```
 
-This determines whether the vision tower itself is batch-shape dependent.
+Batching strategy, gradient checkpointing, and gradient accumulation remain implementation concerns and must not redefine epoch membership.
 
-Do not redesign the cache yet.
+## Epoch as the Primary Training Unit
+For COCO-Search18, the canonical training budget is epoch based.
 
----
+Define:
 
-# 9. Semantic Audit — Only If WHERE Passes
+```text
+1 epoch = 1 complete traversal of Q_train
+```
 
-Do not start this section unless WHERE parity passes.
+Prefer user-facing configuration such as:
+
+```text
+num_train_epochs
+```
+
+over arbitrary semantics such as:
+
+```text
+steps_per_epoch = 10000
+```
+
+when that value does not correspond to full query coverage.
+
+Keep the following concepts separate:
+
+```text
+data unit      = one query-conditioned training episode
+coverage unit  = one epoch
+optimizer unit = one optimizer update after physical batching / gradient accumulation
+```
+
+An epoch is **not** one optimizer step.
 
 If:
 
 ```text
-WHERE parity = PASS
-semantic parity = FAIL
+N_q = |Q_train|
+B_global = global physical episode batch size
+G = gradient accumulation factor
 ```
 
-then audit the two semantic implementations:
+then the nominal optimizer updates per epoch are derived from the coverage epoch, approximately:
 
 ```text
-serial reference semantic path
-vs
-forward_flat_batch / selected supervised-position loss path
+ceil(N_q / (B_global * G))
 ```
 
-For the same episode compare:
+subject to the framework's exact handling of the final partial accumulation group.
+
+Never drop tail queries merely to keep optimizer-step sizes uniform.
+
+Scheduler length and warmup should be derived from the configured number of epochs and the resulting optimizer-update count, rather than from an unrelated fixed `max_steps`, unless `max_steps` is explicitly used only as a debugging/smoke-test override.
+
+## Training and Epoch-End Evaluation
+For COCO-Search18:
 
 ```text
-semantic input ids
-semantic labels
-supervised token indices
-selected logits
-per-token NLL
-per-component token ranges
-WHAT loss
-WHY loss
-HOW loss
-flat loss
+complete one query-coverage epoch
+-> evaluate on test split
+-> log test metrics
+-> continue training
 ```
 
-Verify mathematically that the reduction is:
+There is no validation dataset for this protocol.
+
+Where COCO-Search18-specific code currently uses concepts such as:
+
+- `validation_dataset`
+- `validation_loader`
+- `val_dataset`
+- `val_loader`
+- `validation_file`
+- `val_file`
+- `val/*` metric names
+
+migrate them to the corresponding `test` concepts.
+
+Prefer real semantic cleanup instead of aliases such as:
+
+```python
+validation_dataset = test_dataset
+```
+
+or configs that keep a `validation_file` field pointing to `test.json`.
+
+If an external framework strictly requires a validation-named field, keep the compatibility layer minimal and document it clearly.
+
+Epoch-end evaluation must run only after the current epoch's query traversal is complete. Do not define an epoch boundary by an arbitrary optimizer-step count that can leave optimization queries unseen.
+
+## Few-Shot Evaluation Protocol
+Preserve the canonical evaluation design:
 
 ```text
-mean token loss per episode
-then mean over episodes
+unseen subjects = {7, 8, 9}
+K_eval = {1, 5, 10}
+10 support draws per K_eval
 ```
 
-and not:
+Rules:
+
+- support examples come only from `train`;
+- test queries come only from `test`;
+- never use test examples as support;
+- preserve train/test stimulus disjointness;
+- preserve existing frozen/exclusive support-draw semantics;
+- one frozen ordered support block is reused across the corresponding full test-query set;
+- do not derive evaluation supports from the stochastic train-time support sampler.
+
+The train-time `K_train ~ Uniform({1,...,10})` rule does not change the frozen evaluation settings above.
+
+## Checkpoint and Resume Semantics
+A resumable checkpoint must preserve enough sampler state to continue the current query-coverage epoch without duplication or omission.
+
+Save/restore at least:
 
 ```text
-global token average across the physical batch
+current epoch index
+current query cursor within the epoch
+epoch shuffle seed or exact permutation state
+K/support RNG state required for deterministic continuation
+optimizer state
+scheduler state
 ```
 
-Do not change the loss implementation during the audit.
-
----
-
-# 10. Server Benchmark Interface
-
-The benchmark script must support a simple server workflow.
-
-Prefer one command that can run the complete validation isolation suite, for example:
-
-```bash
-python scripts/benchmark_validation_a100.py \
-  --checkpoint "$CHECKPOINT" \
-  --config "$CFG" \
-  --audit-parity-suite \
-  --scope quick \
-  --output-dir runs/validation-parity-audit
-```
-
-If implementing one orchestration flag would make the script messy, a small sequence of explicit commands is acceptable.
-
-The important requirement is that the script itself writes machine-readable and human-readable reports.
-
----
-
-# 11. Required Report Files
-
-The server run must produce at least:
+On resume in the middle of an epoch:
 
 ```text
-report.json
-report.md
+continue from the next not-yet-consumed query
 ```
 
-Optionally:
+Do not reshuffle the current epoch and restart it from the beginning unless the run is explicitly restarted as a new training run.
+
+The guarantee remains:
 
 ```text
-episodes.jsonl
-tensor_trace.json
+every completed epoch covers every optimization query exactly once
 ```
 
-## report.json
+## Distributed Training Semantics
+Distributed execution must preserve the same global query-coverage epoch.
 
-Must include:
+Conceptually:
 
 ```text
-git commit
-dirty-tree status if available
-checkpoint path
-config path
-GPU model
-torch version
-CUDA version
-transformers version
-dtype
-attention backend if detectable
-scope
-number of episodes
-episode IDs
-K distribution
-batch sizes
-cache settings
-bucketing setting
+1. create one global shuffled epoch permutation
+2. partition it across ranks without overlap
+3. process the complete union across ranks
 ```
 
-For every experiment include:
+Require:
 
 ```text
-status
-episodes_per_second
-wall time
-peak allocated GiB
-peak reserved GiB
-parity pass/fail
-max diff per metric
-mean diff per metric
-episode with maximum diff
+union(rank_query_sets) == Q_train
+intersection(rank_i, rank_j) == empty for i != j
 ```
 
-For parity, report at least:
+Do not use distributed padding behavior that silently duplicates optimization queries to equalize rank lengths.
+
+If uneven final rank/batch sizes must be supported, handle them explicitly rather than duplicating or dropping queries.
+
+## Master Split Semantics
+`all`, `tp_only`, and `ta_only` derive from the same master train/test image partition.
+
+Do not independently resplit the variants.
+
+## What to Remove or Update
+Audit the repository for COCO-Search18-specific assumptions involving:
 
 ```text
-eval_where
-eval_flat
-eval_what
-eval_why
-eval_how
+train/validation/test
+validation.json
+81/9/10
+81910
+validation_supports
+old split paths
+val metric namespaces
+validation loaders/datasets
+
+random-with-replacement query sampling
+uniform subject-first train sampling
+query x K coverage
+(seen_subject, K) valid-query pools
+train-time K restricted to {1,5,10}
+steps_per_epoch used as an arbitrary optimizer-step count
+max_steps used as the primary training-budget definition
+samplers that duplicate/drop queries at epoch boundaries
+resume logic that restarts or reshuffles a partially consumed epoch
+distributed samplers that pad by duplicating queries
 ```
 
-If other validation losses exist, include them too.
+Update affected:
 
----
+- configs
+- dataset builders
+- dataloaders
+- samplers
+- training loop
+- epoch construction
+- epoch-end evaluation
+- checkpoint/resume state
+- scheduler-step accounting
+- few-shot support loading
+- standalone evaluation/benchmark scripts
+- manifest parsing
+- logging
+- comments/docs/tests
 
-# 12. Human-Readable Final Diagnosis
+Do not blindly replace generic functions named `validate` when they perform schema/input validation rather than dataset validation.
 
-`report.md` must finish with exactly one compact diagnosis section containing:
+## Dataset Scope
+These instructions are specifically for the new SemGaze COCO-Search18 protocol.
+
+Do not remove validation splits from AiR-D or other datasets unless their own specification explicitly requires it.
+
+If shared abstractions assume every dataset has three splits, refactor them so datasets can expose different available split sets.
+
+If shared samplers assume random-with-replacement episode generation, refactor them so COCO-Search18 can expose an epoch-sized deterministic query traversal with stochastic support construction.
+
+Do not force other datasets to adopt the COCO-Search18 query-coverage sampler unless their own specification requires it.
+
+## Do Not Change Unrelated Model Behavior
+Do not modify, unless required by the split/sampling migration:
+
+- model architecture
+- InternVL configuration
+- LoRA settings
+- WHERE tokenization
+- WHAT/WHY/HOW representation
+- loss definitions
+- teacher forcing
+- generation settings
+- gradient checkpointing
+- unseen subject IDs
+- number of evaluation support draws
+- canonical evaluation K values `{1,5,10}`
+- train-time maximum support count `K_train_max=10`
+
+Batching may be refactored only as needed to preserve the new query-coverage semantics. Do not treat batching convenience as permission to change the sampling law.
+
+## Required Safety Checks
+Preserve or add checks for:
 
 ```text
-## Root-Cause Verdict
+train image set ∩ test image set = empty
+support images ⊆ train images
+test query images ⊆ test images
+
+Q_train contains seen-subject train records only
+every completed epoch consumes every Q_train query exactly once
+no query is duplicated within a completed epoch
+no query is dropped because of batching/drop_last
+K_train is always in [1,10]
+support subject == query subject
+support images are distinct within an episode
+query image is not used as support
 ```
 
-The verdict must assign the result to the narrowest supported category.
+COCO-Search18 runtime code should fail clearly if configured with obsolete `validation.json` or the old `data/COCO_Search18/split/` root.
 
-Use categories such as:
+Training should also fail clearly if query-coverage guarantees cannot be maintained because of sampler, distributed, resume, or overflow behavior.
+
+## Verification Before Finishing
+Before considering the migration complete, verify:
+
+- COCO-Search18 uses only train/test;
+- no COCO-Search18 runtime path requires `validation.json`;
+- train/test JSON paths point to `split_95_5`;
+- `Q_train` is constructed from seen-subject `all/train.json` records;
+- one epoch is one full shuffled-without-replacement traversal of `Q_train`;
+- each optimization query appears exactly once per completed epoch;
+- subject-first random sampling is removed from COCO-Search18 training;
+- query x K coverage logic is removed;
+- train-time K is sampled from `1..10` and does not affect query membership;
+- evaluation still uses K=`1/5/10`;
+- support is random same-subject train-only context;
+- support images are distinct and exclude the query image;
+- overflow retries preserve the current query and sampled K;
+- epoch-end evaluation uses test;
+- COCO-Search18 metric/log naming uses `test`, not `val`, where applicable;
+- checkpoint/resume preserves the current epoch permutation/cursor;
+- distributed execution neither duplicates nor drops optimization queries;
+- 10 support draws per evaluation K remain supported;
+- all/tp_only/ta_only share one master partition;
+- no train/test image leakage exists;
+- unrelated datasets are not accidentally changed.
+
+Run relevant syntax/import/unit/smoke checks after editing.
+
+## Short Execution Prompt
+Use this after placing this file at the repository root:
 
 ```text
-A. serial-vs-batched implementation mismatch at B=1
-B. physical batching / padding / packing mismatch
-C. bucketing / scheduling mismatch
-D. preprocessing-cache mismatch
-E. visual-feature-cache mismatch
-F. batch-shape-dependent model numerics
-G. semantic-path mismatch after WHERE parity
-H. unresolved
+Read AGENTS.md first, then audit and update the repository to fully migrate the SemGaze COCO-Search18 pipeline to the specified 95/5 train/test protocol and query-coverage epoch sampler.
+
+For COCO-Search18 training, build Q_train from seen-subject records in split_95_5/all/train.json. Define one epoch as one shuffled-without-replacement traversal of Q_train. Each query must appear exactly once per completed epoch. For each query, sample K_train uniformly from 1..10, then sample distinct same-subject train supports excluding the query image and randomize support order. K and support identity are stochastic context variables, not coverage axes. Do not use subject-first random sampling, query x K coverage, or (subject,K) query pools.
+
+Preserve evaluation K={1,5,10}, 10 frozen support draws per K, unseen subjects {7,8,9}, train-only supports, test-only queries, and the 95/5 image-disjoint split. There is no validation split. Evaluate on test after each completed query-coverage epoch.
+
+Apply the changes consistently across configs, data loading, samplers, training, scheduler accounting, checkpoint/resume, epoch-end evaluation, few-shot support handling, manifests, benchmarks, logging, and tests. Do not change unrelated datasets or model behavior. After editing, run appropriate checks and summarize changed files, exact paths now used, sampler/epoch semantics, and any remaining compatibility aliases or risks.
 ```
-
-For the selected category include:
-
-```text
-confidence: high / medium / low
-first divergent stage
-minimum reproducer
-evidence
-what has been ruled out
-next implementation target
-```
-
-Do not conclude multiple vague causes if one branch has already isolated the failure.
-
----
-
-# 13. Stop Conditions
-
-The audit should stop early when possible.
-
-Examples:
-
-### Stop case 1
-
-```text
-B0 WHERE fails
-```
-
-Then do not benchmark B2/B4/cache combinations yet.
-
-Trace serial vs batched-B1 and identify the first code/tensor divergence.
-
-### Stop case 2
-
-```text
-B0 passes
-B1 fails
-```
-
-Then do not spend time on visual cache yet.
-
-Trace physical-batching inputs and WHERE tensors.
-
-### Stop case 3
-
-```text
-B1 passes
-D passes
-E fails
-```
-
-Root cause is sufficiently localized to the visual-feature-cache path.
-
-Do not profile unrelated validation components.
-
----
-
-# 14. Training Audit Policy
-
-Training is **not the primary task in this AGENTS.md**.
-
-Do not automatically rerun broad training profiling.
-
-Only audit training if the validation investigation reveals a cause that plausibly affects the shared training path, or if validation parity is resolved and there is still a specific unresolved training question that requires code inspection.
-
-Examples that justify a training follow-up:
-
-```text
-shared InternVL batch-shape-dependent behavior
-shared vision-tower batch scaling
-shared multimodal fusion bug
-shared padding/mask construction bug
-shared selected-loss bug
-```
-
-Examples that do NOT justify expanding into training:
-
-```text
-validation-only visual cache bug
-validation bucketing bug
-validation report aggregation bug
-validation-only semantic reference path mismatch
-```
-
-If a training follow-up becomes necessary, first inspect whether the existing:
-
-```text
-scripts/benchmark_a100.py
-```
-
-already records enough evidence.
-
-Only modify `scripts/benchmark_a100.py` if a specific missing discriminator is required.
-
-Do not add broad profiling "just in case".
-
----
-
-# 15. If Training Does Need One Additional Audit
-
-Only if justified by validation findings, the preferred training discriminator is:
-
-```text
-gradient checkpointing ON vs OFF
-B1 vs B2
-same effective optimizer batch
-same sampled workload
-```
-
-The key question is:
-
-```text
-Does the B>1 backward regression disappear when gradient checkpointing is disabled?
-```
-
-Do not expand to Nsight or large profiler work unless this simple factorial is inconclusive.
-
----
-
-# 16. Non-Goals
-
-Do not:
-
-```text
-change model architecture
-change the WHERE formulation
-change semantic supervision
-change K sampling
-change support-set policy
-change optimizer batch semantics
-raise parity tolerance to make tests pass
-silently switch precision
-disable model components
-change dataset samples between compared runs
-optimize throughput before parity is understood
-```
-
-Do not "fix" the code during the initial audit phase.
-
-First produce evidence.
-
----
-
-# 17. Implementation Discipline
-
-Before editing:
-
-1. Read the entire current:
-   ```text
-   scripts/benchmark_validation_a100.py
-   ```
-2. Trace the called validation functions into the SemGaze source.
-3. Identify which required audit capabilities already exist.
-4. Reuse existing report/parity infrastructure where possible.
-5. Make the smallest benchmark-only patch necessary.
-
-Do not duplicate functionality that already exists.
-
-Keep normal benchmark behavior backward-compatible.
-
-New audit flags must default to OFF.
-
----
-
-# 18. Required Deliverables from Codex
-
-Return:
-
-1. A short static audit summary of the current validation call graph.
-2. The exact benchmark/instrumentation changes made.
-3. The changed files.
-4. A concise explanation of why each change is needed.
-5. Exact server commands to run.
-6. Expected output files.
-7. A decision table explaining how to interpret each possible result.
-
-Do not claim the root cause before the server report is available.
-
-The local machine may not have a usable GPU, so any CUDA-dependent conclusion must come from the generated server report.
-
----
-
-# 19. Preferred Server Commands
-
-The final implementation should make the following workflow possible.
-
-Set:
-
-```bash
-export CHECKPOINT=/data/shared/cvpr/hoang/semgaze/runs/flat-smoke-gc-2/checkpoint-1
-export CFG=configs/flat_throughput.yaml
-```
-
-Then ideally:
-
-```bash
-python scripts/benchmark_validation_a100.py \
-  --checkpoint "$CHECKPOINT" \
-  --config "$CFG" \
-  --audit-parity-suite \
-  --scope quick \
-  --output-dir runs/validation-parity-audit
-```
-
-If an orchestration flag is not implemented, provide the minimum explicit command sequence for:
-
-```text
-A  serial cache-off
-B0 batched B=1 cache-off
-B1 batched production B cache-off
-C  bucket-only, only if B1 passes
-D  preprocess-cache only, only if previous stages pass
-E  visual-feature-cache on, only if D passes
-```
-
-The commands must be copy-paste runnable on the server.
-
----
-
-# 20. Success Criterion
-
-The audit is successful when the report can answer:
-
-```text
-What is the earliest operation where serial and optimized validation cease to be equivalent?
-```
-
-and reduce the cause to one narrow component or execution difference.
-
-A successful result is not:
-
-```text
-"There are numerical differences somewhere."
-```
-
-A successful result is something like:
-
-```text
-"Serial and batched-B1 are identical. Batched-B2 first diverges in WHERE hidden states despite identical logical inputs; the first mismatch occurs inside the InternVL forward, before semantic projection."
-```
-
-or:
-
-```text
-"Physical batching is parity-safe. Preprocessing cache is parity-safe. Enabling visual-feature cache changes per-image vision features; the first divergence occurs in get_image_features(), which then propagates to eval_where."
-```
-
-or:
-
-```text
-"Batched-B1 already differs from serial before physical batching is introduced; the first mismatch is the serial-reference WHERE construction versus forward_where_batch()."
-```
-
-That level of localization is sufficient to begin a separate implementation/fix phase.
