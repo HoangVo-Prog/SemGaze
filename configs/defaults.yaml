@@ -152,6 +152,7 @@ training:
 evaluation:
   strategy: epoch # epoch | steps | no (smoke/benchmark only)
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
+  draw: 10 # complete persisted support-set evaluation traversals per K
   k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:

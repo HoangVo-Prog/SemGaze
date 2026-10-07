@@ -19,6 +19,7 @@ from semgaze.semantic.flat.target import flatten_text
 from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
                                           progress_interval, should_report)
 from semgaze.evaluation.metrics_probability import score_probability_batch, aggregate_probability_draw, aggregate_probability_k
+from semgaze.evaluation.records import resolve_evaluation_draw_counts
 
 EVAL_KEYS = ('test_where', 'test_what', 'test_why', 'test_how', 'test_flat', 'test_total')
 
@@ -183,7 +184,7 @@ def test_queries(train_by_id, test_records, manifest, unseen_subjects=None):
 
 def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_callback=None, profiler=None,
                         visual_cache=None, projected_r_cache=None, cycle_id=None):
-    """Full unseen-subject test queries at each of 10 frozen draws for K=1/5/10."""
+    """Full unseen-subject test queries at each configured persisted draw for K."""
     queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects'])
     k_values = bundle.config['evaluation']['k_values']
     settings = bundle.config['test']['loss']
@@ -206,9 +207,9 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
             raise RuntimeError('canonical IG requires explicit canonical center-bias assets')
         raise RuntimeError('canonical IG center-bias assets are not wired into this evaluation path')
     probability_by_k = {}
-    draw_counts = {str(k): len(manifest['support_draws'][str(k)]) for k in k_values}
+    draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
     expected = [f'{k}:{draw}:{q.record_id}' for k in k_values
-                for draw in range(len(manifest['support_draws'][str(k)])) for q in queries]
+                for draw in range(draw_counts[str(k)]) for q in queries]
     started = time.perf_counter()
     print(f'[EVAL][LOSS] starting | queries={len(queries)} | K={k_values} | '
           f'episodes={len(expected)}', flush=True)
@@ -289,6 +290,7 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
             block['draw_mean'] = aggregate_probability_k(list(block['draws'].values()))
     return {**overall.finish(expected), 'test_by_k': by_k, 'probability_by_k': probability_by_k,
             'k_values': list(k_values),
+            'evaluation_draw': bundle.config['evaluation']['draw'],
             'test_queries': len(queries), 'test_episodes': len(expected),
             'test_loss_traversals': sum(draw_counts.values()),
             'test_time_sec': time.perf_counter()-started, 'test_k_time_sec': k_times,

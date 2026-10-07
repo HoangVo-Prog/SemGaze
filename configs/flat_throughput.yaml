@@ -14,3 +14,4 @@ training:
   num_train_epochs: 1
 evaluation:
   strategy: 'no'
+  draw: 10 # complete persisted support-set evaluation traversals per K

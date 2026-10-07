@@ -75,14 +75,36 @@ def expected_episode_keys(query_ids, k_values, draw_counts):
     return keys
 
 
+def resolve_evaluation_draw_counts(draw_count, manifest, k_values):
+    """Resolve one configured traversal count against persisted support draws.
+
+    The persisted COCO-Search18 protocol contains the canonical ordered support
+    draws.  Evaluation may execute a prefix of that order, but it must not
+    invent new draws or silently execute fewer than configured.
+    """
+    if type(draw_count) is not int or draw_count < 1:
+        raise ValueError('evaluation.draw must be an integer >= 1')
+    counts = {}
+    for k in k_values:
+        key = str(k)
+        if key not in manifest.get('support_draws', {}):
+            raise ValueError(f'persisted support draws are missing K={k}')
+        available = len(manifest['support_draws'][key])
+        if draw_count > available:
+            raise ValueError(f'evaluation.draw={draw_count} exceeds the {available} persisted support draws for K={k}')
+        counts[key] = draw_count
+    return counts
+
+
 def write_metrics_artifact(path, *, checkpoint, config, split_manifest_identity, by_k,
-                           provenance, implementation_head, split="test"):
+                           provenance, implementation_head, split="test", evaluation_draw=None):
     if split != "test":
         raise ValueError("canonical metrics artifacts must use split=test")
     payload = {"schema_version": 1, "baseline_commit": "b84e9c752124457244ee34b93e70f72be5690914",
                "implementation_head": implementation_head, "checkpoint": str(checkpoint),
                "split_manifest_identity": split_manifest_identity, "config": str(config),
-               "split": split, "metric_provenance": provenance, "by_k": by_k}
+               "split": split, "evaluation_draw": evaluation_draw,
+               "metric_provenance": provenance, "by_k": by_k}
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")

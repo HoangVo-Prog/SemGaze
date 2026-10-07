@@ -173,6 +173,7 @@ def validate_config(config):
         raise ValueError('gradient_checkpointing must be an explicit boolean')
     if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
         raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
+    positive_int(evaluation['draw'], 'evaluation.draw')
     if evaluation['strategy'] == 'steps':
         positive_int(evaluation.get('eval_steps'), 'evaluation.eval_steps')
     for name, values in [('data.fewshot.k_values',config['data']['fewshot']['k_values']), ('evaluation.k_values',evaluation['k_values'])]:

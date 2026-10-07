@@ -10,7 +10,8 @@ from semgaze.evaluation.metrics_scanpath import CoordinateAdapter, CoordinatePro
 from semgaze.evaluation.metrics_semantic import (collect_semantic_units, normalize_text,
                                                  score_bertscore_branch, score_cider_r_branch,
                                                  semantic_units_from_prediction)
-from semgaze.evaluation.records import assert_key_sets_equal, expected_episode_keys
+from semgaze.evaluation.records import (assert_key_sets_equal, expected_episode_keys,
+                                         resolve_evaluation_draw_counts)
 
 
 def test_historical_prediction_inverse_and_sed_boundaries():
@@ -54,6 +55,11 @@ def test_identity_join_is_key_based():
         assert_key_sets_equal(left, [{"query_id": "other", "K": 1, "draw_id": 0}])
     assert expected_episode_keys(["q"], [1], {"1": ["draw0", "draw1"]}) == {
         ("q", 1, 0), ("q", 1, 1)}
+
+
+def test_configured_evaluation_draw_uses_prefix_of_persisted_draws():
+    manifest = {'support_draws': {'1': [['draw0'], ['draw1'], ['draw2']]}}
+    assert resolve_evaluation_draw_counts(2, manifest, [1]) == {'1': 2}
 
 
 def test_semantic_prediction_parser_accepts_integer_and_json_string_keys():

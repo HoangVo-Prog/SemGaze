@@ -18,7 +18,7 @@ from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
     score_prediction_semantics)
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
-                                         write_metrics_artifact)
+                                         resolve_evaluation_draw_counts, write_metrics_artifact)
 
 
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
@@ -115,6 +115,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
         raise ValueError('unseen query in train prediction batch')
     queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects']) if settings['test_scope'] == 'all_unseen' else ()
     k_values = bundle.config['evaluation']['k_values']
+    draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
     tag = f'epoch-{epoch:04d}' if bundle.config['evaluation']['strategy'] == 'epoch' else f'step-{step:08d}'
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
     directory.mkdir(parents=True, exist_ok=True)
@@ -124,15 +125,15 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     print(f"[EVAL][PRED] starting training predictions | episodes={len(train_batch)}", flush=True)
     if queries:
         print(f"[EVAL][PRED] starting test predictions | queries={len(queries)} | "
-              f"K={list(k_values)} | draws={sum(len(manifest['support_draws'][str(k)]) for k in k_values)} | "
-              f"total_episodes={sum(len(queries) * len(manifest['support_draws'][str(k)]) for k in k_values)}", flush=True)
+              f"K={list(k_values)} | draws={sum(draw_counts.values())} | "
+              f"total_episodes={sum(len(queries) * draw_counts[str(k)] for k in k_values)}", flush=True)
     else:
         print('[EVAL][PRED] test predictions disabled', flush=True)
     cache_settings = bundle.config['test']['cache']
     owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
-    prediction_total = sum(len(queries) * len(manifest['support_draws'][str(k)]) for k in k_values)
+    prediction_total = sum(len(queries) * draw_counts[str(k)] for k in k_values)
     prediction_rate = RollingRate()
     prediction_completed = 0
     python_rng = random.getstate()
@@ -173,7 +174,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                         for k_position, k in enumerate(k_values, 1):
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
-                            draw_count = len(manifest['support_draws'][str(k)])
+                            draw_count = draw_counts[str(k)]
                             draw_times = []
                             k_rate = RollingRate()
                             k_total = len(queries) * draw_count
@@ -246,6 +247,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'train_prediction_source': 'final_training_batches_before_evaluation',
             'test_prediction_queries': len(queries),
             'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
+            'evaluation_draw': bundle.config['evaluation']['draw'],
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
             'prediction_time_sec': prediction_time, 'prediction_by_k': prediction_by_k,
             'metrics_artifact': metrics_artifact,
@@ -332,7 +334,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
                     'scanpath': 'blocked_by_coordinate_protocol',
                     'probability': 'not_integrated; tokenizer outcome unresolved'},
-        implementation_head=implementation_head())
+        implementation_head=implementation_head(), evaluation_draw=config['evaluation']['draw'])
     artifact['metrics_path'] = str(Path(output_dir) / 'metrics.json')
     return artifact
 

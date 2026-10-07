@@ -12,7 +12,8 @@ from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
     score_prediction_semantics)
 from semgaze.evaluation.records import (assert_key_sets_equal, expected_episode_keys,
-                                         implementation_head, write_metrics_artifact)
+                                         implementation_head, resolve_evaluation_draw_counts,
+                                         write_metrics_artifact)
 
 
 def main():
@@ -55,6 +56,7 @@ def main():
     train = {r['record_id']: adapter(r) for r in raw['train']}
     queries = [adapter(r) for r in raw['test'] if r['subject'] in data['unseen_subjects']]
     policy = {'split': args.split, 'path': args.path, 'semantic_max_new_tokens': budget,
+              'evaluation_draw': config['evaluation']['draw'],
               'do_sample': False, 'split_manifest_identity': identity,
               'report_kind': 'prediction_and_validity_diagnostics',
               'metrics_gate': 'SM/MM/SED implementations and invalid treatment, semantic metrics and selection scalar require explicit protocol choices'}
@@ -83,12 +85,14 @@ def main():
             n=semantic_config['cider_r'].get('n', 4),
             k_r=semantic_config['cider_r'].get('k_r', 0.8))
     metrics_by_k = {str(k): {'draws': {}} for k in config['evaluation']['k_values']}
+    draw_counts = resolve_evaluation_draw_counts(config['evaluation']['draw'], manifest,
+                                                 config['evaluation']['k_values'])
     cache_settings = config['test']['cache']
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
     with test_mode(bundle), (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
         for k in config['evaluation']['k_values']:
-            draws = range(len(manifest['support_draws'][str(k)]))
+            draws = range(draw_counts[str(k)])
             draw_rates = []
             for draw_id in draws:
                 counts = {'queries': 0}
@@ -132,7 +136,7 @@ def main():
     if metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
         expected = expected_episode_keys(
             [q.record_id for q in queries], config['evaluation']['k_values'],
-            manifest['support_draws'])
+            draw_counts)
         observed = []
         for k, block in metrics_by_k.items():
             for draw_id in block['draws']:
@@ -157,7 +161,7 @@ def main():
             provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
                         'scanpath': 'blocked_by_coordinate_protocol',
                         'probability': 'not_integrated; tokenizer outcome unresolved'},
-            implementation_head=implementation_head())
+            implementation_head=implementation_head(), evaluation_draw=config['evaluation']['draw'])
 
 
 if __name__ == '__main__':

@@ -44,6 +44,17 @@ def test_missing_only_defaults_cli_precedence_and_no_mutation(tmp_path):
         load_config(write_yaml(tmp_path, values))
 
 
+@pytest.mark.parametrize('draw', [0, -1, 1.5, '10'])
+def test_evaluation_draw_is_a_strict_positive_integer(tmp_path, draw):
+    with pytest.raises(ValueError, match='evaluation.draw'):
+        load_config(write_yaml(tmp_path, {'evaluation': {'draw': draw}}))
+
+
+def test_evaluation_draw_defaults_to_ten(tmp_path):
+    config = load_config(write_yaml(tmp_path, {}))
+    assert config['evaluation']['draw'] == 10
+
+
 @pytest.mark.parametrize('precision', ['fp32', 'bf16'])
 def test_yaml_fresh_model_lora_token_context_reaches_real_peft(tmp_path, episode, monkeypatch, precision):
     from transformers import AutoProcessor, AutoModelForImageTextToText
