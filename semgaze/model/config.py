@@ -197,6 +197,32 @@ def validate_config(config):
         raise ValueError('end_fix_token must be nonempty')
     predictions = evaluation['predictions']
     test = config['test']
+    metrics = evaluation.get('metrics', {})
+    if not isinstance(metrics, dict):
+        raise ValueError('evaluation.metrics must be a mapping')
+    if type(metrics.get('enabled')) is not bool:
+        raise ValueError('evaluation.metrics.enabled must be boolean')
+    if metrics.get('split') != 'test':
+        raise ValueError('canonical evaluation metrics are test-split metrics')
+    where_metrics = metrics.get('where', {})
+    probability_metrics = metrics.get('probability', {})
+    semantic_metrics = metrics.get('semantic', {})
+    if not isinstance(where_metrics, dict) or not isinstance(probability_metrics, dict) or not isinstance(semantic_metrics, dict):
+        raise ValueError('evaluation.metrics sections must be mappings')
+    scanpath_enabled = any(bool(where_metrics.get(name)) for name in ('scanmatch', 'multimatch', 'sed'))
+    if scanpath_enabled and not where_metrics.get('coordinate_adapter'):
+        raise ValueError('scanpath metrics require a verified coordinate_adapter; predicted-bin inverse is unresolved')
+    if probability_metrics.get('ig'):
+        centerbias = probability_metrics.get('centerbias', {})
+        if centerbias.get('source') != 'canonical_data' or centerbias.get('allow_synthetic_fallback') is not False or not centerbias.get('root'):
+            raise ValueError('canonical IG requires a canonical center-bias root and forbids synthetic fallback')
+    if probability_metrics.get('outcome') not in ('A', 'B'):
+        raise ValueError('metrics.probability.outcome must explicitly select Outcome A or B')
+    if probability_metrics.get('log_z', 0.0) != 0.0:
+        raise ValueError('metrics.probability.log_z is a fixed no-op and must be 0.0')
+    semantic_enabled = bool(semantic_metrics.get('bertscore', {}).get('enabled')) or bool(semantic_metrics.get('cider_r', {}).get('enabled'))
+    if metrics['enabled'] and not (scanpath_enabled or probability_metrics.get('ll') or probability_metrics.get('ig') or semantic_enabled):
+        raise ValueError('metrics.enabled requires at least one enabled metric')
     for branch in ('loss', 'prediction'):
         settings = test[branch]
         if settings['execution'] not in ('serial', 'same_k_batched'):

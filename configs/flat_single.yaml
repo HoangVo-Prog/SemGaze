@@ -161,6 +161,50 @@ evaluation:
     semantic_max_new_tokens: 32
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
+  metrics:
+    enabled: false
+    split: test
+    where:
+      scanmatch: false
+      multimatch: false
+      sed: false
+      isp_reference:
+        width: 512
+        height: 320
+        scanmatch_xbins: 16
+        scanmatch_ybins: 12
+        scanmatch_temp_bin_ms: 50
+        scanmatch_threshold: 3.5
+        sed_grid_n: 5
+      coordinate_adapter: null
+    probability:
+      ll: false
+      ig: false
+      outcome: B
+      mode: deepgaze_fast
+      resolution: 100
+      normalize_digits: true
+      centerbias:
+        source: canonical_data
+        root: null
+        allow_synthetic_fallback: false
+    semantic:
+      bertscore:
+        enabled: false
+        package_version: "0.3.13"
+        lang: en
+        model_type: roberta-large
+        num_layers: 17
+        idf: false
+        rescale_with_baseline: false
+        use_fast_tokenizer: false
+        batch_size: 64
+      cider_r:
+        enabled: false
+        implementation: vendored_authors
+        n: 4
+        k_r: 0.8
+        tokenizer: stanford_ptb_reference
 
 runtime:
   device: cuda

@@ -9,6 +9,10 @@ from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.evaluation.predictions import prediction_batches
 from semgaze.evaluation.test import test_mode
 from semgaze.model.visual_cache import InferenceVisualCache
+from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
+    score_prediction_semantics)
+from semgaze.evaluation.records import (assert_key_sets_equal, expected_episode_keys,
+                                         implementation_head, write_metrics_artifact)
 
 
 def main():
@@ -56,6 +60,29 @@ def main():
               'metrics_gate': 'SM/MM/SED implementations and invalid treatment, semantic metrics and selection scalar require explicit protocol choices'}
     (output_dir / 'evaluation_config.json').write_text(json.dumps(policy, indent=2), encoding='utf-8')
     summary = {}
+    metrics_config = config['evaluation'].get('metrics', {})
+    probability_config = metrics_config.get('probability', {})
+    if metrics_config.get('enabled') and (probability_config.get('ll') or probability_config.get('ig')):
+        parser.error('standalone frozen prediction evaluation cannot reconstruct LL/IG without saved probability sufficient statistics')
+    semantic_config = metrics_config.get('semantic', {})
+    semantic_enabled = bool(semantic_config.get('bertscore', {}).get('enabled') or
+                            semantic_config.get('cider_r', {}).get('enabled'))
+    if metrics_config.get('enabled') and semantic_enabled and args.path == 'where':
+        parser.error('semantic metrics require --path semantic or --path both')
+    bertscorer = None
+    bert_provenance = None
+    cider_r = None
+    cider_provenance = None
+    if metrics_config.get('enabled') and semantic_config.get('bertscore', {}).get('enabled'):
+        bert_options = {key: value for key, value in semantic_config['bertscore'].items()
+                        if key not in ('enabled', 'batch_size')}
+        bertscorer, bert_provenance = build_bertscorer(**bert_options)
+    if metrics_config.get('enabled') and semantic_config.get('cider_r', {}).get('enabled'):
+        cider_r, cider_provenance = build_cider_r_scorer(
+            reference_root=ROOT / 'third_party' / 'cider_r',
+            n=semantic_config['cider_r'].get('n', 4),
+            k_r=semantic_config['cider_r'].get('k_r', 0.8))
+    metrics_by_k = {str(k): {'draws': {}} for k in config['evaluation']['k_values']}
     cache_settings = config['test']['cache']
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
@@ -71,9 +98,11 @@ def main():
                     counts['flat_format_valid'] = 0
                 episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
                             unseen_subjects=data['unseen_subjects']) for query in queries]
+                draw_prediction_rows = []
                 for episode, generated in prediction_batches(bundle, episodes, budget=budget, cache=cache, path=args.path):
                     query = episode.query
-                    result = {'record_id': query.record_id, 'subject': query.subject, 'k': k, 'draw_id': draw_id,
+                    result = {'record_id': query.record_id, 'query_id': query.record_id, 'subject': query.subject,
+                              'split': args.split, 'K': k, 'k': k, 'draw_id': draw_id,
                               'support_ids': [s.record_id for s in episode.supports]}
                     if args.path in ('where', 'both'):
                         result['where'] = generated[0]
@@ -82,15 +111,53 @@ def main():
                         result['semantic'] = generated[1]
                         counts['flat_format_valid'] += int(result['semantic']['flat_format_valid'])
                     counts['queries'] += 1
+                    draw_prediction_rows.append(result)
                     stream.write(json.dumps(result, ensure_ascii=False) + '\n')
                 if not counts['queries']:
                     raise ValueError('no eligible evaluation queries')
                 rates = {key + '_rate': value / counts['queries'] for key, value in counts.items() if key != 'queries'}
                 draw_rates.append(rates)
                 summary[f'K={k},draw={draw_id}'] = counts | rates
+                if metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
+                    expected_rows = [{'query_id': q.record_id, 'K': k, 'draw_id': draw_id}
+                                     for q in queries]
+                    assert_key_sets_equal(draw_prediction_rows, expected_rows)
+                    references = {(q.record_id, k, draw_id): q.semantic for q in queries}
+                    metrics_by_k[str(k)]['draws'][str(draw_id)] = score_prediction_semantics(
+                        draw_prediction_rows, references, bertscorer=bertscorer, cider_r=cider_r,
+                        batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
             summary[f'K={k},draw_mean'] = {key: sum(r[key] for r in draw_rates) / len(draw_rates) for key in draw_rates[0]}
     cache.close()
     (output_dir / 'validity_summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    if metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
+        expected = expected_episode_keys(
+            [q.record_id for q in queries], config['evaluation']['k_values'],
+            manifest['support_draws'])
+        observed = []
+        for k, block in metrics_by_k.items():
+            for draw_id in block['draws']:
+                observed.extend({'query_id': q.record_id, 'K': int(k), 'draw_id': int(draw_id)}
+                                 for q in queries)
+        if (bertscorer is not None or cider_r is not None) and set(
+                (str(r['query_id']), int(r['K']), int(r['draw_id'])) for r in observed) != expected:
+            raise ValueError('metrics artifact does not cover every configured test episode')
+        for k, block in metrics_by_k.items():
+            draws = list(block['draws'].values())
+            if draws:
+                numeric = sorted({name for draw in draws for name, value in draw.items()
+                                  if name.startswith('eval_') and isinstance(value, (int, float))})
+                block['draw_mean'] = {name: sum(draw[name] for draw in draws if isinstance(draw.get(name), (int, float))) /
+                                      sum(isinstance(draw.get(name), (int, float)) for draw in draws)
+                                      for name in numeric if any(isinstance(draw.get(name), (int, float)) for draw in draws)}
+            else:
+                block['draw_mean'] = {}
+        write_metrics_artifact(output_dir / 'metrics.json', checkpoint=args.checkpoint,
+            config=args.config or args.checkpoint / 'resolved_config.json',
+            split_manifest_identity=identity, by_k=metrics_by_k,
+            provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
+                        'scanpath': 'blocked_by_coordinate_protocol',
+                        'probability': 'not_integrated; tokenizer outcome unresolved'},
+            implementation_head=implementation_head())
 
 
 if __name__ == '__main__':

@@ -212,6 +212,15 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                         stream.write(json.dumps(predictions, allow_nan=False) + '\n')
                         stream.flush()
                         print(format_prediction_summary(predictions), flush=True)
+                        if predictions.get('metrics_artifact'):
+                            metric_event = {'event': 'epoch_metrics', 'step': step + 1,
+                                            'epoch': summary['epoch'], 'split': 'test',
+                                            'metrics_file': predictions['metrics_artifact'].get('metrics_path'),
+                                            'metric_namespaces': ('[EVAL][METRIC][WHERE]', '[EVAL][METRIC][SEM]')}
+                            bundle.trainer_history.append(metric_event)
+                            stream.write(json.dumps(metric_event, allow_nan=False) + '\n')
+                            stream.flush()
+                            print('[EVAL][METRIC][SEM] frozen semantic metrics complete', flush=True)
                 finally:
                     if projected is not None:
                         projected.close()

@@ -15,6 +15,10 @@ from semgaze.semantic.flat.target import build_flat_target
 from semgaze.where.serialization import serialize_xyd_record
 from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
                                           progress_interval, should_report)
+from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
+    score_prediction_semantics)
+from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
+                                         write_metrics_artifact)
 
 
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
@@ -38,14 +42,21 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
     # fixations. Only the semantic response is autoregressively generated here.
     semantic = evaluate_flat_episode(bundle, episode, generation_budget=budget) if generated is None else generated[1]
     query = episode.query
+    where_diagnostics = dict(where)
+    semantic_diagnostics = dict(semantic)
+    where_text = where_diagnostics.pop('text')
+    semantic_text = semantic_diagnostics.pop('text')
     return {'epoch': epoch, 'step': step, 'split': split, 'prediction_index': index,
             'split_manifest_identity': split_manifest_identity,
             'query_id': query.record_id, 'subject': query.subject,
             'stimulus_id': query.stimulus_id, 'task': query.task, 'k': len(episode.supports),
-            'support_ids': [s.record_id for s in episode.supports],
-            'WHERE': {'GT': serialize_xyd_record(query, bundle.config['where']['end_fix_token']), 'PRED': where.pop('text')},
-            'SEMANTIC': {'GT': build_flat_target(query.semantic), 'PRED': semantic.pop('text')},
-            'where_generation': where, 'semantic_generation': semantic}
+            'K': len(episode.supports), 'support_ids': [s.record_id for s in episode.supports],
+            'annotation_width': query.image_width, 'annotation_height': query.image_height,
+            'gt_raw_pixels': [[x, y] for x, y in zip(query.x_px, query.y_px)],
+            'gt_duration_ms_raw': list(query.duration_ms),
+            'WHERE': {'GT': serialize_xyd_record(query, bundle.config['where']['end_fix_token']), 'PRED': where_text},
+            'SEMANTIC': {'GT': build_flat_target(query.semantic), 'PRED': semantic_text},
+            'where_generation': where_diagnostics, 'semantic_generation': semantic_diagnostics}
 
 
 def prediction_batches(bundle, episodes, *, budget, cache, path='both', projected_r_cache=None):
@@ -223,6 +234,12 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             cache.close()
         random.setstate(python_rng)
     prediction_time = time.perf_counter() - prediction_started
+    metrics_artifact = None
+    if paths.get('test') and bundle.config.get('evaluation', {}).get('metrics', {}).get('enabled'):
+        metrics_artifact = score_prediction_artifact(paths['test'], queries=queries,
+            config=bundle.config, output_dir=directory,
+            checkpoint=getattr(bundle, 'checkpoint_path', 'integrated'),
+            split_manifest_identity=split_manifest_identity)
     print('[EVAL][PRED] complete', flush=True)
     return {'event': 'epoch_predictions', 'epoch': epoch, 'step': step,
             'train_prediction_batches': settings['train_batches'], 'train_prediction_episodes': counts['train'],
@@ -231,6 +248,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
             'prediction_time_sec': prediction_time, 'prediction_by_k': prediction_by_k,
+            'metrics_artifact': metrics_artifact,
             'test_prediction_traversals': sum(value['complete_query_traversals']
                                               for value in prediction_by_k.values()),
             'where_conditioning': 'oracle_length; no query GT trajectory',
@@ -249,4 +267,72 @@ def format_prediction_summary(entry):
             f"({entry['test_prediction_episodes']} episodes) -> {paths['test']}\n"
             '  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. '
             'WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.')
+
+
+def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='integrated',
+                              split_manifest_identity=''):
+    """Rescore frozen semantic predictions without loading or generating with the VLM."""
+    metrics_config = config.get('evaluation', {}).get('metrics', {})
+    if not metrics_config.get('enabled'):
+        return None
+    semantic_config = metrics_config.get('semantic', {})
+    if not (semantic_config.get('bertscore', {}).get('enabled') or
+            semantic_config.get('cider_r', {}).get('enabled')):
+        # Probability metrics are produced during the test loss traversal and
+        # cannot be reconstructed from frozen prediction text.
+        return None
+    bertscorer = bert_provenance = cider_r = cider_provenance = None
+    if semantic_config.get('bertscore', {}).get('enabled'):
+        options = {key: value for key, value in semantic_config['bertscore'].items()
+                   if key not in ('enabled', 'batch_size')}
+        bertscorer, bert_provenance = build_bertscorer(**options)
+    if semantic_config.get('cider_r', {}).get('enabled'):
+        cider_r, cider_provenance = build_cider_r_scorer(
+            reference_root=Path(__file__).resolve().parents[2] / 'third_party' / 'cider_r',
+            n=semantic_config['cider_r'].get('n', 4), k_r=semantic_config['cider_r'].get('k_r', 0.8))
+    rows = [json.loads(line) for line in Path(path).read_text(encoding='utf-8').splitlines() if line.strip()]
+    refs = {}
+    by_id = {q.record_id: q for q in queries}
+    grouped = {}
+    for row in rows:
+        if row.get('split') != 'test':
+            continue
+        key = (row.get('query_id', row.get('record_id')), int(row.get('K', row.get('k'))), int(row['draw_id']))
+        query = by_id.get(key[0])
+        if query is None:
+            raise ValueError(f'missing query reference for frozen prediction {key}')
+        refs[key] = query.semantic
+        grouped.setdefault((key[1], key[2]), []).append(row)
+    # Frozen prediction artifacts are allowed to be inspected independently;
+    # each observed draw must nevertheless contain every eligible test query,
+    # exactly once, and joins remain key based.
+    expected_query_ids = {q.record_id for q in queries}
+    for (k, draw), group in grouped.items():
+        assert_key_sets_equal(group)
+        observed_query_ids = {row.get('query_id', row.get('record_id')) for row in group}
+        if observed_query_ids != expected_query_ids:
+            missing = sorted(expected_query_ids - observed_query_ids)
+            extra = sorted(observed_query_ids - expected_query_ids)
+            raise ValueError(f'incomplete frozen prediction draw K={k}, draw={draw}: '
+                             f'missing={missing!r}, extra={extra!r}')
+    by_k = {}
+    for (k, draw), group in sorted(grouped.items()):
+        by_k.setdefault(str(k), {'draws': {}})['draws'][str(draw)] = score_prediction_semantics(
+            group, {(row.get('query_id', row.get('record_id')), k, draw): refs[(row.get('query_id', row.get('record_id')), k, draw)] for row in group},
+            bertscorer=bertscorer, cider_r=cider_r,
+            batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
+    for block in by_k.values():
+        draws = list(block['draws'].values())
+        block['draw_mean'] = {name: sum(d[name] for d in draws) / len(draws)
+                              for name in draws[0] if name.startswith('eval_') and
+                              all(isinstance(d.get(name), (int, float)) for d in draws)} if draws else {}
+    artifact = write_metrics_artifact(Path(output_dir) / 'metrics.json', checkpoint=checkpoint,
+        config=config.get('_resolved_config_path', 'resolved_config.json'),
+        split_manifest_identity=split_manifest_identity, by_k=by_k,
+        provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
+                    'scanpath': 'blocked_by_coordinate_protocol',
+                    'probability': 'not_integrated; tokenizer outcome unresolved'},
+        implementation_head=implementation_head())
+    artifact['metrics_path'] = str(Path(output_dir) / 'metrics.json')
+    return artifact
 

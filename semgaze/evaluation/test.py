@@ -18,6 +18,7 @@ from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
 from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
                                           progress_interval, should_report)
+from semgaze.evaluation.metrics_probability import score_probability_batch, aggregate_probability_draw, aggregate_probability_k
 
 EVAL_KEYS = ('test_where', 'test_what', 'test_why', 'test_how', 'test_flat', 'test_total')
 
@@ -191,6 +192,20 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
     overall, by_k, k_times, batch_stats = EpisodeAccumulator(), {}, {}, {}
+    probability_config = bundle.config.get('evaluation', {}).get('metrics', {}).get('probability', {})
+    probability_enabled = bool(bundle.config.get('evaluation', {}).get('metrics', {}).get('enabled')) and \
+        bool(probability_config.get('ll') or probability_config.get('ig'))
+    if probability_enabled and probability_config.get('outcome') != 'B':
+        raise RuntimeError('probability Outcome A is not enabled: exact predictor-state reuse is unproven')
+    if probability_enabled and probability_config.get('ig'):
+        centerbias = probability_config.get('centerbias', {})
+        # The evaluator has no synthetic fallback and must never silently turn
+        # IG into LL by passing an absent center-bias map.
+        if centerbias.get('source') != 'canonical_data' or not centerbias.get('root') or \
+                centerbias.get('allow_synthetic_fallback') is not False:
+            raise RuntimeError('canonical IG requires explicit canonical center-bias assets')
+        raise RuntimeError('canonical IG center-bias assets are not wired into this evaluation path')
+    probability_by_k = {}
     draw_counts = {str(k): len(manifest['support_draws'][str(k)]) for k in k_values}
     expected = [f'{k}:{draw}:{q.record_id}' for k in k_values
                 for draw in range(len(manifest['support_draws'][str(k)])) for q in queries]
@@ -218,9 +233,13 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                           f'draw={draw + 1}/{draw_count} | starting | queries={len(queries)}', flush=True)
                     episodes = [frozen_episode(q, train_by_id, manifest, k, draw_id=draw,
                         unseen_subjects=bundle.config['data']['unseen_subjects']) for q in queries]
+                    probability_rows = []
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler):
                         rows = batch_losses(bundle, batch.episodes, batch=batch, cache=cache, profiler=profiler,
                                             projected_r_cache=projected_r_cache)
+                        if probability_enabled:
+                            probability_rows.extend(score_probability_batch(bundle, batch.episodes,
+                                visual_cache=cache))
                         if len(rows) != len(batch.episodes):
                             raise ValueError('test loss batch lost episodes')
                         for ep, row in zip(batch.episodes, rows):
@@ -253,6 +272,11 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                     print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
                           f'draw={draw + 1}/{draw_count} | {len(queries)}/{len(queries)} | 100.0% | complete',
                           flush=True)
+                    if probability_enabled:
+                        probability_by_k.setdefault(str(k), {'draws': {}})['draws'][str(draw)] = aggregate_probability_draw(probability_rows)
+                        print(f'[EVAL][PROB] K={k} | draw={draw} | '
+                              f'transitions={sum(r.get("transition_count", 0) for r in probability_rows)} | complete',
+                              flush=True)
                 by_k[str(k)] = subtotal.finish(keys) | {'episodes': len(keys)}
                 k_times[str(k)] = time.perf_counter() - k_started
                 batch_stats[str(k)] = stats
@@ -260,7 +284,11 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     finally:
         if owns_cache:
             cache.close()
-    return {**overall.finish(expected), 'test_by_k': by_k, 'k_values': list(k_values),
+    if probability_enabled:
+        for block in probability_by_k.values():
+            block['draw_mean'] = aggregate_probability_k(list(block['draws'].values()))
+    return {**overall.finish(expected), 'test_by_k': by_k, 'probability_by_k': probability_by_k,
+            'k_values': list(k_values),
             'test_queries': len(queries), 'test_episodes': len(expected),
             'test_loss_traversals': sum(draw_counts.values()),
             'test_time_sec': time.perf_counter()-started, 'test_k_time_sec': k_times,

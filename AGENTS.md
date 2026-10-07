@@ -1,1717 +1,1385 @@
-# Objective
+# AGENTS.md — SemGaze Evaluation Metrics Implementation Contract
 
-Audit first, then implement only the three evaluation-system optimizations specified here for the current `flat` branch of SemGaze.
+## 0. Authority, repository baseline, and task boundary
 
-This file is an implementation specification, not permission to change the method. The intended integrated evaluation cycle remains:
+This file is the implementation contract for adding evaluation metrics to the SemGaze `flat` evaluation pipeline.
 
-```text
-training
-→ evaluation loss pass
-→ prediction/generation pass
-```
-
-The implementation target is to remove three exact-semantics redundancies:
+Implementation baseline is **pinned** to:
 
 ```text
-1. recomputing GT teacher-forced WHERE + SemGaze projector during prediction
-   when the identical projected GT representation R was already produced by
-   the immediately preceding evaluation-loss pass;
-
-2. moving `pixel_values` CPU→GPU for images whose final frozen visual features
-   are already present in `InferenceVisualCache`;
-
-3. discarding the frozen visual cache after loss and warming a second visual
-   cache again during prediction in the same integrated evaluation cycle.
+b84e9c752124457244ee34b93e70f72be5690914
 ```
 
-Do not implement any other optimization in this task.
-
-## Audited current source
-
-The current source architecture was audited before writing this specification. The relevant current files/functions are:
-
-```text
-train_flat.py
-    main()
-    -> run_training_loop(...)
-
-semgaze/training/loop.py
-    run_training_loop(...)
-        -> evaluate_test_epoch(...)
-        -> predict_epoch(...)
-
-semgaze/evaluation/test.py
-    test_mode(...)
-    batch_losses(...)
-    evaluate_test_episode(...)
-    evaluate_test_epoch(...)
-
-semgaze/evaluation/predictions.py
-    _prediction_record(...)
-    prediction_batches(...)
-    predict_epoch(...)
-
-semgaze/evaluation/flat.py
-    evaluate_flat_batch(...)
-    evaluate_flat_episode(...)
-
-semgaze/evaluation/where.py
-    evaluate_where_episode(...)
-
-semgaze/where/forward.py
-    forward_where(...)
-    forward_where_batch(...)
-
-semgaze/where/generation.py
-    generate_where_batch(...)
-    generate_where(...)
-
-semgaze/state/extractor.py
-    extract_query_states(...)
-
-semgaze/state/projector.py
-    build_projector(...)
-
-semgaze/semantic/flat/forward.py
-    prepare_flat_inputs(...)
-    prepare_semantic_batch(...)
-    forward_flat_batch(...)
-    frozen_vision_is_reusable(...)
-
-semgaze/model/visual_cache.py
-    InferenceVisualCache
-        processor_for(...)
-        fuse(...)
-        statistics(...)
-        close(...)
-
-semgaze/where/collator.py
-    load_images(...)
-    collate_native(...)
-    collate_where(...)
-    to_model_device(...)
-    pack_where_batch(...)
-    collate_where_batch(...)
-
-semgaze/evaluation/batching.py
-    episode_id(...)
-    schedule_batches(...)
-
-evaluate_flat.py
-    standalone prediction entrypoint
-```
-
-Important source facts that the implementation must preserve:
-
-1. `batch_losses()` currently performs:
-
-```text
-forward_where_batch(...)
-→ extract query END_FIX states
-→ bundle.projector(...)
-→ per-episode projected states R
-→ forward_flat_batch(...)
-```
-
-The current projected representation is created at:
-
-```python
-states = bundle.projector(torch.cat(where.states)).split(counts)
-```
-
-and each element has shape:
-
-```text
-[N_fixations, d_model]
-```
-
-2. `evaluate_flat_batch()` currently repeats:
-
-```text
-collate GT WHERE
-→ forward_where_batch(...)
-→ bundle.projector(...)
-→ prepare_semantic_batch(...)
-→ semantic generate(...)
-```
-
-Therefore the GT WHERE forward and SemGaze projector are currently recomputed during prediction.
-
-3. Canonical semantic prediction intentionally uses GT XYD/END_FIX states, not the free-running predicted scanpath. This invariant must not change.
-
-4. `prepare_semantic_batch()` currently obtains query-image reuse from a `WhereOutput`:
-
-```text
-where.query_image_features
-where.batch.image_cache
-```
-
-and verifies that WHERE query preprocessing equals semantic query preprocessing before inserting the query visual feature.
-
-This dependency must be handled explicitly when cached `R` allows prediction to skip the GT WHERE forward.
-
-5. `forward_where_batch()` currently calls `to_model_device(...)` on the complete non-label WHERE input before `visual_cache.fuse(...)`.
-
-6. `generate_where_batch()` similarly calls `to_model_device(...)` before `cache.fuse(...)`.
-
-Therefore the current final-feature cache can avoid the frozen vision forward on a hit but cannot avoid the already-performed pixel H2D transfer.
-
-7. `InferenceVisualCache.fuse()` currently keys final visual features using image path plus the already-moved pixel tensor's dtype/device. It selects visual misses only after `pixel_values` are on the model device.
-
-8. `evaluate_test_epoch()` currently creates and closes its own `InferenceVisualCache`.
-
-9. `predict_epoch()` currently creates and closes a second `InferenceVisualCache`.
-
-10. `evaluate_flat.py` is a standalone prediction entrypoint. It creates one prediction-local `InferenceVisualCache` and closes it after standalone prediction. This behavior must remain valid.
-
-11. `serial_reference_losses()` in `semgaze/evaluation/test.py` is a useful reference path. Do not optimize away its independent recomputation; keep it suitable for parity/reference checks unless a separate test-only reason requires otherwise.
-
-Before implementing, run:
+Before editing code, the implementing agent MUST run:
 
 ```bash
 git rev-parse HEAD
 git status --short
+git show -s --format='%H %D %s' HEAD
 ```
 
-Record the inspected commit in the implementation report. If the functions above have materially changed since this specification was produced, re-audit those call sites before editing.
-
-# Non-negotiable scientific invariants
-
-The implementation must preserve all scientific and model-facing behavior.
-
-Do not change:
+The starting `HEAD` MUST equal:
 
 ```text
-COCO-Search18 split membership
-seen/unseen subject definitions
-test query set
-support-set membership
-support-set order
-support draws
-draw IDs
-same-subject support rule
-query/support exclusion rules
-K values or K meaning
-number of support draws
-WHERE prompt construction
-WHERE tokenization
-WHERE XYD serialization
-END_FIX semantics
-GT END_FIX state readout position
-SemGaze projector weights or computation
-semantic prompt construction
-semantic state insertion positions
-semantic use of canonical GT WHERE states
-semantic gold WHY-group behavior
-WHERE generation algorithm
-semantic generation algorithm
-generation budgets
-generation EOS behavior
-prediction text
-prediction serialization schema
-loss definitions
-loss aggregation
-metrics
-metric aggregation
+b84e9c752124457244ee34b93e70f72be5690914
+```
+
+If it does not, **STOP** and report the mismatch. Do not silently implement against a different revision.
+
+The task is **evaluation-only**.
+
+Do not change scientific behavior, training behavior, support sampling, K semantics, model architecture, optimization, generation semantics, or split semantics.
+
+Primary runtime configuration:
+
+```text
+configs/flat_single.yaml
+```
+
+Target metrics:
+
+```text
+WHERE / scanpath
+  SM   ↑
+  MM   ↑
+  SED  ↓
+  LL   ↑
+  IG   ↑
+
+SEMANTIC / WHAT
+  BERTScore-F1 ↑
+  CIDEr-R      ↑
+
+SEMANTIC / WHY
+  BERTScore-F1 ↑
+  CIDEr-R      ↑
+
+SEMANTIC / HOW
+  BERTScore-F1 ↑
+  CIDEr-R      ↑
+```
+
+Canonical evaluation ordering remains:
+
+```text
+training
+  -> evaluation loss
+  -> prediction generation
+  -> metric computation
+```
+
+Redundant computation may be reused only when the reused quantity is mathematically identical.
+
+Central invariant:
+
+```text
+One logical prediction is generated once.
+Metrics consume the already-generated prediction.
+```
+
+`SM`, `MM`, `SED`, BERTScore-F1, and CIDEr-R MUST NOT trigger another WHERE or semantic generation pass.
+
+`LL` and `IG` are probability metrics and MUST NOT be computed from generated coordinates.
+
+---
+
+# 1. Non-negotiable scientific invariants
+
+The implementation MUST NOT change:
+
+```text
 model architecture
-model weights
-input resolution
-image preprocessing semantics
-number/order of multimodal image tokens
-physical batching policy
-training behavior
+LoRA configuration
+trainable parameters
+optimizer
+training loss
+existing evaluation loss
+support sampling
+persisted support draws
+K semantics
+query membership
+seen/unseen subject protocol
+WHERE generation semantics
+oracle-length conditioning
+semantic conditioning
+semantic generation format
+existing prediction text
+existing prediction diagnostics
+train/test split semantics
+gold WHY-group semantics
 ```
 
-Specific invariants for these fixes:
+Current semantic prediction conditioning MUST remain:
 
 ```text
-R must remain the exact projected GT WHERE representation.
-
-R must not be:
-- averaged;
-- truncated;
-- quantized;
-- cast to a lower precision;
-- recomputed from predicted fixations;
-- replaced by raw WHERE hidden states;
-- modified by a new normalization;
-- detached as a new semantic operation.
-
-Evaluation already runs under inference/no-grad semantics. Do not introduce
-a `.detach()` transformation as part of the cache design.
-
-The semantic branch must still see the same chronological R rows at the same
-state insertion positions.
-
-A visual-cache hit must return the same native frozen visual feature that the
-current vision tower + native multimodal projector would produce from the
-canonical preprocessing.
-
-Image feature order must remain exactly:
-support 1, support 2, ..., support K, query
-within each episode, and episode order must remain the current physical-batch
-flattening order.
-
-No cache may silently survive into an incompatible model/checkpoint,
-processor/preprocessing configuration, dtype, device, or evaluation cycle.
+teacher-forced GT XYD states + gold WHY groups
 ```
 
-The implementation must be fail-closed. If compatibility cannot be proven, treat the entry as a miss or raise a clear error. Never silently reuse a questionable cache entry.
+Do not condition semantic generation on the free-running predicted scanpath.
 
-# Current evaluation architecture
-
-## Integrated training-time evaluation
-
-`run_training_loop()` currently does, on an evaluation boundary:
+The current evaluation cycle conceptually executes:
 
 ```text
-evaluate_test_epoch(...)
-→ append/log loss summary
-→ predict_epoch(...)
-→ append/log prediction summary
+LOSS
+  1. teacher-forced WHERE forward
+  2. teacher-forced semantic forward
+
+PREDICTION
+  3. free-running WHERE generation
+  4. teacher-forced GT-WHERE forward
+  5. semantic generation
 ```
 
-The same model/projector parameters are used for both calls. No optimizer step occurs between them.
-
-This is the correct place to own resources whose lifetime is exactly one integrated evaluation cycle.
-
-## Evaluation-loss path
-
-Current loss path:
+Metric integration MUST add:
 
 ```text
-evaluate_test_epoch
-→ frozen_episode(...)
-→ schedule_batches(...)
-→ batch_losses(...)
-→ forward_where_batch(...)
-→ extract_query_states(...)
-→ bundle.projector(...)
-→ forward_flat_batch(...)
-→ selected WHERE/semantic NLL
+0 new autoregressive VLM generation passes
 ```
 
-`batch_losses()` already has the exact per-episode projected GT representation needed later by semantic prediction.
+---
 
-## Prediction path
+# 2. Mandatory preflight gates
 
-Current same-K batched prediction path:
+No agent may skip these gates by assumption.
+
+## Gate A — ISP-SENet provenance
+
+Before implementing `SM`, `MM`, or `SED`, locate the exact local ISP-SENet / Few-shot Personalized Scanpath Prediction reference source.
+
+Run from the pinned checkout:
+
+```bash
+git ls-files | grep -Ei \
+  'few-shot|ISP|GazeformerISP|scanmatch.py|visual_attention_metrics.py|multimatch'
+```
+
+Record:
 
 ```text
-predict_epoch
-→ frozen_episode(...)
-→ prediction_batches(...)
-
-prediction_batches:
-    generate_where_batch(...)          # free-running WHERE
-    evaluate_flat_batch(...)           # semantic path
-
-evaluate_flat_batch:
-    collate GT WHERE again
-    → forward_where_batch(...)
-    → bundle.projector(...)
-    → prepare_semantic_batch(...)
-    → bundle.model.generate(...)
+actual local path
+SemGaze HEAD
+upstream repository
+upstream commit if recoverable
+SHA256 for relevant local source files
+whether local source is byte-identical or behaviorally identical to upstream
 ```
 
-The free-running WHERE output remains required. Only the second GT teacher-forced WHERE + projector computation is redundant when compatible `R` is available from the loss pass.
-
-## Current visual-feature path
-
-Current loss WHERE path is effectively:
+Expected scientific reference is the official CVPR 2025 repository:
 
 ```text
-CPU collation/preprocessing
-→ batch.inputs contains CPU pixel_values
-→ to_model_device(all non-label inputs)
-→ pixel_values now on GPU
-→ InferenceVisualCache.fuse(...)
-→ final-feature hit/miss lookup
-→ frozen vision only for misses
+cvlab-stonybrook/few-shot-scanpath
 ```
 
-Current WHERE generation follows the same problematic ordering:
+with COCO-Search18 reference paths equivalent to:
 
 ```text
-CPU collation
-→ left-pad
-→ to_model_device(...)
-→ InferenceVisualCache.fuse(...)
+ISP/COCO_Search18/GazeformerISP/src/test.py
+ISP/COCO_Search18/GazeformerISP/src/utils/evaluation.py
+ISP/COCO_Search18/GazeformerISP/src/utils/evaltools/scanmatch.py
+ISP/COCO_Search18/GazeformerISP/src/utils/evaltools/visual_attention_metrics.py
 ```
 
-The required refactor is to perform final-feature hit/miss resolution before moving pixel tensors to the GPU.
+Do not install or substitute an unrelated ScanMatch/VAME implementation.
 
-## Current cache lifecycle
+If no verified local copy exists, vendor the exact official files into a clearly marked `third_party` directory with provenance and hashes.
 
-Current integrated lifecycle:
+`SM/MM/SED` implementation MUST remain disabled until Gate A passes.
+
+## Gate B — coordinate parity and prediction-bin inverse
+
+ISP COCO-Search18 evaluation uses:
 
 ```text
-evaluate_test_epoch:
-    create visual cache A
-    use A
-    close A
-
-predict_epoch:
-    create visual cache B
-    use B
-    close B
+width  = 512
+height = 320
 ```
 
-Target integrated lifecycle:
+SemGaze emits prediction coordinates in integer bins:
 
 ```text
-run_training_loop:
-    create visual cache V
-    create projected-R cache R_cache
-
-    evaluate_test_epoch(..., visual_cache=V, projected_r_cache=R_cache)
-    predict_epoch(..., visual_cache=V, projected_r_cache=R_cache)
-
-    close R_cache
-    close V
+0..99
 ```
 
-Standalone paths must still own their own cache when no external cache is supplied.
+SemGaze forward coordinate encoding is lossy and many-to-one.
 
-# Required Change 1 — Cross-pass GT R reuse
-
-## Current behavior
-
-CURRENT:
+Therefore there are two separate contracts:
 
 ```text
-Loss:
-GT WHERE teacher-forced forward
-→ final-layer query END_FIX hidden states
-→ SemGaze projector
-→ R
-→ semantic loss
-
-Prediction:
-free-running WHERE generation
-→ another GT WHERE teacher-forced forward
-→ another SemGaze projector call
-→ R again
-→ semantic generation
+A. raw GT coordinate -> ISP 512x320 frame
+B. SemGaze predicted bin -> ISP 512x320 frame
 ```
 
-The second GT WHERE + projector computation is redundant in the integrated loss→prediction cycle because:
+### Gate B1 — GT transform
+
+Match real records existing in both SemGaze and ISP data using at least:
 
 ```text
-- the model/projector weights do not change between the two passes;
-- the frozen evaluation episode is the same;
-- semantic prediction intentionally consumes canonical GT WHERE states;
-- the loss pass has already computed the exact projected R required.
+subject
+task
+image/name
+condition if available
 ```
 
-## Target behavior
+Compare full fixation sequences and derive the exact raw-GT -> ISP transform from the actual preprocessing source.
 
-TARGET:
+The parity fixture MUST cover:
 
 ```text
-Loss:
-GT WHERE
-→ END_FIX hidden states
-→ projector
-→ R
-→ store exact per-episode R in an evaluation-cycle cache
-→ semantic loss uses the same R object/value as before
-
-Prediction:
-free-running WHERE generation remains unchanged
-→ look up exact frozen episode in projected-R cache
-→ if hit:
-       do NOT run GT WHERE
-       do NOT run SemGaze projector
-       use cached R for semantic generation
-  else:
-       run the current GT WHERE + projector fallback
-→ semantic generation
+interior coordinates
+x=0 / y=0
+max image edges
+portrait and landscape cases if present
 ```
 
-The cache is an optimization only. A miss must reproduce current behavior exactly.
+GT MUST be converted from raw coordinates directly whenever raw coordinates are available.
 
-### Required new cache abstraction
+Do not unnecessarily round-trip GT through SemGaze `0..99` bins.
 
-Add a dedicated evaluation-only cache, preferably in:
+### Gate B2 — prediction-bin inverse — HARD OWNER GATE
+
+GT parity does **not** mathematically identify a unique inverse from a quantized SemGaze bin back to a pixel coordinate.
+
+The agent MUST search for a historical/canonical inverse or representative mapping in:
 
 ```text
-semgaze/evaluation/cache.py
+SemGaze source
+DeepGaze source
+COCO-Search18 preprocessing
+ISP preprocessing
+prior project fixtures/configuration
 ```
 
-Recommended public shape:
+If an exact historical/canonical prediction-bin inverse is found, record its provenance and prove it with fixtures.
+
+If no such inverse exists, **STOP SM/MM/SED production implementation** and report:
+
+```text
+BLOCKED: predicted-bin -> ISP-frame representative is scientifically underdetermined.
+Owner decision required.
+```
+
+The agent MUST NOT choose among examples such as:
+
+```text
+b / 99
+b / 100
+(b + 0.5) / 100
+cell lower edge
+cell center
+cell upper edge
+```
+
+without explicit owner approval backed by a documented protocol decision.
+
+Do not enable canonical `eval_where_sm`, `eval_where_mm`, or `eval_where_sed` until Gate B2 is resolved.
+
+## Gate C — LL/IG tokenizer equivalence
+
+Using the exact SemGaze checkpoint processor/tokenizer, audit these WHERE strings in full context:
+
+```text
+(00, 00, 000)<END_FIX>
+(09, 09, 009)<END_FIX>
+(10, 10, 010)<END_FIX>
+(99, 99, 999)<END_FIX>
+```
+
+Record:
+
+```text
+characters
+token strings
+token IDs
+offsets
+predictor positions
+```
+
+Prove whether the four coordinate digits:
+
+```text
+x tens
+x ones
+y tens
+y ones
+```
+
+can be scored exactly from predictor states already produced by the current teacher-forced WHERE loss forward.
+
+The preflight MUST explicitly select one outcome:
+
+```text
+Outcome A — exact reuse of existing WHERE loss forward
+Outcome B — dedicated probability-scoring forward/probing path
+```
+
+No implicit fallback is allowed.
+
+## Gate D — CIDEr-R and center-bias provenance
+
+Before integration, locate or freeze:
+
+```text
+CIDEr-R authors' implementation
+CIDEr-R PTB tokenizer path
+canonical COCO-Search18 center-bias asset root
+center-bias asset hashes
+```
+
+Canonical IG MUST fail closed if a required center-bias asset is missing.
+
+Synthetic Gaussian center bias is noncanonical and MUST NOT populate `eval_where_ig`.
+
+---
+
+# 3. Additional protocol locks added after audit
+
+These locks override any ambiguous interpretation elsewhere.
+
+## LOCK 1 — predicted-bin inverse cannot be inferred from GT parity
+
+The prediction-side `0..99 -> 512x320` representative is an explicit scientific protocol choice if no historical canonical inverse is found.
+
+Executable GT parity alone is insufficient evidence.
+
+In that situation:
+
+```text
+STOP
+DO NOT IMPLEMENT A GUESS
+REQUEST OWNER DECISION
+```
+
+## LOCK 2 — GT duration source
+
+For canonical ISP-comparable metrics, GT duration MUST come from the raw COCO-Search18 dwell-duration field used by SemGaze:
+
+```text
+source field: T
+semantics: dwell duration
+unit: milliseconds
+conversion: identity
+```
+
+GT duration MUST NOT be round-tripped through SemGaze's serialized `DDD` field and MUST NOT inherit the model-facing `0..999 ms` clipping unless the audited ISP preprocessing explicitly proves the same clipping was part of the reference data.
+
+If the audited ISP preprocessing contradicts this lock, STOP and report the contradiction before changing the contract.
+
+Prediction duration is the parsed generated `DDD` value in milliseconds.
+
+Adaptation:
+
+```text
+MultiMatch duration = duration_ms / 1000.0 seconds
+ScanMatch-with-duration = duration_ms
+```
+
+## LOCK 3 — Outcome B preserves exact SemGaze conditioning context
+
+If LL/IG require Outcome B, DeepGaze defines the **probability-scoring rule**, not a replacement SemGaze prompt.
+
+Every LL/IG probability must be obtained under the exact SemGaze evaluation context for that logical episode:
+
+```text
+same query
+same subject
+same K
+same draw_id
+same support IDs and ordering
+same query image/task/context
+same GT preceding fixations
+same SemGaze WHERE serialization/prefix semantics
+same tokenizer/model/checkpoint
+```
+
+The dedicated probability path MUST NOT construct a DeepGaze-style alternative prompt if that prompt differs from SemGaze's current causal context.
+
+Only the digit-normalized scoring rule is imported from DeepGaze.
+
+## LOCK 4 — key-based joins only
+
+Any values produced in different traversals, including:
+
+```text
+loss/probability statistics
+prediction records
+metric records
+```
+
+MUST be joined by the explicit identity key:
+
+```text
+(query_id, K, draw_id)
+```
+
+Required assertions before metric reduction:
+
+```text
+key sets are equal
+keys are unique in each source
+no duplicate logical episode
+no missing logical episode
+```
+
+Never join by iteration order.
+
+Never `zip(loss_rows, pred_rows)` unless key equality is separately asserted and the final lookup is key-based.
+
+A mismatch is a hard evaluation error.
+
+## LOCK 5 — MultiMatch numerical-degeneracy policy
+
+GT integrity failures remain hard errors.
+
+For a model prediction that:
+
+```text
+has at least one valid recovered fixation
+has finite coordinates/durations
+passes required coordinate conversion
+uses the exact ISP short-path padding
+```
+
+but the audited MultiMatch reference still returns a `NaN`, `-1`, or undefined component because of a model-side degenerate trajectory:
+
+```text
+all five MM component contributions for that query = 0.0
+query remains in the denominator
+increment mm_numeric_failure_count
+record the raw failure reason
+```
+
+This is the explicit:
+
+```text
+SemGaze invalid-generation / numerical-degeneracy extension
+```
+
+It is not claimed to be ISP behavior for valid reference paths.
+
+Do not silently delete the query.
+
+If failure indicates malformed GT, impossible dimensions, nonfinite GT, or reference-code/configuration corruption, raise a hard error instead of assigning zero.
+
+## LOCK 6 — unique semantic-unit IDs
+
+Every semantic metric unit MUST have a unique deterministic scorer identity.
+
+Use identities equivalent to:
+
+```text
+<query_id>::WHAT::<fixation_index>
+<query_id>::WHY::<group_index>
+<query_id>::HOW::0
+```
+
+Indices are zero-based or one-based consistently, but the choice MUST be fixed and tested.
+
+The identity is scorer bookkeeping only and MUST NOT alter text, pairing, or corpus semantics.
+
+This prevents overwriting multiple WHAT/WHY units that belong to the same query.
+
+## LOCK 7 — undefined LL/IG queries and draws
+
+DeepGaze-style LL/IG score transitions only for fixation indices:
+
+```text
+1..N-1
+```
+
+A query with fewer than two GT fixations has zero defined transitions.
+
+Such a query:
+
+```text
+is NOT a model failure
+is excluded from LL/IG query-mean denominator only
+remains present for all other metrics
+increments probability_undefined_query_count
+```
+
+Persist at least:
+
+```text
+ll_defined_query_count
+ig_defined_query_count
+probability_undefined_query_count
+transition_count
+```
+
+If a complete `(K, draw_id)` has zero defined LL/IG queries:
+
+```text
+canonical LL = null
+canonical IG = null
+```
+
+Do not serialize JSON `NaN`.
+
+Do not convert undefined LL/IG to zero.
+
+K-level mean for LL/IG is computed over defined draw values only and MUST persist:
+
+```text
+defined_draw_count
+undefined_draw_count
+```
+
+If all draws for a K are undefined, the K-level scalar is `null`.
+
+## LOCK 8 — canonical reporting split
+
+Canonical paper-facing evaluation metrics are produced for:
+
+```text
+split = test
+```
+
+Training prediction artifacts may continue to exist, but any metrics calculated for train-side diagnostics MUST be namespaced as diagnostics and MUST NOT overwrite canonical `eval_*` test metrics.
+
+`metrics.json` MUST explicitly persist its split.
+
+## LOCK 9 — `log_z` is not a tuning knob
+
+The canonical DeepGaze-fast LL/IG formula in this contract has no free calibration parameter named `log_z`.
+
+Do not expose `evaluation.metrics.probability.log_z` as a tunable scientific option.
+
+If legacy code requires a field for compatibility, it MUST be validated as:
+
+```text
+0.0 only
+```
+
+and documented as a no-op compatibility field.
+
+Prefer removing it from the new canonical metrics config if no current code requires it.
+
+---
+
+# 4. Locked metric definitions
+
+## 4.1 SM — ScanMatch harmonic mean
+
+Reference configuration:
 
 ```python
-class ProjectedWhereCache:
-    def __init__(self, *, bundle, split_manifest_identity, cycle_id):
-        ...
-
-    def key_for(self, episode):
-        ...
-
-    def put(self, episode, projected_r):
-        ...
-
-    def get(self, episode):
-        ...
-
-    def contains(self, episode):
-        ...
-
-    def close(self):
-        ...
-```
-
-Equivalent naming is acceptable, but the semantics below are mandatory.
-
-Do not put projected R into `InferenceVisualCache`; the lifetimes and compatibility rules are different.
-
-### What is cached
-
-Cache the projected representation produced by the existing projector:
-
-```python
-R = bundle.projector(where_state)
-```
-
-Cache one tensor per evaluation episode:
-
-```text
-shape = [N_fixations, d_model]
-dtype = exact projector output dtype
-values = exact projector output values
-```
-
-Do not cache only raw END_FIX hidden states, because the target optimization explicitly removes both the redundant WHERE forward and the redundant projector call.
-
-### Storage
-
-The projected-R cache must survive the complete loss pass until prediction consumes it.
-
-Do not retain an unbounded evaluation's `R` tensors on GPU by default.
-
-Use exact-value CPU storage for the cross-pass cache unless the existing implementation can prove a bounded GPU lifetime:
-
-```text
-- preserve dtype exactly;
-- do not quantize;
-- do not convert bf16→fp16/fp32 or vice versa;
-- do not average/compress;
-- do not serialize through text/numpy;
-- do not call detach as a semantic operation;
-- copy/move under inference mode only.
-```
-
-A CPU device copy preserves tensor values and is acceptable. On retrieval, the existing state insertion path may move the exact tensor to the embedding device/dtype as it already does.
-
-If implementation chooses another storage location, parity requirements below still apply and the cache must not cause evaluation OOM.
-
-## Cache key / ownership
-
-### Episode identity
-
-The cache key must uniquely encode the exact WHERE episode, not just query ID.
-
-At minimum include:
-
-```text
-query:
-    record_id
-    stimulus_id
-    subject
-    image_path
-    task
-    condition
-    image_width
-    image_height
-    x_px
-    y_px
-    duration_ms
-
-supports, IN ORDER:
-    for every support:
-        record_id
-        stimulus_id
-        subject
-        image_path
-        task
-        condition
-        image_width
-        image_height
-        x_px
-        y_px
-        duration_ms
-
-episode:
-    K = len(supports)
-    draw_id
-```
-
-Support order is part of the key.
-
-The exact query GT XYD trajectory is part of the key because the hidden states at supervised query END_FIX positions depend on the complete teacher-forced query response.
-
-The exact support XYD trajectories are part of the key because support assistant responses are in the WHERE conversation.
-
-Do not use Python's randomized `hash()` as the sole persistent identity. A tuple/dataclass of immutable fields is sufficient for an in-process dictionary; if a digest is used, use a deterministic collision-resistant digest over a canonical serialization.
-
-### Cache provenance
-
-Episode identity alone is not sufficient.
-
-Bind each `ProjectedWhereCache` instance to exactly one evaluation cycle and one live model state.
-
-The cache must retain/check provenance including:
-
-```text
-live model object identity
-live SemGaze projector object identity
-processor/tokenizer object identity or equivalent strict identity
-END_FIX ID
-END_FIX token
-protocol version
-split_manifest_identity
-evaluation cycle identity
-```
-
-For integrated training evaluation, `cycle_id` should include the current evaluation boundary, e.g.:
-
-```text
-(epoch, global_step)
-```
-
-The primary safety mechanism is lifecycle:
-
-```text
-create only after the optimizer step that precedes evaluation
-do not perform optimizer updates while the cache is live
-close it before training resumes
-never store it globally
-```
-
-Do not rely on the cache remaining valid after any optimizer step.
-
-### Why include both K/draw and support identities
-
-`draw_id` is not enough by itself.
-
-Two episodes must not collide when:
-
-```text
-same query, different K
-same query, same K, different draw
-same query, same K/draw metadata but different ordered supports
-same support set in a different order
-same record ID with mutated WHERE-relevant content in a unit test
-```
-
-The key must make all of these distinct.
-
-## Fallback behavior
-
-BACKWARD-COMPATIBILITY BEHAVIOR:
-
-If any of the following is true:
-
-```text
-no ProjectedWhereCache supplied
-cache provenance incompatible
-episode key absent
-episode key invalid
-standalone prediction executed without preceding loss
-training prediction episode has no matching test-loss entry
-```
-
-then semantic prediction must execute the current baseline path:
-
-```text
-forward_where / forward_where_batch
-→ extract GT END_FIX states
-→ bundle.projector
-→ semantic generation
-```
-
-Do not fail standalone prediction merely because `R` is absent.
-
-A provenance mismatch must never fall through to a wrong cache hit. It may be treated as a miss or as a clear compatibility error depending on API location.
-
-### Mixed hit/miss physical batches
-
-`evaluate_flat_batch()` must support a physical group in which some episodes hit the R cache and others miss.
-
-Required behavior:
-
-```text
-lookup all episode keys first
-
-hits:
-    take exact cached R
-
-misses:
-    construct GT WHERE work only for misses
-    run GT WHERE only for misses
-    project only misses
-    optionally populate the cache with newly produced R
-
-restore R list to the original episode order
-
-semantic generation:
-    consume R in original episode order
-```
-
-Do not recompute GT WHERE for the full physical group merely because one episode misses.
-
-## Necessary semantic query-vision decoupling
-
-WHY SAFE / REQUIRED ARCHITECTURAL DETAIL:
-
-Current `prepare_semantic_batch()` uses a full `WhereOutput` to obtain:
-
-```text
-where.query_image_features
-where.batch.image_cache
-```
-
-If all R entries hit, there is no GT `WhereOutput`.
-
-Do not solve this by running a new GT WHERE forward only to obtain query vision; that would defeat Change 1.
-
-Refactor semantic preparation so query visual reuse can come from either:
-
-```text
-A. existing WhereOutput, for training/loss/current fallback paths; or
-B. compatible InferenceVisualCache, for optimized prediction with cached R.
-```
-
-Recommended API direction:
-
-```python
-prepare_semantic_batch(
-    bundle,
-    queries,
-    states,
-    *,
-    where=None,
-    visual_cache=None,
-    generation_budget=None,
-    reuse_query_vision=None,
+ScanMatch(
+    Xres=512,
+    Yres=320,
+    Xbin=16,
+    Ybin=12,
+    Offset=(0, 0),
+    TempBin=50,
+    Threshold=3.5,
 )
 ```
 
-Equivalent design is acceptable.
+Also construct a second ScanMatch object with the same spatial settings and no `TempBin`.
 
-For the `visual_cache` path:
-
-```text
-- collate the canonical semantic native prompt exactly as today;
-- obtain the query's final frozen visual feature from InferenceVisualCache;
-- if it is absent, compute/cache that query visual feature using the exact
-  current preprocessing;
-- preserve the current host-side preprocessing identity/equality check;
-- masked-scatter the same feature into the same semantic image-token slots;
-- then insert R at the same state boundaries.
-```
-
-The semantic language-model input must be equivalent to the baseline input.
-
-Do not synthesize image tokens or bypass the native processor in a way that could change tokenization.
-
-## Files/functions affected
-
-FILES/FUNCTIONS AFFECTED:
-
-Required audit/edit targets:
+Within one complete `(K, draw_id)`:
 
 ```text
-semgaze/evaluation/cache.py
-    new ProjectedWhereCache / episode-key helper
+sm_no_duration = arithmetic mean of same-subject query ScanMatch scores
+sm_with_duration = arithmetic mean of same-subject query duration-ScanMatch scores
 
-semgaze/evaluation/test.py
-    batch_losses(...)
-    evaluate_test_epoch(...)
-    possibly evaluate_test_episode(...) only for cache ownership consistency
-    serial_reference_losses(...) should remain an independent reference
-
-semgaze/evaluation/flat.py
-    evaluate_flat_batch(...)
-    evaluate_flat_episode(...)
-
-semgaze/evaluation/predictions.py
-    prediction_batches(...)
-    predict_epoch(...)
-
-semgaze/semantic/flat/forward.py
-    prepare_semantic_batch(...)
-    possibly a small helper for query-feature injection independent of WhereOutput
-
-semgaze/training/loop.py
-    run_training_loop(...)
-    create/pass/close the cycle-scoped projected-R cache
-
-semgaze/model/visual_cache.py
-    expose safe query-feature retrieval needed when no WhereOutput exists
+SM = scipy.stats.hmean([sm_no_duration, sm_with_duration])
 ```
 
-Avoid changing `_prediction_record()` output fields.
-
-## Required parity checks
-
-PARITY TEST:
-
-For deterministic frozen test episodes covering K=1, K=5, and K=10:
-
-1. Compute baseline prediction using forced R-cache miss/current recomputation.
-2. Compute optimized prediction using R captured from the preceding loss pass.
-3. Assert:
+Canonical metric name:
 
 ```text
-cached R == recomputed R
+eval_where_sm
 ```
 
-Use `torch.equal` when both paths use the same kernel/shape execution. If bitwise equality is not guaranteed by the same hardware/backend, use the narrowest justified numerical tolerance and document why. Do not use a loose tolerance.
-
-Also assert:
+Diagnostics may include:
 
 ```text
-state count identical
-state order identical
-semantic insertion positions identical
-semantic attention_mask identical
-semantic input embeddings equivalent
-semantic generated token IDs exactly identical
-decoded semantic text exactly identical
-serialized semantic prediction exactly identical
-loss values unchanged
-existing metrics unchanged
+eval_diag_where_scanmatch_no_duration
+eval_diag_where_scanmatch_with_duration
 ```
 
-Generated token IDs must be exactly equal. Do not accept "close" token IDs.
+Do not multiply by 100.
 
-Capture generated token tensors in test instrumentation; do not add token IDs to the production JSON schema solely for testing.
+## 4.2 MM — MultiMatch
 
-Required key/fallback tests:
+Reference dependency:
 
 ```text
-integrated loss→prediction uses cached R for matching test episodes
-
-standalone prediction with no R cache recomputes GT WHERE and succeeds
-
-training predictions without a matching loss-cache key recompute and succeed
-
-different K cannot collide
-
-different draw_id cannot collide
-
-different ordered support IDs cannot collide
-
-same support membership in a different order cannot collide
-
-different query GT trajectory cannot collide
-
-different support GT trajectory cannot collide
-
-different split_manifest_identity cannot reuse the cache
-
-different live model/projector/cycle cannot reuse the cache
+multimatch-gaze==0.1.3
 ```
 
-Use call counters/mocks around `forward_where_batch()` and `bundle.projector` to prove that an all-hit semantic prediction group invokes neither redundant operation.
+or a proven-equivalent vendored copy.
 
-# Required Change 2 — Cache lookup before pixel H2D
-
-## Current behavior
-
-CURRENT:
-
-`forward_where_batch()` currently moves all non-label inputs to the model device before calling `visual_cache.fuse()`.
-
-Conceptually:
-
-```text
-batch.inputs['pixel_values'] on CPU
-→ to_model_device(...)
-→ all pixel_values moved to GPU
-→ visual_cache.fuse(...)
-→ feature hit/miss lookup
-→ frozen vision executes only for misses
-```
-
-`generate_where_batch()` has the same ordering.
-
-`InferenceVisualCache.fuse()` currently receives already-device-resident pixels and forms final-feature keys from:
-
-```text
-(path, pixel dtype, pixel device)
-```
-
-Therefore even a final visual-feature hit already paid pixel H2D.
-
-## Target behavior
-
-TARGET:
-
-```text
-image/preprocessing identities
-→ validate cache provenance
-→ final visual-feature lookup on host metadata first
-→ identify hit indices and miss indices
-
-hits:
-    no pixel H2D
-    no frozen vision execution
-
-misses:
-    use canonical preprocessed CPU pixel rows
-    collate only the miss rows for GPU vision work
-    move only miss pixels CPU→GPU
-    run frozen vision only for misses
-    cache exact output feature
-
-merge:
-    reconstruct final features in the original flattened image order
-    inject them into the exact same image-token positions
-```
-
-The text/token inputs may be moved independently as they are today. The prohibited operation is moving hit-image `pixel_values` to GPU.
-
-### Minimum required call-order change
-
-In both loss WHERE and WHERE generation, do not call the generic `to_model_device()` on `pixel_values` before visual cache lookup.
-
-Separate:
-
-```text
-text/model inputs
-host pixel inputs
-```
-
-before device transfer.
-
-Recommended structure:
+Reference call:
 
 ```python
-host_inputs = ...
-host_pixels = ...
-
-if visual_cache is active and final-feature caching is enabled:
-    model_inputs = to_model_device(inputs_without_pixel_values, bundle.model)
-    fused_inputs, features = visual_cache.fuse(
-        bundle,
-        model_inputs,
-        image_paths,
-        host_pixel_values=host_pixels,
-    )
-else:
-    model_inputs = to_model_device(full_inputs, bundle.model)
+multimatch.docomparison(gt, pred, screensize=[512, 320])
 ```
 
-Equivalent APIs are acceptable, but `InferenceVisualCache` must receive host pixels or per-image host pixel rows and must select misses before H2D.
+A valid scanpath shorter than 3 fixations is padded to length 3 with:
 
-## Hit/miss batching behavior
+```text
+(1.0, 1.0, 0.001)
+```
 
-### Required visual-cache primitive
+where duration is seconds.
 
-Refactor `InferenceVisualCache` so the feature lookup/computation is reusable independently of LM input fusion.
+Five components:
 
-Recommended internal/public helper:
+```text
+vector
+direction
+length
+position
+duration
+```
+
+Within a draw:
+
+```text
+mean each component across query pairs
+MM = arithmetic mean of the five component means
+```
+
+Canonical metric name:
+
+```text
+eval_where_mm
+```
+
+Do not drop duration.
+
+Do not flatten or change the reduction hierarchy even if a flattened mean happens to coincide numerically.
+
+## 4.3 SED — ISP/VAME String Edit Distance
+
+Use the audited ISP `string_edit_distance` behavior.
+
+Reference spatial partition:
+
+```text
+height = 320
+width  = 512
+n      = 5
+height_step = 64
+width_step  = 102
+```
+
+For integer coordinate `(x, y)`:
+
+```text
+symbol_index = (x // 102) + (y // 64) * 5
+symbol = chr(97 + symbol_index)
+```
+
+Then compute raw edit distance over the symbol strings.
+
+Canonical draw score:
+
+```text
+SED = arithmetic mean of same-subject raw SED values
+```
+
+Canonical name:
+
+```text
+eval_where_sed
+```
+
+Do not normalize by path length.
+
+Do not substitute semantic/text edit distance.
+
+Preserve the reference integer-boundary behavior exactly.
+
+## 4.4 LL — DeepGaze fast spatial GT probability
+
+For GT coordinate:
+
+```text
+x = 10*x1 + x2
+y = 10*y1 + y2
+```
+
+Score four causal phases:
+
+```text
+log P(x1 | prefix)
+log P(x2 | prefix, x1)
+log P(y1 | prefix, x1, x2, separator)
+log P(y2 | prefix, x1, x2, separator, y1)
+```
+
+Each phase normalizes over digit alternatives:
+
+```text
+0,1,2,3,4,5,6,7,8,9
+```
+
+When exact HF logits are available:
+
+```text
+digit_log_prob = target_logit - logsumexp(logits[digit_ids])
+```
+
+Coordinate fixation score:
+
+```text
+LL_fix = sum(four digit log probabilities)
+```
+
+Use natural logarithms.
+
+Do not score fixation index 0.
+
+Duration is not part of canonical LL.
+
+Per query:
+
+```text
+LL_query = mean(LL_fix for indices 1..N-1)
+```
+
+Per draw:
+
+```text
+LL_draw = mean(LL_query over defined queries)
+```
+
+Per K:
+
+```text
+mean of defined complete draw scores
+```
+
+Canonical name:
+
+```text
+eval_where_ll
+```
+
+## 4.5 IG — Information Gain
+
+Use canonical data-driven center bias over the `100x100` reduced grid.
+
+For each scored fixation:
+
+```text
+IG_fix = (LL_fix - log P_centerbias(x_gt, y_gt)) / ln(2)
+```
+
+Unit:
+
+```text
+bits / fixation
+```
+
+Center-bias loader behavior must match the audited DeepGaze path:
+
+```text
+read data["centerbias"]
+exp(centerbias - max)
+bilinear resize using scipy.ndimage.zoom(order=1)
+normalize to sum 1
+clip density at 1e-10
+log
+```
+
+No synthetic Gaussian fallback for canonical metrics.
+
+Missing canonical center bias is a hard error.
+
+Canonical name:
+
+```text
+eval_where_ig
+```
+
+## 4.6 BERTScore-F1
+
+Freeze:
+
+```yaml
+package: bert-score
+version: 0.3.13
+lang: en
+model_type: roberta-large
+num_layers: 17
+idf: false
+rescale_with_baseline: false
+use_fast_tokenizer: false
+```
+
+Use one reusable `BERTScorer` per evaluation event/process.
+
+Text normalization only:
 
 ```python
-get_or_compute_visual_features(
-    bundle,
-    *,
-    paths,
-    host_pixel_values_or_rows,
-)
+" ".join(text.strip().split())
 ```
 
-Required behavior:
+Do not:
 
 ```text
-validate cache/bundle/preprocessing compatibility
-
-derive the target vision device/dtype from the bound model,
-not from an already-moved pixel tensor
-
-build ordered keys for every image
-
-resolve hits without touching GPU pixels
-
-deduplicate misses when the same compatible image identity repeats
-
-gather/concatenate only miss pixel rows
-
-move only the miss batch to target device/dtype
-
-native.get_image_features(...) only on misses
-
-clone/store each newly produced feature so an entry does not retain an
-unrelated full-batch allocation
-
-assemble output features in exact original key order
+lowercase manually
+remove punctuation
+stem
+lemmatize
+repair grammar
+expand abbreviations
+paraphrase
+inject GT wording
 ```
 
-`fuse()` may become a thin wrapper:
+Persist:
 
 ```text
-get/compute ordered features
-→ create text embeddings
-→ masked_scatter image features
-→ return inputs_embeds + ordered features
+bert-score version
+transformers version
+model
+layer
+official scorer hash
+idf setting
+rescale setting
+fast/slow tokenizer setting
 ```
 
-### Preprocessing behavior
+Canonical metric is F1 only.
 
-A final-feature cache hit must not invoke the underlying native image processor again.
-
-The current preprocessing cache may be retained, but the implementation must ensure the following invariant:
+Canonical names:
 
 ```text
-visual-feature hit
-⇒ canonical preprocessing row is already available/compatible
-⇒ original image preprocessing is not re-executed
+eval_sem_what_bertscore_f1
+eval_sem_why_bertscore_f1
+eval_sem_how_bertscore_f1
 ```
 
-If the current independent LRU stores can violate this implication, couple the lifetime/identity of a visual entry with its canonical preprocessing entry, or treat the visual entry as unusable when the matching preprocessing identity is absent.
+## 4.7 CIDEr-R
 
-Do not replace the native processor with synthetic image-token expansion.
-
-The native processor must still define the canonical text/image expansion. Preserve:
+Use the authors' CIDEr-R implementation associated with:
 
 ```text
-crop_to_patches=False
-448×448 one-tile behavior
-native processor image-token expansion
-tokenizer/chat-template behavior
+CIDEr-R: Robust Consensus-based Image Description Evaluation
+Gabriel Oliveira dos Santos et al., 2021
 ```
 
-### Host collation
-
-Do not concatenate all hit pixels into a GPU-bound visual tensor.
-
-It is acceptable for the canonical `NativeBatch` to retain CPU preprocessing tensors for correctness checks, but the visual compute batch passed to `.to(cuda)` / `get_image_features()` must contain misses only.
-
-Prefer changing evaluation-aware packing so it can retain per-image CPU rows in flattened order and concatenate only miss rows when the visual cache asks for them.
-
-Do not change training collation behavior.
-
-### Ordering
-
-For a physical batch, define the flattened image order exactly as current `pack_where_batch()`:
+Expected source family:
 
 ```text
-episode 0 support 0
-episode 0 support 1
-...
-episode 0 query
-episode 1 support 0
-...
-episode B-1 query
+gabrielsantosrv/coco-caption---My-changes
+pycocoevalcap/ciderR/ciderR.py
+pycocoevalcap/ciderR/ciderR_scorer.py
+pycocoevalcap/tokenizer/ptbtokenizer.py
 ```
 
-If hit/miss resolution produces:
+Freeze:
 
 ```text
-keys = [k0, k1, k2, k3]
-hits = {k0, k2}
-misses = [k1, k3]
+n = 4
+k_r = 0.8
+length coefficient = 0.2
+final scale = x10 as implemented by authors
 ```
 
-the returned feature tensor must still be:
+Canonical pipeline:
 
 ```text
-[f(k0), f(k1), f(k2), f(k3)]
+parsed SemGaze semantic text
+  -> whitespace canonicalization
+  -> authors' PTBTokenizer
+  -> authors' CIDEr-R scorer
 ```
 
-not hit-first or miss-first order.
-
-The following existing validations must continue to hold:
+Document frequency MUST be constructed from the complete reference corpus for one:
 
 ```text
-feature group count == flattened image count
-feature sequence length == processor.image_seq_length
-image placeholder count == feature_count * image_seq_length
-query_image_index still points to the query's feature
+(K, draw_id, semantic_branch)
 ```
 
-## Cache compatibility / identity
+Never compute CIDEr-R independently per physical minibatch.
 
-WHY SAFE:
+Never pool WHAT/WHY/HOW into one corpus.
 
-Current cache lifetime is invocation-local, but Change 3 will make it span loss→prediction. Strengthen cache binding rather than introducing a persistent/global store.
-
-Each `InferenceVisualCache` instance must be bound to one compatible live visual context.
-
-At minimum validate:
+Canonical names:
 
 ```text
-same live model object
-same native vision_tower object
-same native multi_modal_projector object
-same processor/image_processor object
-same native preprocessing signature
-same target visual device
-same target visual dtype
-same processor.image_seq_length
-same processor.image_token_id
-frozen_vision_is_reusable(model) is still true
-model is in inference/eval-compatible state
-autograd is disabled for feature reuse
+eval_sem_what_cider_r
+eval_sem_why_cider_r
+eval_sem_how_cider_r
 ```
 
-Because the cache must never be reused across a different live model object, this also prevents silent cross-checkpoint reuse.
+---
 
-Do not create a global on-disk or process-global feature cache in this task.
+# 5. Ground-truth pairing and semantic units
 
-### Preprocessing signature
-
-Bind cache entries to the exact native preprocessing contract used by `collate_native()`.
-
-At minimum include or validate the equivalent of:
+Canonical scanpath metrics compare:
 
 ```text
-processor/image_processor identity
-crop_to_patches=False
-size.height=448
-size.width=448
-one tile / num_patches == 1
+prediction for subject S
+vs
+GT scanpath for subject S
 ```
 
-Do not assume path alone is sufficient if preprocessing settings can differ.
+Never compare to another subject.
 
-### Target dtype/device
+Never average all human paths for the same image.
 
-Do not derive visual cache compatibility from already-transferred `pixel_values`.
-
-Derive target device/dtype from the bound live model, then transfer miss pixels to that exact target.
-
-If the bound model/device/dtype changes while the cache is live, fail closed; do not reuse old visual entries.
-
-## Files/functions affected
-
-FILES/FUNCTIONS AFFECTED:
+Identity MUST preserve:
 
 ```text
-semgaze/model/visual_cache.py
-    InferenceVisualCache.__init__ / binding logic
-    processor_for(...)
-    new/get-or-compute feature helper
-    fuse(...)
-    statistics(...)
-    close(...)
-
-semgaze/where/forward.py
-    forward_where_batch(...)
-    move text inputs separately from host pixels
-    call visual cache before pixel H2D
-
-semgaze/where/generation.py
-    generate_where_batch(...)
-    same early lookup/miss-only H2D behavior
-
-    generate_where(...)
-    if serial prediction is wired to use a supplied visual cache, preserve
-    baseline behavior when cache is None
-
-semgaze/where/collator.py
-    collate_native(...)
-    pack_where_batch(...)
-    only as needed to expose canonical per-image host pixel rows and strict
-    preprocessing identity without changing native tokenization
-
-semgaze/semantic/flat/forward.py
-    prepare_semantic_batch(...)
-    query-feature retrieval from shared visual cache when cached R removes
-    the GT WhereOutput
-
-semgaze/evaluation/where.py
-    evaluate_where_episode(...)
-    only if optional cache propagation is added for serial execution
-
-semgaze/evaluation/flat.py
-    evaluate_flat_batch(...)
-    evaluate_flat_episode(...)
-    propagate shared visual cache to semantic query-feature reuse
+query_id / record_id
+subject
+task
+stimulus/image
+condition
+split
+K
+draw_id
+support_ids
 ```
 
-Do not change training forward paths when no `InferenceVisualCache` is supplied.
+Semantic GT belongs to the exact same normalized query record.
 
-## Backward-compatibility behavior
-
-BACKWARD-COMPATIBILITY BEHAVIOR:
+Semantic units:
 
 ```text
-visual cache None:
-    current full pixel transfer + native vision path remains valid
-
-visual cache supplied but feature caching disabled:
-    current full native visual computation remains valid
-
-visual cache miss:
-    exact current preprocessing
-    exact target device/dtype
-    exact native.get_image_features result
-    exact feature placement
-
-visual cache hit:
-    same final feature value
-    no corresponding pixel H2D
-    no corresponding get_image_features call
+WHAT = one expected unit per GT fixation
+WHY  = one expected unit per GT WHY group
+HOW  = one expected unit per query
 ```
 
-Do not require cache presence for correctness.
+Missing units remain in denominators under the failure policy below.
 
-## Required parity checks
+---
 
-PARITY TEST:
+# 6. Aggregation hierarchy
 
-### Single miss
-
-Start with an empty compatible cache.
-
-Assert:
+Canonical hierarchy:
 
 ```text
-canonical preprocessing executes
-pixel H2D executes for the image
-native.get_image_features executes
-returned visual feature equals baseline no-cache visual feature
-feature is stored
+K
+  -> support draw
+       -> complete eligible unseen test-query set
 ```
 
-### Single hit
-
-Run the same compatible image again.
-
-Assert:
+For every configured `K`:
 
 ```text
-final visual cache hit occurs
-underlying native image preprocessing does not execute again
-no corresponding pixel H2D occurs
-native.get_image_features does not execute
-returned feature is identical to the previously stored feature
-LM-facing inputs_embeds are equivalent to baseline
+for each persisted draw_id:
+    score every eligible unseen test query exactly once
 ```
 
-Use test instrumentation/call counters around the miss-only pixel-transfer helper and `native.get_image_features()`.
-
-### Mixed-hit physical batch
-
-Warm only a strict subset of images, then evaluate a batch containing hits and misses.
-
-Assert:
+Do not hardcode:
 
 ```text
-only miss images are included in the GPU pixel transfer batch
-only miss images are passed to native.get_image_features
-each miss is computed once
-hits are not recomputed
-final ordered feature tensor matches the original flattened image order
-query_image_index still selects the correct query feature
-image placeholder mapping is unchanged
-WHERE outputs/loss are unchanged
+K=1
+query count
+407
 ```
 
-Test repeated compatible paths in the same physical batch and ensure deduplicated miss computation does not change final repeated positions.
-
-### Compatibility rejection
-
-Assert no reuse across:
+The current canonical persisted protocol may contain 10 draws for each of:
 
 ```text
-different live model object/checkpoint bundle
-different native vision producer object
-different processor object
-different preprocessing signature
-different target dtype
-different target device
+K=1
+K=5
+K=10
 ```
 
-A mismatch must be a miss or clear error, never a hit.
-
-# Required Change 3 — Persistent visual cache across loss and prediction
-
-## Current lifecycle
-
-CURRENT:
+but runtime execution is driven by:
 
 ```text
-evaluate_test_epoch(...)
-    cache = InferenceVisualCache(...)
-    ...
-    cache.close()
-
-predict_epoch(...)
-    cache = InferenceVisualCache(...)
-    ...
-    cache.close()
+config["evaluation"]["k_values"]
 ```
 
-This means prediction cannot reuse final frozen visual features retained at the end of the immediately preceding loss phase.
+For each `(K, draw_id)`, compute one complete metric block.
 
-`evaluate_flat.py` separately owns a standalone prediction cache, which is correct for standalone operation.
-
-## Target lifecycle
-
-TARGET for the integrated training evaluation cycle:
+K-level canonical score:
 
 ```text
-evaluation boundary begins
-
-create one compatible InferenceVisualCache
-
-evaluate_test_epoch(..., visual_cache=shared_cache)
-    does not close externally owned cache
-
-predict_epoch(..., visual_cache=shared_cache)
-    uses entries warmed by loss
-    does not close externally owned cache
-
-finally:
-    shared_cache.close()
-
-evaluation boundary ends
-training may resume
+arithmetic mean of complete draw-level values
 ```
 
-The shared cache must not survive into another evaluation cycle.
+except undefined LL/IG draws follow LOCK 7.
 
-### Combined lifecycle with R cache
+Persist both:
 
-Recommended integrated orchestration:
+```text
+per-draw values
+K-level draw mean
+```
+
+Never pool different K values into one unnamed overall metric.
+
+No subject macro-average.
+
+---
+
+# 7. Evaluation architecture
+
+Required logical architecture:
+
+```text
+EVALUATION TRIGGER
+|
++-- [EVAL][LOSS]
+|    |
+|    +-- teacher-forced WHERE
+|    |     -> existing WHERE loss
+|    |     -> optional LL/IG sufficient statistics if Outcome A
+|    |
+|    +-- teacher-forced semantic
+|          -> existing flat loss
+|
++-- [EVAL][PRED]
+|    |
+|    +-- free-running WHERE generation
+|    +-- GT-WHERE-conditioned semantic generation
+|    +-- canonical prediction records
+|
++-- [EVAL][PROB]  # Outcome B only
+|    |
+|    +-- exact SemGaze-context GT probability scoring
+|    +-- no WHERE generation
+|    +-- no semantic generation
+|
++-- [EVAL][METRIC][WHERE]
+|    |
+|    +-- existing generated WHERE -> SM/MM/SED
+|    +-- LL/IG sufficient statistics
+|
++-- [EVAL][METRIC][SEM]
+     |
+     +-- existing parsed semantic generation -> BERTScore/CIDEr-R
+```
+
+For fixed:
+
+```text
+(query_id, K, draw_id)
+```
+
+new metric code MUST NOT call `model.generate(...)`.
+
+---
+
+# 8. LL/IG implementation outcomes
+
+## Outcome A — reuse existing WHERE loss forward
+
+Choose only if Gate C proves exact equivalence.
+
+Use:
+
+```text
+existing teacher-forced WHERE forward
+  -> selected digit predictor hidden states
+  -> LM output head at only required positions
+  -> exact 10-digit normalization
+  -> per-fixation LL
+  -> center-bias subtraction
+  -> IG
+```
+
+Requirements:
+
+```text
+no extra backbone forward
+no retained [B,L,V] tensor
+no logits retained across queries
+immediately reduce to scalar sufficient statistics
+```
+
+Do not change existing loss arithmetic.
+
+## Outcome B — dedicated probability pass
+
+Use only if Outcome A cannot be proven exact.
+
+The pass MUST:
+
+```text
+use exact SemGaze episode context
+use GT prefixes
+reproduce four digit phases exactly
+batch prompts where safe
+run under torch.inference_mode()
+reuse preprocessing/features only when mathematically identical
+not call semantic generation
+not call WHERE generation
+not write another prediction file
+reduce immediately to LL/IG scalars
+run once per logical (query,K,draw)
+```
+
+Log distinctly as:
+
+```text
+[EVAL][PROB]
+```
+
+---
+
+# 9. Failure policies
+
+## 9.1 General rule
+
+Failed model generations MUST NOT be silently dropped.
+
+Every expected unit contributes either:
+
+```text
+a valid metric input
+or
+a deterministic failure contribution
+```
+
+with a recorded failure counter.
+
+Never repair model output using GT.
+
+## 9.2 WHERE — malformed text with recovered fixations
+
+If the current parser recovers one or more complete fixation triples:
+
+```text
+score the recovered parsed trajectory
+count the format failure
+```
+
+Do not discard the query.
+
+## 9.3 WHERE — empty prediction
+
+Use the SemGaze invalid-generation extension:
+
+```text
+SM contribution = 0
+MM contribution = 0
+SED contribution = len(GT spatial symbol string)
+```
+
+Do not pad an entirely empty prediction with GT-dependent information.
+
+## 9.4 Dataset-invalid GT
+
+If GT is empty, malformed, missing required duration, nonfinite, or dimensionally inconsistent:
+
+```text
+raise dataset-integrity error
+```
+
+Do not treat invalid GT as model failure.
+
+## 9.5 Semantic missing unit
+
+For an expected WHAT/WHY/HOW unit that is absent or invalid:
+
+```text
+candidate = missing
+```
+
+Required deterministic contribution:
+
+```text
+BERTScore F1 = 0
+CIDEr-R sample contribution = 0
+```
+
+The GT reference MUST remain in the CIDEr-R reference corpus used to construct document frequency.
+
+## 9.6 Extra semantic lines
+
+Score only the deterministic expected-unit mapping recovered by the current parser.
+
+Do not create extra GT/reference pairs from extra model text.
+
+Count the parse failure.
+
+## 9.7 MultiMatch numerical failure
+
+Apply LOCK 5 exactly.
+
+---
+
+# 10. Canonical records
+
+Prefer extending current prediction rows additively.
+
+If a helper structure is needed, a logical canonical record should contain only what metrics require:
+
+```text
+query_id
+subject
+stimulus_id
+image_name
+task
+condition
+split
+K
+draw_id
+support_ids
+annotation_width
+annotation_height
+
+where:
+  gt_raw_pixels
+  gt_binned
+  gt_duration_ms_raw
+  pred_text
+  pred_binned
+  pred_duration_ms
+  requested_count
+  accepted_count
+  under_generated
+  canonical_format_valid
+
+semantic:
+  what:
+    gt[]
+    pred[]
+  why:
+    gt[]
+    pred[]
+  how:
+    gt
+    pred
+  parser_errors
+  flat_format_valid
+
+probability:
+  ll_query
+  ig_query
+  transition_count
+  centerbias_source
+  defined
+```
+
+Do not store:
+
+```text
+full image tensors
+full hidden-state tensors
+full-vocabulary logits
+```
+
+---
+
+# 11. File-by-file implementation plan
+
+## `semgaze/evaluation/metrics_scanpath.py` — NEW
+
+Create only after Gates A and B pass.
+
+Responsibilities:
+
+```text
+verified ISP coordinate adapter
+ScanMatch wrapper
+MultiMatch wrapper
+VAME SED wrapper
+duration adaptation
+short-path padding
+failure policy
+draw-level aggregation
+```
+
+Suggested public API:
 
 ```python
-visual_cache = make_visual_cache(bundle)
-projected_r_cache = ProjectedWhereCache(
-    bundle=bundle,
-    split_manifest_identity=split_manifest_identity,
-    cycle_id=(sampler.epoch, global_step),
-)
-try:
-    summary = evaluate_test_epoch(
-        ...,
-        visual_cache=visual_cache,
-        projected_r_cache=projected_r_cache,
-    )
-
-    predictions = predict_epoch(
-        ...,
-        visual_cache=visual_cache,
-        projected_r_cache=projected_r_cache,
-    )
-finally:
-    projected_r_cache.close()
-    visual_cache.close()
+score_scanpath_pair(...)
+aggregate_scanpath_draw(...)
 ```
 
-Use a context manager if it makes exception-safe ownership clearer.
+Must not load the VLM or generate outputs.
 
-If prediction is disabled, do not create a projected-R cache solely for unused data. `evaluate_test_epoch()` may own its normal standalone visual cache.
+## `semgaze/evaluation/metrics_probability.py` — NEW
 
-## Ownership API
+Responsibilities:
 
-Add explicit optional ownership to the high-level evaluation functions.
+```text
+LL/IG tokenizer audit helpers
+exact digit-normalized log probability
+transition scoring
+center-bias loader
+probability batching if Outcome B
+query/draw aggregation
+undefined handling
+```
 
-Recommended signatures:
+Suggested components:
 
 ```python
-def evaluate_test_epoch(
-    bundle,
-    train_by_id,
-    test_records,
-    manifest,
-    *,
-    episode_callback=None,
-    profiler=None,
-    visual_cache=None,
-    projected_r_cache=None,
-):
-    ...
+audit_digit_tokenization(...)
+digit_logprob(...)
+score_gt_transition(...)
+score_probability_batch(...)
+load_canonical_centerbias(...)
+aggregate_probability_draw(...)
 ```
+
+## `semgaze/evaluation/metrics_semantic.py` — NEW
+
+Responsibilities:
+
+```text
+unique semantic unit extraction
+BERTScore scorer lifecycle
+CIDEr-R corpus construction
+branch-level scoring
+failure accounting
+provenance
+```
+
+Suggested components:
 
 ```python
-def predict_epoch(
-    bundle,
-    train_batch,
-    train_by_id,
-    test_records,
-    manifest,
-    *,
-    epoch,
-    step,
-    split_manifest_identity,
-    visual_cache=None,
-    projected_r_cache=None,
-):
-    ...
+collect_semantic_units(records, branch)
+build_bertscorer(...)
+score_bertscore_branch(...)
+score_cider_r_branch(...)
+aggregate_semantic_draw(...)
 ```
 
-Equivalent naming is acceptable.
+## `semgaze/evaluation/records.py` — NEW only if justified
 
-Ownership rule:
+Create only if it materially removes alignment duplication.
+
+Do not create a second independent prediction representation if current rows can be extended safely.
+
+## `semgaze/evaluation/predictions.py`
+
+Required additive changes:
 
 ```text
-if visual_cache is None:
-    function creates a cache
-    function owns it
-    function closes it in finally
-
-if visual_cache is supplied:
-    function validates compatibility
-    function uses it
-    function MUST NOT close it
+preserve existing generated outputs
+expose structured parsed WHERE/semantic fields
+attach condition and annotation dimensions if missing
+preserve support/query identity
+collect complete records by (K,draw)
+compute generation-based metrics only after prediction rows already exist
+do not call prediction_batches twice
+preserve existing train.jsonl/test.jsonl compatibility
 ```
 
-Apply the same principle to any helper that gains optional cache ownership.
+## `semgaze/evaluation/test.py`
 
-Do not use a module-global singleton.
+Touch only as required for LL/IG.
 
-### Cache statistics
-
-`evaluate_test_epoch()` may continue taking a snapshot from `cache.statistics()` for its existing diagnostics even when the cache is externally owned.
-
-Do not reset shared-cache statistics between loss and prediction solely to preserve old counters.
-
-If logging behavior is adjusted, keep scientific metrics unchanged and keep cache diagnostics clearly separate from scientific metrics.
-
-## Standalone compatibility
-
-BACKWARD-COMPATIBILITY BEHAVIOR:
-
-### Standalone loss
-
-Calling:
-
-```python
-evaluate_test_epoch(..., visual_cache=None)
-```
-
-must:
+Outcome A:
 
 ```text
-create its own compatible visual cache
-use it
-close it in finally
-return the same loss/metric result schema
+capture/reduce optional probability sufficient statistics
+leave existing loss values unchanged
+return additive probability diagnostics
 ```
 
-No projected-R cache is required when no later prediction consumer exists.
-
-### Standalone prediction through `predict_epoch`
-
-Calling:
-
-```python
-predict_epoch(..., visual_cache=None, projected_r_cache=None)
-```
-
-must:
+Outcome B:
 
 ```text
-create/own/close its own visual cache
-use current GT WHERE recomputation whenever R is absent
-produce identical predictions
+leave batch_losses unchanged
 ```
 
-### Standalone CLI `evaluate_flat.py`
-
-Preserve the current standalone CLI behavior.
-
-It may continue to explicitly construct one prediction-local `InferenceVisualCache` and pass it to `prediction_batches()`, or it may use a new context/factory helper.
-
-It must not assume an earlier loss pass or an R cache exists.
-
-### Low-level/reference functions
-
-Direct no-cache calls must remain correct.
-
-Do not make correctness depend on integrated orchestration.
-
-## Files/functions affected
-
-FILES/FUNCTIONS AFFECTED:
-
-```text
-semgaze/training/loop.py
-    run_training_loop(...)
-    integrated owner of the shared visual cache and projected-R cache
-
-semgaze/evaluation/test.py
-    evaluate_test_epoch(...)
-    optional externally owned visual cache
-    optional projected-R sink
-
-semgaze/evaluation/predictions.py
-    predict_epoch(...)
-    optional externally owned visual cache
-    optional projected-R source
-    prediction_batches(...) propagates both
-
-evaluate_flat.py
-    preserve standalone prediction ownership/cleanup
-
-semgaze/model/visual_cache.py
-    explicit compatibility validation
-    close() remains idempotent/safe
-
-semgaze/evaluation/cache.py
-    projected-R cache lifecycle
-```
-
-## Required parity checks
-
-PARITY TEST:
-
-Instrument cache object identity and call counts.
-
-For integrated evaluation:
-
-```text
-loss receives visual_cache object V
-prediction receives the exact same object V
-id(loss_cache) == id(prediction_cache)
-prediction sees visual entries already created during loss
-V is not closed between loss and prediction
-V is closed after the complete integrated cycle
-```
-
-On an injected exception during loss:
-
-```text
-shared cache is closed
-training does not continue with a leaked cache
-```
-
-On an injected exception during prediction:
-
-```text
-shared cache is closed
-projected-R cache is cleared
-```
-
-Standalone:
-
-```text
-standalone evaluate_test_epoch owns/closes its cache
-
-standalone predict_epoch owns/closes its cache
-
-standalone evaluate_flat.py closes its cache
-
-an externally supplied cache is never closed by the callee
-```
-
-Also assert that reuse does not cross two consecutive evaluation cycles:
-
-```text
-cycle N cache is closed
-cycle N+1 creates a distinct cache
-no entry from N is addressable in N+1
-```
-
-# Implementation order
-
-Implement in this order. Do not combine all edits into one unverified patch.
-
-## Step 1 — Add cache provenance/ownership primitives
-
-1. Add `ProjectedWhereCache` and exact episode-key construction.
-2. Strengthen `InferenceVisualCache` binding/compatibility rules.
-3. Add optional external-cache ownership semantics to high-level evaluation APIs without changing the current compute path.
-4. Add unit tests for ownership and key collision rules.
-
-At the end of Step 1, predictions/losses must still be baseline-equivalent even if no optimization has fired yet.
-
-## Step 2 — Refactor final visual-feature lookup before pixel H2D
-
-1. Refactor `InferenceVisualCache` to resolve ordered hits/misses from host metadata.
-2. Separate text device transfer from pixel device transfer in `forward_where_batch()`.
-3. Do the same in `generate_where_batch()`.
-4. Transfer/collate only visual misses to GPU.
-5. Preserve exact feature ordering and image-token placement.
-6. Add mixed-hit and compatibility tests.
-
-Do not touch batching sizes or scheduling.
-
-## Step 3 — Share the visual cache across integrated loss→prediction
-
-1. Change `evaluate_test_epoch()` and `predict_epoch()` to accept externally owned caches.
-2. Move integrated cache creation to `run_training_loop()` around both phases.
-3. Keep standalone ownership fallback.
-4. Verify warmed loss entries are visible to prediction.
-5. Verify exception-safe cleanup.
-
-At this point Change 2 and Change 3 should work independently of R reuse.
-
-## Step 4 — Capture projected R during evaluation loss
-
-In `batch_losses()`:
-
-```text
-run current WHERE
-compute current projector output
-split current R per episode
-store exact R for each exact frozen episode in ProjectedWhereCache
-continue semantic loss with the same in-memory R as baseline
-```
-
-Do not read back from the cache during the same loss forward. Caching must be a side effect only; the loss path should consume the freshly computed tensor exactly as before.
-
-## Step 5 — Reuse R during semantic prediction
-
-1. Modify `evaluate_flat_batch()` to look up R before constructing GT WHERE work.
-2. Compute GT WHERE/projector only for R-cache misses.
-3. Merge hit/miss R values back to original episode order.
-4. Refactor semantic query-vision reuse so it can source frozen query visual features from the shared `InferenceVisualCache` when no `WhereOutput` exists.
-5. Preserve fallback behavior.
-6. Apply equivalent optional behavior to `evaluate_flat_episode()` / serial execution if needed so execution mode does not silently disable correctness or cache semantics.
-
-## Step 6 — Run full parity suite
-
-Do not consider implementation complete until all required tests and acceptance criteria below pass.
-
-# Required tests
-
-Add focused tests rather than relying only on an end-to-end long A100 run.
-
-Suggested files:
-
-```text
-tests/test_projected_where_cache.py
-tests/test_visual_cache_h2d.py
-tests/test_evaluation_cache_lifecycle.py
-tests/test_evaluation_reuse_parity.py
-```
-
-Names may differ.
-
-## 1. Projected R key tests
-
-Construct deterministic synthetic/frozen episodes and assert:
-
-```text
-identical exact episode → identical key
-
-different query record → different key
-different query trajectory → different key
-different K → different key
-different draw_id → different key
-different support record → different key
-different support trajectory → different key
-different support order → different key
-```
-
-Assert cache provenance rejects a different:
-
-```text
-model object
-projector object
-processor identity
-split_manifest_identity
-cycle_id
-```
-
-## 2. Loss capture test
-
-Instrument `batch_losses()` with a supplied projected-R cache.
-
-Assert:
-
-```text
-one entry stored per evaluated episode
-stored R shape == [N_fixations, d_model]
-stored dtype == original R dtype
-stored values == original R values
-loss path still consumes freshly computed R
-loss outputs unchanged
-```
-
-## 3. R-hit prediction test
-
-Warm the R cache through loss.
-
-Then run semantic prediction for the identical episode/group.
-
-Count calls to:
-
-```text
-forward_where_batch
-bundle.projector
-```
-
-For an all-hit semantic group, assert the GT semantic path adds:
-
-```text
-0 GT WHERE forwards
-0 projector calls
-```
-
-Free-running WHERE generation remains present when `path='both'`.
-
-## 4. R-miss fallback test
-
-Run standalone prediction with no R cache and with an empty R cache.
-
-Assert current GT WHERE/projector computation occurs and outputs match baseline.
-
-## 5. Mixed R hit/miss batch test
-
-Warm only some episodes.
-
-Assert:
-
-```text
-GT WHERE runs only for misses
-projector runs only for misses
-R is restored to original episode order
-semantic outputs equal baseline for every row
-```
-
-## 6. Semantic-input parity test
-
-For the same episodes, compare baseline recomputed-R semantic preparation against optimized cached-R + shared-visual-cache preparation.
-
-Assert:
-
-```text
-input embedding shape identical
-attention_mask identical
-state insertion positions identical
-image-token feature positions identical
-inputs_embeds torch.equal where possible
-otherwise strict documented allclose tolerance
-```
-
-Do not accept a difference caused by changed preprocessing/tokenization.
-
-## 7. Generated-token parity test
-
-Run baseline and optimized generation with identical checkpoint/hardware/config.
-
-Capture raw generated semantic token IDs before decode.
-
-Assert:
-
-```text
-token IDs exactly equal
-decoded text exactly equal
-parse result exactly equal
-serialized SEMANTIC.PRED exactly equal
-```
-
-## 8. Integrated serialized-record parity
-
-Compare baseline and optimized `_prediction_record()` outputs for deterministic episodes.
-
-Ignore only intentionally non-record timing diagnostics if any are outside the record.
-
-Assert the JSON-serializable prediction record is otherwise exactly equal.
-
-## 9. Loss/metric parity
-
-Compare baseline vs optimized integrated evaluation summaries.
-
-Assert all scientific values are unchanged:
+Existing keys such as:
 
 ```text
 test_where
@@ -1720,305 +1388,1000 @@ test_why
 test_how
 test_flat
 test_total
-per-K aggregation
-existing metrics when present
 ```
 
-Cache diagnostics may be additive but must not be mixed into scientific metrics.
+must remain numerically unchanged.
 
-## 10. Visual miss test
+## `semgaze/where/forward.py`
 
-Empty visual cache:
+Modify only if Outcome A requires exposure of selected predictor states.
+
+Any return field MUST be additive.
+
+Do not:
 
 ```text
-preprocessing executes
-miss pixel is transferred to GPU
-vision executes
-feature equals baseline
+change loss
+change state positions
+detach states
+change projector inputs
+change cache semantics for existing path
+retain [B,L,V] logits
 ```
 
-## 11. Visual hit test
+## `semgaze/model/selected_loss.py`
 
-Second access to the exact compatible image:
+Prefer no change.
+
+If unavoidable for Outcome A, only add an optional interface exposing selected predictor states/metadata or accepting a scalar-reduction callback.
+
+Default behavior must be identical.
+
+## `semgaze/training/loop.py`
+
+Integrate metric summaries into the current evaluation trigger.
+
+Use distinct logs:
 
 ```text
-feature hit
-underlying preprocessing not re-executed
-no pixel H2D for the hit
-no vision call for the hit
-returned feature identical
+[EVAL][LOSS]
+[EVAL][PRED]
+[EVAL][PROB]            # Outcome B only
+[EVAL][METRIC][WHERE]
+[EVAL][METRIC][SEM]
 ```
 
-## 12. Mixed visual hit/miss test
+Persist metric events into `trainer_log.jsonl`.
 
-Warm a subset of images in a same-K physical batch.
+Do not call `predict_epoch()` twice.
 
-Assert:
+Preserve checkpoint ordering.
+
+## `evaluate_flat.py`
+
+Use the same metric implementations.
+
+Frozen prediction artifacts must be sufficient to recompute:
 
 ```text
-GPU pixel batch contains only misses
-vision call receives only misses
-final feature count equals original flattened image count
-final feature order equals original flattened image order
-query_image_index remains correct
-WHERE LM image-token positions unchanged
+SM
+MM
+SED
+BERTScore-F1
+CIDEr-R
 ```
 
-Cover K=1, K=5, and K=10.
+without loading the VLM.
 
-## 13. Repeated-image/dedup test
+LL/IG require model probabilities unless sufficient statistics are already stored.
 
-If the same compatible path appears more than once in a physical visual request:
+Do not regenerate WHERE or semantic outputs for LL/IG.
+
+## `configs/defaults.yaml`
+
+Add explicit validated metric defaults.
+
+Do not depend on package defaults for scientific settings.
+
+## `configs/flat_single.yaml`
+
+Add explicit canonical metric configuration without changing:
 
 ```text
-compute an uncached feature once
-reuse it in every corresponding ordered output position
-do not reorder image positions
+evaluation.k_values
+support sampling
+prediction budget
+loss settings
 ```
 
-## 14. Visual compatibility tests
+## `pyproject.toml`
 
-A cache created for one context must not produce a hit for an incompatible:
+Expected additions as needed:
 
 ```text
-model/checkpoint object
-vision_tower object
-native multimodal projector object
-processor/image_processor
-preprocessing signature
-device
-dtype
-image_seq_length
-image_token_id
+bert-score==0.3.13
+multimatch-gaze==0.1.3
 ```
 
-## 15. Shared lifecycle test
+Do not let BERTScore installation silently replace the project's Transformers version.
 
-Integrated cycle:
+## `third_party/cider_r/` — NEW unless already verified locally
+
+Vendor the minimum authors' CIDEr-R implementation and PTB tokenizer.
+
+Include:
 
 ```text
-create V
-loss receives V
-prediction receives V
-prediction observes warmed entries
-close V after prediction
+README_PROVENANCE.md
+upstream repository
+commit if recoverable
+file SHA256 hashes
+license
+list of copied files
 ```
 
-Use the same test for projected-R cache lifecycle.
+Do not import ordinary `pycocoevalcap.cider` and call it CIDEr-R.
 
-## 16. Standalone ownership tests
+---
 
-Assert:
+# 12. Recommended canonical configuration
+
+Use an explicit structure equivalent to:
+
+```yaml
+evaluation:
+  metrics:
+    enabled: true
+
+    where:
+      scanmatch: true
+      multimatch: true
+      sed: true
+
+      isp_reference:
+        width: 512
+        height: 320
+        scanmatch_xbins: 16
+        scanmatch_ybins: 12
+        scanmatch_temp_bin_ms: 50
+        scanmatch_threshold: 3.5
+        sed_grid_n: 5
+
+      # Must remain unresolved/disabled until Gate B2 passes.
+      coordinate_adapter: null
+
+    probability:
+      ll: true
+      ig: true
+      mode: deepgaze_fast
+      resolution: 100
+      normalize_digits: true
+
+      centerbias:
+        source: canonical_data
+        root: null
+        allow_synthetic_fallback: false
+
+    semantic:
+      bertscore:
+        enabled: true
+        package_version: "0.3.13"
+        lang: en
+        model_type: roberta-large
+        num_layers: 17
+        idf: false
+        rescale_with_baseline: false
+        use_fast_tokenizer: false
+        batch_size: 64
+
+      cider_r:
+        enabled: true
+        implementation: vendored_authors
+        n: 4
+        k_r: 0.8
+        tokenizer: stanford_ptb_reference
+```
+
+BERTScore `batch_size` is engineering-only and must pass batch-size invariance.
+
+Canonical IG config MUST reject missing `centerbias.root` or missing per-image center-bias assets.
+
+---
+
+# 13. Logging and artifacts
+
+## Console
+
+Examples:
 
 ```text
-evaluate_test_epoch(cache=None)
-    creates and closes own visual cache
-
-predict_epoch(cache=None)
-    creates and closes own visual cache
-
-evaluate_flat.py-style standalone prediction
-    does not require projected-R cache
-    recomputes GT WHERE for semantic prediction
-    closes its local visual cache
-
-callee receiving an external cache
-    never closes the external cache
+[EVAL][LOSS] K=1 | draw=1/10 | ...
+[EVAL][PRED] K=1 | draw=1/10 | ...
+[EVAL][PROB] K=1 | draw=1/10 | ...    # Outcome B only
 ```
 
-## 17. Exception cleanup tests
-
-Inject an exception:
+WHERE metric summary:
 
 ```text
-during loss
-during prediction
+[EVAL][METRIC][WHERE]
+K=1 draw=0
+SM=...
+MM=...
+SED=...
+LL=...
+IG=...
+valid=...
+failed=...
+mm_numeric_failures=...
+probability_undefined_queries=...
 ```
 
-Assert integrated externally owned caches are closed by their owner in `run_training_loop()`.
-
-## 18. End-to-end deterministic smoke
-
-On a small deterministic subset containing at least:
+Semantic metric summary:
 
 ```text
-one K=1 episode
-one K=5 episode
-one K=10 episode
-at least two draws for the same query where available
+[EVAL][METRIC][SEM]
+K=1 draw=0
+WHAT_BERTScore_F1=...
+WHAT_CIDEr_R=...
+WHY_BERTScore_F1=...
+WHY_CIDEr_R=...
+HOW_BERTScore_F1=...
+HOW_CIDEr_R=...
+parse_failures=...
 ```
 
-run:
+Do not print one canonical metric line per query outside explicit debug mode.
+
+## Persistent artifact
+
+Integrated evaluation:
 
 ```text
-baseline loss→prediction
-optimized loss→prediction
+predictions/<tag>/metrics.json
 ```
 
-Assert all parity requirements above.
-
-# Acceptance criteria
-
-The task is complete only when all of the following are true.
-
-## Cross-pass R reuse
+Standalone evaluation:
 
 ```text
-[ ] evaluation loss stores the exact projected GT R for each exact frozen
-    evaluation episode when a projected-R cache is supplied
-
-[ ] integrated prediction reuses that R
-
-[ ] an R hit skips the redundant GT WHERE teacher-forced forward
-
-[ ] an R hit skips the redundant SemGaze projector call
-
-[ ] free-running WHERE prediction remains unchanged
-
-[ ] semantic prediction still uses canonical GT WHERE-derived R
-
-[ ] mixed cache hit/miss groups work correctly
-
-[ ] standalone prediction falls back to baseline recomputation
-
-[ ] keying includes query identity, ordered supports, K, draw, and exact
-    WHERE-relevant trajectories
-
-[ ] cache provenance prevents cross-cycle/model/projector/split reuse
-
-[ ] R is not quantized, averaged, truncated, or otherwise altered
+<output-dir>/metrics.json
 ```
 
-## Pixel H2D avoidance
+Required high-level structure:
+
+```json
+{
+  "schema_version": 1,
+  "baseline_commit": "b84e9c752124457244ee34b93e70f72be5690914",
+  "checkpoint": "...",
+  "split_manifest_identity": "...",
+  "config": "...",
+  "split": "test",
+  "metric_provenance": {},
+  "by_k": {
+    "1": {
+      "draws": {
+        "0": {},
+        "1": {}
+      },
+      "draw_mean": {}
+    }
+  }
+}
+```
+
+Persist sufficient provenance to reproduce every metric:
 
 ```text
-[ ] final visual-feature lookup occurs before pixel H2D
+SemGaze baseline commit
+actual implementation HEAD
+checkpoint
+resolved config path/hash
+split manifest identity
+split
+K
+draw_id
+query count
 
-[ ] visual-feature hits transfer zero corresponding image pixels to GPU
+ISP repository/commit/file hashes
+ScanMatch source/hash
+VAME source/hash
+multimatch-gaze version
+coordinate conversion contract/version
 
-[ ] visual-feature hits execute zero corresponding frozen vision work
+DeepGaze source/hash
+probability outcome A/B
+probability scoring mode
+digit normalization
+tokenizer identity/revision
+center-bias source/hash
 
-[ ] only visual misses are assembled into the GPU visual-compute batch
+bert-score version
+Transformers version
+BERTScore model/layer/hash/settings
 
-[ ] final visual features are restored to the original flattened image order
+CIDEr-R upstream source/hashes
+n
+k_r
+PTB tokenizer provenance
 
-[ ] query feature indexing remains correct
-
-[ ] multimodal token count/order is unchanged
-
-[ ] native preprocessing semantics are unchanged
-
-[ ] visual cache compatibility is strict for model/processor/preprocessing/
-    device/dtype
-
-[ ] no global or stale cross-checkpoint cache is introduced
+total/valid/failure counts
+under-generation count
+format-invalid count
+mm_numeric_failure_count
+semantic parse-failure count
+LL/IG defined/undefined counts
 ```
 
-## Shared visual-cache lifecycle
+---
+
+# 14. Required tests
+
+## 14.1 ISP coordinate parity — blocking
+
+Create a fixture equivalent to:
 
 ```text
-[ ] integrated loss and prediction receive the same InferenceVisualCache instance
-
-[ ] prediction can hit entries warmed during loss
-
-[ ] evaluate_test_epoch does not close an externally owned cache
-
-[ ] predict_epoch does not close an externally owned cache
-
-[ ] standalone loss still creates/owns/closes its own cache
-
-[ ] standalone prediction still creates/owns/closes its own cache
-
-[ ] shared cache closes after the complete integrated evaluation cycle
-
-[ ] exception paths close the shared cache
-
-[ ] a later evaluation cycle receives a new cache
+tests/fixtures/isp_coordinate_pairs.json
 ```
 
-## Scientific parity
+Include real matched records with:
 
 ```text
-[ ] evaluation query/support episodes unchanged
-[ ] K/draw semantics unchanged
-[ ] WHERE GT serialization unchanged
-[ ] WHERE generated token IDs/text unchanged
-[ ] semantic insertion positions unchanged
-[ ] semantic generated token IDs/text unchanged
-[ ] serialized prediction records unchanged
-[ ] loss values unchanged
-[ ] metrics unchanged
-[ ] no training behavior changed
+subject
+task
+image
+condition
+raw SemGaze GT coordinates
+ISP reference coordinates
+image dimensions
 ```
 
-## Final implementation report
+Assert exact/tolerance-matched GT conversion.
 
-After implementation, report:
+Do not enable SM/MM/SED until this passes and Gate B2 is resolved.
+
+## 14.2 ScanMatch parity
+
+Test:
 
 ```text
-audited git commit
-files changed
-exact ownership API introduced
-exact projected-R key definition
-where R is stored and why it preserves exact values
-how semantic query vision is obtained when GT WhereOutput is skipped
-how visual hits are resolved before H2D
-how mixed hit/miss image order is restored
-which standalone paths were tested
-parity test results
-any remaining limitations
+normal path
+1-fixation path
+2-fixation path
+edge coordinates
+duration near TempBin boundaries
 ```
 
-Do not report speculative speedup numbers as acceptance evidence. The acceptance condition is removal of the three redundant operations with exact scientific parity.
-
-# Explicitly out of scope
-
-Do not implement or redesign any of the following in this task:
+Compare:
 
 ```text
-FlashAttention
-FlashAttention2
-varlen attention
-torch.compile
-StaticCache
-DynamicCache tuning
-custom greedy decoding
-prefix-KV reuse
-generation API replacement
-WHERE generation algorithm changes
-semantic generation algorithm changes
-WHERE generation-length changes
-semantic generation-length changes
-EOS/stopping changes
-K changes
-support-draw changes
-support sampling changes
-evaluation-sample reduction
-metric changes
-approximate metrics
-metric batching redesign
-physical batch-size tuning
-batching-policy tuning
-length-bucketing tuning
-training batching changes
-training sampling changes
-training loss changes
-training backward changes
-model architecture changes
-LoRA changes
-projector architecture changes
-input-resolution changes
-persistent/global/disk-backed visual caches
-cross-process caches
-cross-checkpoint cache reuse
+no-duration score
+duration score
+final harmonic-mean SM
 ```
 
-Do not opportunistically clean up unrelated code.
-
-The implementation should be narrowly scoped to:
+Target tolerance:
 
 ```text
-1. exact cross-pass GT projected-R reuse;
-2. final frozen visual-cache lookup before pixel H2D;
-3. one explicit shared frozen visual cache across integrated loss→prediction.
+abs(new - ref) <= 1e-6
 ```
+
+unless the audited dependency proves a justified larger tolerance.
+
+## 14.3 MultiMatch parity
+
+Compare all five components and final MM.
+
+Include 1-, 2-, and >=3-fixation paths to validate padding.
+
+Target tolerance:
+
+```text
+<= 1e-6
+```
+
+Also test LOCK 5 numerical-degeneracy handling.
+
+## 14.4 SED parity
+
+Fixtures:
+
+```text
+identical
+substitution
+insertion
+deletion
+edge coordinates
+5x5 boundaries
+```
+
+Require exact raw integer equality per pair.
+
+## 14.5 LL tokenizer preflight
+
+Use real checkpoint processor/tokenizer and coordinates:
+
+```text
+00
+09
+10
+99
+```
+
+The test MUST resolve Outcome A or Outcome B explicitly.
+
+## 14.6 DeepGaze LL parity
+
+Use deterministic phase logits for all ten digit alternatives.
+
+Test leading-zero cases.
+
+Tolerance:
+
+```text
+<= 1e-6
+```
+
+## 14.7 DeepGaze IG parity
+
+Test a fixed center-bias map for:
+
+```text
+center
+corners
+x/y ordering
+100x100 edges
+```
+
+Compare:
+
+```text
+(LL - logCB) / ln(2)
+```
+
+## 14.8 Center-bias loader parity
+
+Compare SemGaze loader to audited DeepGaze behavior after:
+
+```text
+exp
+resize
+normalize
+clip
+log
+```
+
+## 14.9 BERTScore parity
+
+Test:
+
+```text
+identical text
+paraphrase
+different text
+punctuation
+multiple spaces/newlines
+empty candidate extension
+```
+
+Assert official F1 under frozen settings and record scorer hash.
+
+## 14.10 CIDEr-R parity
+
+Use a fixed corpus with:
+
+```text
+single refs
+multiple refs if supported
+repeated words
+length differences
+punctuation
+case differences
+```
+
+Compare per-sample and corpus score against authors' reference pipeline including PTB tokenization.
+
+## 14.11 Existing-loss regression
+
+Before/after metric integration must preserve:
+
+```text
+test_where
+test_what
+test_why
+test_how
+test_flat
+test_total
+```
+
+exactly where deterministic or within an appropriately tiny tolerance.
+
+## 14.12 Existing-generation regression
+
+Freeze checkpoint/config/seed and compare:
+
+```text
+WHERE.PRED
+SEMANTIC.PRED
+where_generation diagnostics
+semantic_generation diagnostics
+```
+
+They must remain unchanged.
+
+## 14.13 Generate-call-count regression
+
+Instrument `bundle.model.generate`.
+
+Enabling any metric MUST NOT increase generation call count:
+
+```text
+SM
+MM
+SED
+BERTScore
+CIDEr-R
+LL
+IG
+```
+
+Outcome B may add ordinary forward/probing calls only.
+
+## 14.14 Query coverage and key-join integrity
+
+For each `(K,draw)`:
+
+```text
+metric query IDs == expected unseen test query IDs
+no duplicates
+no omissions
+```
+
+For cross-traversal joins:
+
+```text
+loss/prob key set == prediction key set
+```
+
+using exact key:
+
+```text
+(query_id, K, draw_id)
+```
+
+## 14.15 Personalized pairing
+
+Use two subjects on the same stimulus with intentionally different GT paths.
+
+Assert each subject is scored against its own GT.
+
+## 14.16 Semantic-unit alignment and identity
+
+Require:
+
+```text
+WHAT count = N expected fixations
+WHY count = M GT WHY groups
+HOW count = 1
+```
+
+Assert all semantic-unit IDs are unique and deterministic.
+
+## 14.17 Batch-size invariance
+
+Using frozen predictions:
+
+```text
+batch_size=1
+batch_size=N
+```
+
+must produce equal:
+
+```text
+SM
+MM
+SED
+BERTScore-F1
+CIDEr-R
+```
+
+within deterministic tolerance.
+
+Probability batch-size changes must also preserve LL/IG within floating-point tolerance.
+
+## 14.18 Draw isolation
+
+CIDEr-R document frequency MUST be constructed independently for each complete `(K,draw,branch)` corpus.
+
+## 14.19 K isolation
+
+When `evaluation.k_values=[1,5,10]`, output independent blocks for all K values with no pooled canonical score.
+
+## 14.20 LL/IG undefined handling
+
+Test:
+
+```text
+query with 0 fixation
+query with 1 fixation
+query with >=2 fixations
+draw with zero defined probability queries
+K with all draws undefined
+```
+
+Assert JSON uses `null`, never `NaN`, and counters follow LOCK 7.
+
+## 14.21 Smoke before full run
+
+Before the full configured query universe:
+
+```text
+run tiny deterministic subset
+verify record counts
+verify generation call counts
+verify Outcome A/B
+verify provenance
+verify JSON serialization
+verify key joins
+verify failure counters
+```
+
+Only then run full evaluation.
+
+---
+
+# 15. Performance constraints
+
+Metric integration must add:
+
+```text
+0 new autoregressive VLM generation passes
+```
+
+Preferred cost:
+
+```text
+SM/MM/SED -> CPU from existing predictions
+BERTScore -> separate encoder, after VLM tensors are releasable
+CIDEr-R -> CPU
+LL/IG -> existing WHERE loss forward if Outcome A; otherwise one explicit probability path
+```
+
+Do not retain full `[B,L,V]` logits across the dataset.
+
+For LL/IG:
+
+```text
+select required predictor positions
+select digit logits
+reduce to scalar
+release tensors
+```
+
+Reuse one BERTScorer per evaluation event.
+
+Reuse ScanMatch objects across queries.
+
+Do not broaden this task into DDP/multi-GPU work.
+
+---
+
+# 16. Implementation order
+
+The coding agent MUST work in this order.
+
+## Step 1 — verify pinned baseline
+
+Confirm exact starting commit and clean/known worktree state.
+
+## Step 2 — provenance preflight
+
+Resolve:
+
+```text
+ISP source
+CIDEr-R source
+center-bias assets
+source hashes
+```
+
+## Step 3 — coordinate parity
+
+Resolve raw GT -> ISP transform.
+
+Search for canonical predicted-bin inverse.
+
+If none exists, STOP SM/MM/SED and report owner blocker.
+
+## Step 4 — scanpath wrappers
+
+Only after Gate B2 passes:
+
+```text
+SM
+MM
+SED
+```
+
+Pass standalone reference parity tests before integration.
+
+## Step 5 — semantic references
+
+Freeze/vendor CIDEr-R and BERTScore.
+
+Pass standalone parity tests.
+
+## Step 6 — LL/IG tokenizer audit
+
+Explicitly choose Outcome A or Outcome B.
+
+## Step 7 — LL/IG implementation
+
+Implement exact DeepGaze scoring while preserving exact SemGaze conditioning context.
+
+Pass probability fixtures.
+
+## Step 8 — canonical record extension
+
+Add only required fields and exact identity keys.
+
+## Step 9 — integrate generation-based metrics
+
+Compute SM/MM/SED and BERTScore/CIDEr-R from already-generated records.
+
+Verify zero additional generation calls.
+
+## Step 10 — integrate LL/IG
+
+Reuse Outcome A statistics or add explicit Outcome B pass.
+
+Use key-based joins only.
+
+## Step 11 — logging and `metrics.json`
+
+Add provenance, per-draw values, K means, and failure counters.
+
+## Step 12 — invariance/regression smoke
+
+Verify:
+
+```text
+loss unchanged
+generation unchanged
+support IDs unchanged
+query coverage unchanged
+key joins exact
+generate call count unchanged
+batch-size invariance
+```
+
+## Step 13 — full evaluation
+
+Only after all applicable gates and tests pass.
+
+---
+
+# 17. Acceptance criteria
+
+Implementation is accepted only if all applicable items below are true.
+
+1. Starting baseline is verified as `b84e9c752124457244ee34b93e70f72be5690914`.
+2. Existing evaluation losses remain numerically unchanged.
+3. Existing WHERE prediction text remains unchanged.
+4. Existing semantic prediction text remains unchanged.
+5. Existing support sampling remains unchanged.
+6. Existing K/draw semantics remain unchanged.
+7. Query membership remains unchanged.
+8. Semantic conditioning remains teacher-forced GT XYD + gold WHY groups.
+9. SM matches audited ISP-SENet COCO-Search18 behavior.
+10. Canonical SM is the harmonic mean of aggregated ScanMatch without-duration and with-duration.
+11. ScanMatch uses 512x320, 16x12, TempBin=50 ms, Threshold=3.5, Offset=(0,0).
+12. MM uses `multimatch-gaze==0.1.3` or proven-equivalent source.
+13. MM uses all five components including duration.
+14. MM preserves short-path padding.
+15. MM numerical degeneracy follows LOCK 5 and never silently drops a query.
+16. SED is the exact ISP/VAME spatial String Edit Distance.
+17. SED uses the exact 5x5 partition and raw distance.
+18. Scanpath metrics pair exact same-subject prediction/GT.
+19. Raw GT -> ISP transform is proven by executable parity.
+20. Predicted-bin -> ISP mapping has historical provenance or explicit owner approval.
+21. No guessed inverse mapping is silently introduced.
+22. GT duration uses raw verified dwell duration rather than model serialization clipping.
+23. LL uses GT conditional probabilities, not generated coordinates.
+24. LL follows exact digit-normalized DeepGaze-fast spatial scoring.
+25. LL/IG preserve exact SemGaze episode conditioning.
+26. Initial fixation is not scored by LL/IG.
+27. Duration is excluded from canonical spatial LL.
+28. LL is natural-log probability.
+29. IG uses `(LL - center-bias log probability) / ln(2)`.
+30. IG is reported in bits.
+31. Canonical IG uses real center-bias data and fails closed when missing.
+32. Tokenizer preflight explicitly records Outcome A or B.
+33. Outcome A adds no VLM backbone forward.
+34. Outcome B is logged as `[EVAL][PROB]`.
+35. Outcome B performs no WHERE generation.
+36. Outcome B performs no semantic generation.
+37. Cross-traversal data are joined by `(query_id,K,draw_id)` with equality assertions.
+38. BERTScore uses `bert-score==0.3.13`, `roberta-large`, layer 17, `idf=false`, no baseline rescaling, slow tokenizer.
+39. BERTScore official hash is persisted.
+40. BERTScore F1 is the canonical semantic BERT metric.
+41. CIDEr-R matches the authors' implementation.
+42. CIDEr/CIDEr-D are not substituted.
+43. CIDEr-R uses the authors' PTB tokenizer path.
+44. CIDEr-R uses the complete branch corpus per `(K,draw)`.
+45. CIDEr-R is not computed independently per minibatch.
+46. WHAT/WHY/HOW unit identities are unique and deterministic.
+47. WHAT = one unit per expected fixation.
+48. WHY = one unit per GT WHY group.
+49. HOW = one unit per query.
+50. WHAT/WHY/HOW are not concatenated for canonical metrics.
+51. Invalid WHERE generations are counted.
+52. Missing semantic units are counted.
+53. Parse failures are counted.
+54. Failed model outputs are never silently removed from denominators except LL/IG structural undefined queries per LOCK 7.
+55. LL/IG undefined values serialize as `null`, never `NaN` or arbitrary zero.
+56. Predictions are never repaired with GT content.
+57. Metric computation adds zero generation traversals.
+58. Enabling metrics leaves `model.generate()` call count unchanged.
+59. Implementation remains valid for K=1/5/10 and other configured valid K values.
+60. Different K values are not pooled.
+61. Different draws remain independently reproducible.
+62. K-level metrics are means of complete draw-level metrics.
+63. Metric provenance is sufficient to reproduce values.
+64. Standalone `evaluate_flat.py` uses the same wrappers.
+65. Frozen predictions can be rescored for all non-probability metrics without VLM load.
+66. Canonical paper-facing metrics are test-split metrics.
+67. `log_z` is absent or validated as a fixed no-op `0.0` compatibility field.
+68. Tiny deterministic smoke passes before full evaluation.
+
+---
+
+# 18. Forbidden changes
+
+The implementing agent MUST NOT:
+
+```text
+implement SM from memory
+implement MM from memory
+implement SED from memory
+substitute generic metric libraries with matching names
+replace ISP ScanMatch without parity
+use semantic/text edit distance as scanpath SED
+treat SemGaze 0..99 bins as 512x320 pixels
+invent a prediction-bin inverse
+infer prediction inverse solely from GT parity
+round-trip raw GT through binned coordinates unnecessarily
+use clipped DDD as GT duration without reference proof
+omit MultiMatch duration
+change MultiMatch padding
+silently drop NaN/-1 MM model predictions
+cross subjects
+average all human scanpaths for an image
+silently drop scanpath failures
+silently drop semantic failures
+repair model output with GT
+use CIDEr or CIDEr-D instead of CIDEr-R
+compute CIDEr-R per minibatch
+estimate CIDEr-R DF from candidates instead of the reference corpus
+silently change BERTScore model/layer/settings
+omit BERTScore hash
+compute LL from generated x/y
+compute LL from ordinary WHERE CE without equivalence proof
+score fixation 0 in LL/IG
+include duration in canonical spatial LL
+replace the SemGaze causal context with a DeepGaze prompt for Outcome B
+use synthetic Gaussian center bias for canonical IG
+call model.generate() for LL/IG
+call model.generate() solely for any metric
+rerun free-running WHERE for metrics
+rerun semantic generation for metrics
+join loss/prediction rows by array position without key assertions
+write JSON NaN for undefined LL/IG
+convert undefined LL/IG to zero
+retain full-vocabulary logits for the evaluation set
+change WHERE generation length semantics
+change semantic conditioning
+change gold WHY semantics
+change training loss weights
+change optimization behavior
+change model architecture
+change support sampling
+change persisted support draws
+change split protocol
+change unseen-subject protocol
+hardcode K=1
+hardcode query count
+add DDP/multi-GPU behavior
+rewrite the entire evaluator when additive metric integration is sufficient
+```
+
+---
+
+# 19. Mandatory stop conditions
+
+The agent MUST stop the affected implementation and report a blocker instead of guessing when any of these occur:
+
+```text
+HEAD baseline mismatch
+unverified ISP source/provenance
+no scientifically justified predicted-bin -> ISP inverse
+GT/ISP coordinate parity failure
+CIDEr-R authors' source cannot be verified
+canonical center-bias data are missing for IG
+tokenizer audit cannot establish exact Outcome A or a valid Outcome B
+Outcome B would require changing SemGaze conditioning context
+cross-traversal key sets differ
+reference parity tests fail beyond justified tolerance
+existing loss or generation changes after metric integration
+metric enablement increases model.generate call count
+```
+
+A partial implementation is acceptable when blocked metrics remain explicitly disabled and the blocker is documented.
+
+Do not bypass a stop condition to make the pipeline run.
+
+---
+
+# 20. Final scientific locks
+
+```text
+SM:
+  ISP-SENet COCO-Search18 ScanMatch
+  mean without duration
+  mean with duration
+  harmonic mean of those two means
+
+MM:
+  ISP-SENet MultiMatch
+  multimatch-gaze 0.1.3 behavior
+  vector + direction + length + position + duration
+  mean per component then mean of five components
+  deterministic zero extension for model-side numerical degeneracy
+
+SED:
+  ISP-SENet VAME String Edit Distance
+  5x5 spatial string
+  raw edit distance
+  same-subject pairing
+
+LL:
+  DeepGaze fast spatial GT probability definition
+  exact SemGaze episode conditioning context
+  four digit phases
+  per-phase digit normalization
+  natural log
+  skip first fixation
+  query mean -> draw mean -> K draw mean
+
+IG:
+  (LL - canonical center-bias log probability) / ln(2)
+  bits/fixation
+  same transition/query/draw hierarchy
+  no synthetic canonical fallback
+
+BERTScore-F1:
+  bert-score 0.3.13
+  roberta-large
+  layer 17
+  English
+  idf=false
+  rescale=false
+  slow tokenizer
+  whitespace normalization only
+  official hash recorded
+
+CIDEr-R:
+  authors' implementation
+  authors' PTB tokenizer path
+  n=4
+  k_r=0.8
+  reference-corpus DF
+  complete branch corpus per K/draw
+  never per minibatch
+
+Semantic units:
+  WHAT = per expected fixation
+  WHY  = per GT WHY group
+  HOW  = per query
+  unique deterministic unit IDs
+
+Aggregation:
+  logical query/unit
+    -> complete draw
+    -> draw mean within K
+
+Identity join:
+  (query_id, K, draw_id)
+
+Canonical split:
+  test
+
+Never pool K.
+Never cross subjects.
+Never silently remove model failures.
+Never regenerate outputs for metrics.
+Never invent unresolved scientific mappings.
+```
+
+Implementation is scientifically complete only when every enabled metric has passed its required provenance, parity, regression, and invariance gates.
