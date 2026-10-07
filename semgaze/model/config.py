@@ -211,8 +211,9 @@ def validate_config(config):
     if not isinstance(where_metrics, dict) or not isinstance(probability_metrics, dict) or not isinstance(semantic_metrics, dict):
         raise ValueError('evaluation.metrics sections must be mappings')
     scanpath_enabled = any(bool(where_metrics.get(name)) for name in ('scanmatch', 'multimatch', 'sed'))
-    if scanpath_enabled and not where_metrics.get('coordinate_adapter'):
-        raise ValueError('scanpath metrics require a verified coordinate_adapter; predicted-bin inverse is unresolved')
+    if scanpath_enabled and where_metrics.get('coordinate_adapter') not in (
+            'deepgaze_vl_predict_scanpath_round', 'deepgaze_historical_round'):
+        raise ValueError('scanpath metrics require a verified DeepGaze-VL coordinate_adapter label')
     if probability_metrics.get('ig'):
         centerbias = probability_metrics.get('centerbias', {})
         if centerbias.get('source') != 'canonical_data' or centerbias.get('allow_synthetic_fallback') is not False or not centerbias.get('root'):

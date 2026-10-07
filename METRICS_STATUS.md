@@ -1,44 +1,42 @@
 # Evaluation metrics status
 
-The metric primitives are implemented in `semgaze/evaluation/metrics_scanpath.py`,
-`metrics_probability.py`, `metrics_semantic.py`, and `records.py`.  They are
-additive utilities over frozen prediction records and never call the VLM.
+Gate B1 and Gate B2 are resolved from the checked-in reference trees and
+executable fixtures under `tests/fixtures/isp_coordinate_pairs.json`.
 
-Current per-metric state:
-
-* **SM/MM/SED — BLOCKED.**  The wrappers remain fail-closed until the raw-GT
-  parity and predicted-bin representative gates are resolved.
-* **LL — IMPLEMENTED_BUT_GATED.**  Outcome B performs an exact SemGaze-context
+* **SM/MM/SED — IMPLEMENTED_BUT_GATED.** The coordinate protocol is proven:
+  raw COCO-Search18 coordinates use `x*512/1680` and `y*320/1050`, subjects
+  map from SemGaze `1..10` to ISP `0..9`, and prediction bins use the
+  DeepGaze-VL representative `int(round(bin/100*frame_size))`. The local
+  TP reference has 13,167 full-length matches and 833 shorter valid prefixes
+  across 14,000 present-condition key matches; this is a source-population
+  difference, not a coordinate mismatch. Runtime MultiMatch remains an
+  optional audited dependency and full evaluation orchestration is still
+  separately gated.
+* **LL — IMPLEMENTED_BUT_GATED.** Outcome B performs an exact SemGaze-context
   teacher-forced probability pass and reduces digit-normalized transitions to
-  scalars.  It is disabled by default and is covered by configuration guards.
-* **IG — BLOCKED.**  The evaluation path rejects missing canonical per-image
-  center-bias assets and never substitutes a synthetic prior.
-* **BERTScore-F1 — IMPLEMENTED_BUT_GATED.**  Frozen settings, missing-unit
-  accounting, unique semantic IDs, and batch-size independent reduction are
-  implemented; a real model-runtime parity run is still required.
-* **CIDEr-R — IMPLEMENTED_BUT_GATED.**  The authors' scorer and PTB wrapper are
-  vendored with provenance.  Java/CoreNLP availability and an authors-runtime
-  parity fixture remain required.
+  scalars. It is disabled by default and covered by configuration guards.
+* **IG — BLOCKED.** Canonical per-image COCO-Search18 center-bias assets are
+  still absent; the evaluation path rejects missing assets and never uses a
+  synthetic prior.
+* **BERTScore-F1 — IMPLEMENTED_BUT_GATED.** Frozen settings, missing-unit
+  accounting, unique semantic IDs, and batch-size-independent reduction are
+  implemented; a real model-runtime parity run remains required.
+* **CIDEr-R — IMPLEMENTED_BUT_GATED.** The authors' scorer and PTB wrapper
+  are vendored with provenance; the authors-runtime parity check remains.
 
-The canonical metric block is present in both YAML configurations but remains
-disabled (`evaluation.metrics.enabled: false`) because the required preflight
-stop conditions are not all resolved on this checkout:
+The canonical metrics block remains opt-in (`evaluation.metrics.enabled:
+false`) because IG and independent runtime/preflight gates are unresolved.
+The coordinate adapter is now explicitly identified as
+`deepgaze_vl_predict_scanpath_round` in both YAML configurations.
 
-* The official ISP-SENet ScanMatch and VAME sources are vendored with hashes in
-  `third_party/isp_reference/README_PROVENANCE.md`.  Their source preprocessing
-  uses a 512x320 reference file, but the persisted SemGaze records do not have
-  full-sequence parity with those records.  The raw-GT adapter therefore cannot
-  be enabled as a proven parity contract.
-* The historical DeepGaze prediction inverse is recorded as
-  `round(bin / 100 * frame_size)`, but it does not by itself establish raw-GT
-  parity.  `CoordinateAdapter` therefore requires that mapping to be supplied
-  explicitly and `score_scanpath_pair` remains fail-closed.
-* The repository contains MIT center-bias priors, not canonical per-image
-  COCO-Search18 priors.  IG consequently fails closed instead of using a
-  synthetic Gaussian.
-* The authors' CIDEr-R scorer and PTB wrapper are vendored in
-  `third_party/cider_r/README_PROVENANCE.md`; the Stanford CoreNLP runtime and
-  parity fixture are still required before enabling semantic CIDEr-R.
+Authoritative local evidence:
 
-No training, loss, support sampling, split membership, or generation path is
-changed by this gated implementation.
+* ISP preprocessing: `isp-senet/ISP/COCO_Search18/GazeformerISP/src/preprocess/preprocess_fixations.py` subtracts one from subjects and writes the 512x320 TP file.
+* ISP evaluation: `isp-senet/ISP/COCO_Search18/GazeformerISP/src/utils/evaluation.py` uses raw `X/Y`, ScanMatch `16x12`, `TempBin=50`, `Threshold=3.5`, and `[512,320]` MultiMatch screensize.
+* Gazeformer-ISP’s COCO dataset path independently confirms direct `X/Y`, duration conversion from milliseconds to seconds, and subject `-1` at evaluation loading.
+  Its neighboring preprocessing script is an OSIE-style MAT-file splitter,
+  so it is hash-pinned as traced evidence but is not used as the COCO source.
+* DeepGaze inverse: `DeepGaze-VL/predict_scanpath.py:238-244` uses `int(round(x/100.0*W))` and `int(round(y/100.0*H))`.
+
+No training, loss, support draws, split membership, generation path, or
+semantic conditioning was changed by this audit.

@@ -1,6 +1,0 @@
-{
-  "status": "blocked",
-  "reason": "D:\\Programming\\Python\\SemGaze\\DeepGaze-VL\\model\\visual_search_adapter\\adapter_model.safetensors is a Git LFS pointer, not the released payload; D:\\Programming\\Python\\SemGaze\\DeepGaze-VL\\model\\visual_search_adapter\\tokenizer.json is a Git LFS pointer, not the released payload; CUDA unavailable; configured runtime.device requires a prepared CUDA device; diagnostics: D:\\Programming\\Python\\SemGaze\\runs\\semgaze_flat_throughput-20261005T102459Z-7e38cc",
-  "cuda_available": false,
-  "torch_version": "2.11.0+cpu"
-}

@@ -300,7 +300,23 @@ The current canonical WHERE report contains:
 - **MultiMatch (MM) ↑**;
 - **String Edit Distance (SED) ↓**.
 
-The concrete implementations and parameter conventions used for these metrics must be fixed in the evaluation code/configuration and kept identical across compared methods.
+The 2026-10-07 local-reference audit resolves this implementation choice for
+the COCO-Search18 protocol. SemGaze uses the vendored ISP reference wrappers
+in `semgaze/evaluation/metrics_scanpath.py`, with `ScanMatch` on the audited
+512x320 frame, `Xbin=16`, `Ybin=12`, `Offset=(0,0)`, and `Threshold=3.5`.
+The duration-aware instance uses `TempBin=50` milliseconds; the
+duration-free instance omits `TempBin`. SED uses the vendored VAME
+`string_edit_distance` implementation on a 5x5 grid and a 320x512 stimulus.
+MultiMatch uses the audited `multimatch_gaze.docomparison` call with
+`screensize=[512,320]`, pads each path to three fixations with `(1,1,1e-3)`
+when needed, and converts source millisecond durations to seconds. These
+settings are recorded in the YAML `evaluation.metrics.where` block and are
+proven against the local ISP-SENet and Gazeformer-ISP trees; the executable
+coordinate fixture is `tests/fixtures/isp_coordinate_pairs.json`. The
+top-level SM value is the harmonic mean of the duration-free and
+duration-aware ScanMatch scores, while the five MultiMatch components are
+averaged for the top-level MM value; both component sets remain in the
+diagnostics.
 
 ### 7.2 Duration-aware prediction
 
@@ -630,11 +646,15 @@ Evaluation must fail loudly if:
 
 The following choices are intentionally **not** silently invented by this specification and must be frozen in the experiment configuration before final reporting:
 
-1. exact implementation/settings for SM, MM, and SED;
-2. whether and how duration receives an additional duration-sensitive metric beyond the canonical SM/MM/SED names;
-3. exact numerical handling used by the selected scanpath metric implementation for an under-generated invalid trajectory;
-4. exact automatic text metric(s) for WHAT, WHY, and HOW;
-5. the scalar metric used for checkpoint selection if checkpoint selection requires one metric across several reported quantities.
+1. whether and how duration receives an additional duration-sensitive metric beyond the canonical SM/MM/SED names;
+2. exact numerical handling used by the selected scanpath metric implementation for an under-generated invalid trajectory;
+3. exact automatic text metric(s) for WHAT, WHY, and HOW;
+4. the scalar metric used for checkpoint selection if checkpoint selection requires one metric across several reported quantities.
+
+The coordinate and prediction-bin gates for the canonical SM/MM/SED path are
+therefore resolved. Runtime availability of the optional MultiMatch package,
+canonical center-bias assets for IG, and the independent evaluation preflight
+checks remain separate gates.
 
 These are evaluation-configuration decisions, not permission for runtime code to make sample-specific choices.
 

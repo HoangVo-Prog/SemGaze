@@ -163,12 +163,12 @@ evaluation:
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
   metrics:
-    enabled: false
+    enabled: true
     split: test
     where:
-      scanmatch: false
-      multimatch: false
-      sed: false
+      scanmatch: true
+      multimatch: true
+      sed: true
       isp_reference:
         width: 512
         height: 320
@@ -177,9 +177,9 @@ evaluation:
         scanmatch_temp_bin_ms: 50
         scanmatch_threshold: 3.5
         sed_grid_n: 5
-      coordinate_adapter: null
+      coordinate_adapter: deepgaze_vl_predict_scanpath_round
     probability:
-      ll: false
+      ll: true
       ig: false
       outcome: B
       mode: deepgaze_fast
@@ -191,7 +191,7 @@ evaluation:
         allow_synthetic_fallback: false
     semantic:
       bertscore:
-        enabled: false
+        enabled: true
         package_version: "0.3.13"
         lang: en
         model_type: roberta-large
@@ -201,7 +201,7 @@ evaluation:
         use_fast_tokenizer: false
         batch_size: 64
       cider_r:
-        enabled: false
+        enabled: true
         implementation: vendored_authors
         n: 4
         k_r: 0.8

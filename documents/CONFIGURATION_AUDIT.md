@@ -61,7 +61,7 @@ were created and are not reapplied to overwrite resumed weights.
 ## Validation intentionally retained
 
 Missing files and images; malformed JSON/records; checksum and persisted membership
-mismatches; duplicate IDs and train/validation leakage; unresolved coordinate frames;
+mismatches; duplicate IDs and train/validation leakage; unresolved annotation-frame declarations;
 finite numeric fixation fields and aligned X/Y/duration lengths; semantic partitions and
 nonempty text; same-subject/distinct/excluded-query supports and frozen order; exclusion
 of configured unseen subjects from updates; tokenizer IDs/templates and atomic boundary

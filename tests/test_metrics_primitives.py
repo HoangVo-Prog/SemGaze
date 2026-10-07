@@ -6,7 +6,13 @@ from semgaze.evaluation.metrics_probability import (
     aggregate_probability_draw, aggregate_probability_k, digit_logprob,
     score_gt_transition, score_probability_query,
 )
-from semgaze.evaluation.metrics_scanpath import CoordinateAdapter, CoordinateProtocolError, _levenshtein, _sed_symbols
+from semgaze.evaluation.metrics_scanpath import (
+    CoordinateAdapter,
+    CoordinateProtocolError,
+    VERIFIED_PREDICTION_INVERSE,
+    _levenshtein,
+    _sed_symbols,
+)
 from semgaze.evaluation.metrics_semantic import (collect_semantic_units, normalize_text,
                                                  score_bertscore_branch, score_cider_r_branch,
                                                  semantic_units_from_prediction)
@@ -15,9 +21,9 @@ from semgaze.evaluation.records import (assert_key_sets_equal, expected_episode_
 
 
 def test_historical_prediction_inverse_and_sed_boundaries():
-    with pytest.raises(CoordinateProtocolError):
-        CoordinateAdapter()
-    adapter = CoordinateAdapter(prediction_inverse="deepgaze_historical_round")
+    adapter = CoordinateAdapter()
+    assert adapter.prediction_inverse == VERIFIED_PREDICTION_INVERSE
+    assert CoordinateAdapter(prediction_inverse="deepgaze_historical_round")
     assert adapter.prediction_bins([0, 99], [0, 99]) == [(0, 0), (507, 317)]
     assert _sed_symbols([(0, 0, 10), (101, 63, 10), (102, 64, 10), (511, 319, 10)]) == "aagz"
     assert _levenshtein("abc", "ac") == 1

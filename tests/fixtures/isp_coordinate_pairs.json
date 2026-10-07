@@ -1,0 +1,310 @@
+{
+  "provenance": {
+    "isp_preprocess": "isp-senet/ISP/COCO_Search18/GazeformerISP/src/preprocess/preprocess_fixations.py",
+    "isp_records": "isp-senet/ISP/COCO_Search18/GazeformerISP/src/data/TP_fixations.json",
+    "semgaze_records": "data/split/COCO_Search18/COCOSearch-18.json",
+    "raw_frame": {
+      "width": 1680,
+      "height": 1050
+    },
+    "isp_frame": {
+      "width": 512,
+      "height": 320
+    },
+    "subject_transform": "isp_subject = semgaze_subject - 1",
+    "gt_transform": "x_isp = x_raw * 512 / 1680; y_isp = y_raw * 320 / 1050",
+    "validity": "retain fixations with 0 <= x_raw < 1680 and 0 <= y_raw < 1050",
+    "truncation": "the local ISP TP file retains the valid raw X/Y prefix; malformed trailing T values are ignored after X/Y alignment"
+  },
+  "source": "data/split/COCO_Search18/COCOSearch-18.json",
+  "reference": "isp-senet/ISP/COCO_Search18/GazeformerISP/src/data/TP_fixations.json",
+  "source_sha256": "bb80d858c390ee8ce03039fcc97da2d5430a5c8809c29551e99a0f4624f997d6",
+  "reference_sha256": "c9471fb7fca6ceccdbe5a930f5d81d618ae1148ae27386b2718b1e9a6f8732a7",
+  "transform": {
+    "source_width": 1680,
+    "source_height": 1050,
+    "reference_width": 512,
+    "reference_height": 320
+  },
+  "subject_mapping": "reference_subject = source_subject - 1",
+  "boundary_probes": [
+    {
+      "raw": [
+        0.0,
+        0.0
+      ],
+      "isp": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "raw": [
+        1679.0,
+        0.0
+      ],
+      "isp": [
+        511.6952380952381,
+        0.0
+      ]
+    },
+    {
+      "raw": [
+        0.0,
+        1049.0
+      ],
+      "isp": [
+        0.0,
+        319.6952380952381
+      ]
+    },
+    {
+      "raw": [
+        1679.0,
+        1049.0
+      ],
+      "isp": [
+        511.6952380952381,
+        319.6952380952381
+      ]
+    }
+  ],
+  "records": [
+    {
+      "name": "000000019544.jpg",
+      "task": "bottle",
+      "condition": "present",
+      "raw_subject": 1,
+      "reference_subject": 0,
+      "raw_x": [
+        820.8,
+        852.9,
+        222.4,
+        219.6
+      ],
+      "raw_y": [
+        512.5,
+        250.5,
+        430.4,
+        463.2
+      ],
+      "raw_t_ms": [
+        171,
+        250,
+        286,
+        231
+      ],
+      "reference_x": [
+        250.14857142857144,
+        259.93142857142857,
+        67.77904761904763,
+        66.92571428571429
+      ],
+      "reference_y": [
+        156.1904761904762,
+        76.34285714285716,
+        131.1695238095238,
+        141.1657142857143
+      ],
+      "reference_t_ms": [
+        171,
+        250,
+        286,
+        231
+      ],
+      "reference_duration_raw": [
+        171,
+        250,
+        286,
+        231
+      ],
+      "valid_raw_count": 4,
+      "reference_count": 4,
+      "kind": "full"
+    },
+    {
+      "name": "000000053491.jpg",
+      "task": "bottle",
+      "condition": "present",
+      "raw_subject": 1,
+      "reference_subject": 0,
+      "raw_x": [
+        823.6,
+        604.2,
+        227.6,
+        268.8,
+        1130.6,
+        688.8,
+        618.3,
+        519,
+        666.7
+      ],
+      "raw_y": [
+        516.6,
+        276.2,
+        218.5,
+        346.7,
+        276.5,
+        250.8,
+        133.7,
+        119.6,
+        127.6
+      ],
+      "raw_t_ms": [
+        255,
+        61,
+        408,
+        114,
+        307,
+        204,
+        278,
+        153,
+        311
+      ],
+      "reference_x": [
+        251.0019047619048,
+        184.1371428571429,
+        69.36380952380952,
+        81.92000000000002
+      ],
+      "reference_y": [
+        157.44000000000003,
+        84.1752380952381,
+        66.5904761904762,
+        105.66095238095238
+      ],
+      "reference_t_ms": [
+        255,
+        61,
+        408,
+        114
+      ],
+      "reference_duration_raw": [
+        255,
+        61,
+        408,
+        114,
+        307,
+        204,
+        278,
+        153,
+        311
+      ],
+      "valid_raw_count": 9,
+      "reference_count": 4,
+      "kind": "isp_prefix"
+    },
+    {
+      "name": "000000534366.jpg",
+      "task": "sink",
+      "condition": "present",
+      "raw_subject": 3,
+      "reference_subject": 2,
+      "raw_x": [
+        850.2,
+        1793.9,
+        1226.8,
+        557.3,
+        542,
+        548.3
+      ],
+      "raw_y": [
+        529.9,
+        -450.5,
+        378.8,
+        454.3,
+        384,
+        338.6
+      ],
+      "raw_t_ms": [
+        274,
+        31,
+        160,
+        229,
+        129,
+        633
+      ],
+      "reference_x": [
+        259.10857142857145,
+        373.88190476190476,
+        169.8438095238095,
+        165.1809523809524
+      ],
+      "reference_y": [
+        161.49333333333334,
+        115.44380952380953,
+        138.45333333333335,
+        117.02857142857144
+      ],
+      "reference_t_ms": [
+        274,
+        160,
+        229,
+        129
+      ],
+      "reference_duration_raw": [
+        274,
+        160,
+        229,
+        129,
+        633
+      ],
+      "valid_raw_count": 5,
+      "reference_count": 4,
+      "kind": "isp_prefix"
+    }
+  ],
+  "prediction_inverse": {
+    "source": "DeepGaze-VL/predict_scanpath.py:238-244",
+    "formula": "pixel_x = int(round(bin_x / 100.0 * 512)); pixel_y = int(round(bin_y / 100.0 * 320))",
+    "cases": [
+      {
+        "bin_x": 0,
+        "bin_y": 0,
+        "pixel_x": 0,
+        "pixel_y": 0
+      },
+      {
+        "bin_x": 1,
+        "bin_y": 1,
+        "pixel_x": 5,
+        "pixel_y": 3
+      },
+      {
+        "bin_x": 50,
+        "bin_y": 50,
+        "pixel_x": 256,
+        "pixel_y": 160
+      },
+      {
+        "bin_x": 99,
+        "bin_y": 99,
+        "pixel_x": 507,
+        "pixel_y": 317
+      }
+    ]
+  },
+  "source_hashes": {
+    "isp_preprocess": "81aa0754346a382f1f818270645c934af275b6f5e96f6f44b97049108e44512f",
+    "isp_evaluation": "d68c1c0554c8195785084f34e4b7f74b06ca085dc3deff7c729517eee79cdb2a",
+    "deepgaze_prediction": "4f059a30e829ff7414924d1841f20909c7b776d5227767b5abeda863e872108f",
+    "isp_dataset": "c3430adfa56768189036c56edbb3e4f6b1aec0da2060241d6e0dab862f2f932f",
+    "isp_test": "f5de2882ba32388c2f0478a731cdbc990aa5a75e3204f2516859e302bad29ec0",
+    "gazeformer_preprocess": "0d4c326bf0fcf56e9ccf4f1ac4f88078a1da711fddc341da67ff8b03ef9984a6",
+    "gazeformer_dataset": "f871983b028ba596c2421584127a396cdf5a9a4526947befec0603b65b35d5cb",
+    "gazeformer_evaluation": "6c7713ca02e0f2a0383ec7f837437ef3fad573b49411e62013d2abfd6cdbabf1",
+    "gazeformer_test": "7dcb9a9b38b65a576c5fa3a06e297ca8dfa091aec6687fdc5c45d99e482144be",
+    "deepgaze_evaluation": "159af99b5919ebb1088cc9c68ea58f2aae6e29cc0c56f7f9bbbb785f9290f19b"
+  },
+  "measured_match_counts": {
+    "present_semgaze_records": 14000,
+    "key_matches": 14000,
+    "full_source_length_matches": 13167,
+    "valid_prefix_coordinate_matches": 14000,
+    "duration_prefix_matches": 14000,
+    "sequence_population_mismatches": 833,
+    "filtered_source_records": 27,
+    "filtered_source_points": 41,
+    "coordinate_content_mismatches_after_validity_filter": 0
+  }
+}

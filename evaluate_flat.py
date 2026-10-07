@@ -159,7 +159,15 @@ def main():
             config=args.config or args.checkpoint / 'resolved_config.json',
             split_manifest_identity=identity, by_k=metrics_by_k,
             provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
-                        'scanpath': 'blocked_by_coordinate_protocol',
+                        'scanpath': {
+                            'gate_b1': 'passed',
+                            'gate_b2': 'passed',
+                            'inverse': 'deepgaze_vl_predict_scanpath_round',
+                            'inverse_source': 'DeepGaze-VL/predict_scanpath.py:238-244',
+                            'isp_preprocess_sha256': '81aa0754346a382f1f818270645c934af275b6f5e96f6f44b97049108e44512f',
+                            'isp_evaluation_sha256': 'd68c1c0554c8195785084f34e4b7f74b06ca085dc3deff7c729517eee79cdb2a',
+                            'deepgaze_prediction_sha256': '4f059a30e829ff7414924d1841f20909c7b776d5227767b5abeda863e872108f',
+                        },
                         'probability': 'not_integrated; tokenizer outcome unresolved'},
             implementation_head=implementation_head(), evaluation_draw=config['evaluation']['draw'])
 

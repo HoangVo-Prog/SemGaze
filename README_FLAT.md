@@ -49,6 +49,10 @@ frozen manifest membership, maps `prediction.fixations/regions/how`, and preserv
 `data.duration.source_field` as milliseconds (default `T`). It never recreates splits or trial filtering. Empty images
 or unresolved frame metadata fail explicitly.
 
+This runtime declaration check is separate from the audited COCO-Search18
+scanpath protocol: the B1/B2 ISP frame and prediction-bin inverse are recorded
+in `METRICS_STATUS.md` and `documents/METRICS_AUDIT.md`.
+
 ## Training and resume
 
 ```powershell

@@ -162,8 +162,9 @@ evaluation:
     semantic_max_new_tokens: null
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
-  # Metrics are opt-in.  The canonical scanpath adapter and COCO center-bias
-  # asset are deliberately unresolved until their provenance gates pass.
+  # Metrics are opt-in.  The scanpath coordinate gates are resolved from the
+  # local ISP-SENet and DeepGaze-VL reference trees. Canonical IG still
+  # requires the per-image COCO-Search18 center-bias asset.
   metrics:
     enabled: false
     split: test
@@ -179,7 +180,7 @@ evaluation:
         scanmatch_temp_bin_ms: 50
         scanmatch_threshold: 3.5
         sed_grid_n: 5
-      coordinate_adapter: null
+      coordinate_adapter: deepgaze_vl_predict_scanpath_round
     probability:
       ll: false
       ig: false
