@@ -1,0 +1,42 @@
+{
+  "dataset": "all",
+  "dataset_counts": {
+    "test": {
+      "AiR": 339,
+      "COCO-Search18": 806
+    },
+    "test_seen": {
+      "AiR": 731,
+      "COCO-Search18": 1928
+    },
+    "train": {
+      "AiR": 9677,
+      "COCO-Search18": 24766
+    }
+  },
+  "discarded_records": 0,
+  "per_dataset_record_counts": {
+    "AiR": {
+      "test": 339,
+      "test_seen": 731,
+      "train": 9677
+    },
+    "COCO-Search18": {
+      "test": 806,
+      "test_seen": 1928,
+      "train": 24766
+    }
+  },
+  "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
+  "record_counts": {
+    "test": 1145,
+    "test_seen": 2659,
+    "train": 34443
+  },
+  "train_eval_image_overlap": 0,
+  "unique_global_images": {
+    "test": 478,
+    "test_seen": 518,
+    "train": 4719
+  }
+}

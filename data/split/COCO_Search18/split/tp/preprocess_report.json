@@ -1,0 +1,129 @@
+{
+  "all_source_records_materialized": true,
+  "condition_counts": {
+    "test": {
+      "present": 401
+    },
+    "test_seen": {
+      "present": 1011
+    },
+    "train": {
+      "present": 12588
+    }
+  },
+  "dataset": "COCO-Search18",
+  "discarded_records": 0,
+  "image_counts": {
+    "test": 223,
+    "train": 1996
+  },
+  "image_ratios": {
+    "test": 0.10049571879224876,
+    "train": 0.8995042812077513
+  },
+  "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
+  "record_counts": {
+    "test": 401,
+    "test_seen": 1011,
+    "train": 12588
+  },
+  "record_ratios": {
+    "test": 0.028642857142857144,
+    "test_seen": 0.07221428571428572,
+    "train": 0.8991428571428571
+  },
+  "shared_train_support_distinct_images": 411,
+  "subject_counts": {
+    "test": {
+      "7": 132,
+      "8": 136,
+      "9": 133
+    },
+    "test_seen": {
+      "1": 161,
+      "10": 135,
+      "2": 154,
+      "3": 146,
+      "4": 122,
+      "5": 151,
+      "6": 142
+    },
+    "train": {
+      "1": 1417,
+      "10": 1165,
+      "2": 1280,
+      "3": 1292,
+      "4": 1137,
+      "5": 1370,
+      "6": 1374,
+      "7": 1190,
+      "8": 1209,
+      "9": 1154
+    }
+  },
+  "task_counts": {
+    "test": {
+      "bottle": 23,
+      "bowl": 17,
+      "car": 16,
+      "chair": 35,
+      "clock": 15,
+      "cup": 38,
+      "fork": 31,
+      "keyboard": 13,
+      "knife": 17,
+      "laptop": 15,
+      "microwave": 25,
+      "mouse": 18,
+      "oven": 22,
+      "potted plant": 12,
+      "sink": 32,
+      "stop sign": 13,
+      "toilet": 11,
+      "tv": 48
+    },
+    "test_seen": {
+      "bottle": 61,
+      "bowl": 42,
+      "car": 32,
+      "chair": 83,
+      "clock": 40,
+      "cup": 91,
+      "fork": 72,
+      "keyboard": 45,
+      "knife": 35,
+      "laptop": 47,
+      "microwave": 67,
+      "mouse": 46,
+      "oven": 41,
+      "potted plant": 29,
+      "sink": 87,
+      "stop sign": 45,
+      "toilet": 46,
+      "tv": 102
+    },
+    "train": {
+      "bottle": 689,
+      "bowl": 578,
+      "car": 500,
+      "chair": 1070,
+      "clock": 533,
+      "cup": 1143,
+      "fork": 925,
+      "keyboard": 637,
+      "knife": 668,
+      "laptop": 539,
+      "microwave": 697,
+      "mouse": 430,
+      "oven": 463,
+      "potted plant": 688,
+      "sink": 1107,
+      "stop sign": 432,
+      "toilet": 428,
+      "tv": 1061
+    }
+  },
+  "total_records": 14000,
+  "total_unique_images": 2219,
+  "variant": "tp"
+}

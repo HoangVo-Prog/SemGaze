@@ -126,13 +126,13 @@ training:
   precision: bf16
 
   # One epoch is exactly one shuffled traversal of Q_train.
-  num_train_epochs: 1
+  num_train_epochs: 2
   max_steps: null # debugging override only
   max_episode_retries: 1000
 
   # Engineering knobs: choose for hardware without changing episode/loss semantics.
-  per_device_train_batch_size: 1 # physical GPU episode batch
-  gradient_accumulation_steps: 1 # physical batches per optimizer update
+  per_device_train_batch_size: 4 # physical GPU episode batch
+  gradient_accumulation_steps: 2 # physical batches per optimizer update
   gradient_checkpointing: true
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
   length_aware_batching: true # sort within each same-K physical batch only
@@ -152,7 +152,7 @@ training:
 evaluation:
   strategy: steps # epoch | steps | no (smoke/benchmark only)
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
-  draw: 10 # complete persisted support-set evaluation traversals per K
+  draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   k_values: [1]
   loss_aggregation: episode_mean
   predictions:

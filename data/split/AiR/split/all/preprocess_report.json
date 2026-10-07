@@ -1,0 +1,124 @@
+{
+  "all_source_records_materialized": true,
+  "condition_counts": {
+    "test": {
+      "vqa": 339
+    },
+    "test_seen": {
+      "vqa": 731
+    },
+    "train": {
+      "vqa": 9677
+    }
+  },
+  "dataset": "AiR",
+  "discarded_records": 0,
+  "image_counts": {
+    "test": 98,
+    "train": 884
+  },
+  "image_ratios": {
+    "test": 0.09979633401221996,
+    "train": 0.90020366598778
+  },
+  "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
+  "qid_counts": {
+    "test": 137,
+    "test_seen": 135,
+    "train": 1272
+  },
+  "question_family_counts": {
+    "test": {
+      "are": 79,
+      "do": 36,
+      "does": 19,
+      "is": 113,
+      "the": 6,
+      "what": 74,
+      "which": 6,
+      "who": 6
+    },
+    "test_seen": {
+      "are": 171,
+      "do": 70,
+      "does": 42,
+      "is": 257,
+      "the": 14,
+      "what": 145,
+      "which": 13,
+      "who": 19
+    },
+    "train": {
+      "are": 2275,
+      "do": 927,
+      "does": 575,
+      "how": 46,
+      "is": 3411,
+      "of": 25,
+      "the": 137,
+      "what": 1831,
+      "which": 128,
+      "who": 322
+    }
+  },
+  "record_counts": {
+    "test": 339,
+    "test_seen": 731,
+    "train": 9677
+  },
+  "record_ratios": {
+    "test": 0.0315436866102168,
+    "test_seen": 0.06801898204149995,
+    "train": 0.9004373313482832
+  },
+  "shared_train_support_distinct_images": 611,
+  "subject_counts": {
+    "test": {
+      "JY": 113,
+      "SC": 108,
+      "YN": 118
+    },
+    "test_seen": {
+      "AL": 70,
+      "AR": 36,
+      "AS": 96,
+      "CC": 15,
+      "EN": 74,
+      "JS": 56,
+      "KS": 34,
+      "MH": 66,
+      "MJ": 38,
+      "PK": 19,
+      "TB": 10,
+      "TT": 14,
+      "TV": 30,
+      "VM": 25,
+      "YL": 111,
+      "ZL": 37
+    },
+    "train": {
+      "AL": 622,
+      "AR": 331,
+      "AS": 890,
+      "CC": 103,
+      "EN": 694,
+      "JS": 515,
+      "JY": 1016,
+      "KS": 370,
+      "MH": 622,
+      "MJ": 413,
+      "PK": 107,
+      "SC": 962,
+      "TB": 100,
+      "TT": 146,
+      "TV": 204,
+      "VM": 270,
+      "YL": 951,
+      "YN": 1053,
+      "ZL": 308
+    }
+  },
+  "total_records": 10747,
+  "total_unique_images": 982,
+  "variant": "all"
+}

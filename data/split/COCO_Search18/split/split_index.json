@@ -1,0 +1,73 @@
+{
+  "dataset": "COCO-Search18",
+  "k_values": [
+    1,
+    5,
+    10
+  ],
+  "master_attempt_id": 7480,
+  "master_selected_score": 2.598123313760408,
+  "master_split_manifest": "data/split/COCO_Search18/split/master_split_manifest.json",
+  "num_draws_per_k": 10,
+  "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
+  "source_file": "data/split/COCO_Search18/COCOSearch-18.json",
+  "source_sha256": "bb80d858c390ee8ce03039fcc97da2d5430a5c8809c29551e99a0f4624f997d6",
+  "unseen_subject_ids": [
+    "7",
+    "8",
+    "9"
+  ],
+  "variants": [
+    {
+      "dataset": "COCO-Search18",
+      "image_counts": {
+        "test": 426,
+        "train": 3835
+      },
+      "images": 4261,
+      "output_dir": "data/split/COCO_Search18/split/all",
+      "record_counts": {
+        "test": 806,
+        "test_seen": 1928,
+        "train": 24766
+      },
+      "records": 27500,
+      "support_images": 794,
+      "variant": "all"
+    },
+    {
+      "dataset": "COCO-Search18",
+      "image_counts": {
+        "test": 223,
+        "train": 1996
+      },
+      "images": 2219,
+      "output_dir": "data/split/COCO_Search18/split/tp",
+      "record_counts": {
+        "test": 401,
+        "test_seen": 1011,
+        "train": 12588
+      },
+      "records": 14000,
+      "support_images": 411,
+      "variant": "tp"
+    },
+    {
+      "dataset": "COCO-Search18",
+      "image_counts": {
+        "test": 206,
+        "train": 1854
+      },
+      "images": 2060,
+      "output_dir": "data/split/COCO_Search18/split/ta",
+      "record_counts": {
+        "test": 405,
+        "test_seen": 917,
+        "train": 12178
+      },
+      "records": 13500,
+      "support_images": 385,
+      "variant": "ta"
+    }
+  ]
+}

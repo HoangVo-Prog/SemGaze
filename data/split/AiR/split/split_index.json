@@ -1,0 +1,39 @@
+{
+  "dataset": "AiR",
+  "k_values": [
+    1,
+    5,
+    10
+  ],
+  "master_attempt_id": 6591,
+  "master_selected_score": 0.49318830510013706,
+  "master_split_manifest": "data/split/AiR/split/master_split_manifest.json",
+  "num_draws_per_k": 10,
+  "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
+  "source_file": "data/split/AiR/AiR.json",
+  "source_sha256": "777860320152bdfdf8ecdcb4566eee1852c2d85c51f0bfdaf02883f6c5a18eac",
+  "unseen_subject_ids": [
+    "JY",
+    "SC",
+    "YN"
+  ],
+  "variants": [
+    {
+      "dataset": "AiR",
+      "image_counts": {
+        "test": 98,
+        "train": 884
+      },
+      "images": 982,
+      "output_dir": "data/split/AiR/split/all",
+      "record_counts": {
+        "test": 339,
+        "test_seen": 731,
+        "train": 9677
+      },
+      "records": 10747,
+      "support_images": 611,
+      "variant": "all"
+    }
+  ]
+}
