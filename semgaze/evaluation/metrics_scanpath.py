@@ -14,6 +14,7 @@ an optional runtime dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import importlib
 import math
 import numbers
@@ -218,6 +219,18 @@ def _load_reference_scanmatch():
     return module.ScanMatch
 
 
+@lru_cache(maxsize=4096)
+def _cached_gt_scanmatch_sequence(scorer, gt, with_duration):
+    """Reuse exact GT sequence across draws; scorer identity is part of key."""
+    import numpy as np
+
+    values = (np.asarray(gt, dtype=float) if with_duration else
+              np.asarray([(x, y) for x, y, _ in gt], dtype=float))
+    result = scorer.fixationToSequence(values).astype(np.int32)
+    result.setflags(write=False)
+    return result
+
+
 def _scanmatch_score(
     gt: list[tuple[float, float, float]],
     pred: list[tuple[float, float, float]],
@@ -244,15 +257,10 @@ def _scanmatch_score(
     if scorer is None:
         scorer = ScanMatch(**kwargs)
         _SCANMATCH_REFERENCES[key] = scorer
-    if with_duration:
-        # ISP's test.py converts seconds to milliseconds immediately before
-        # fixationToSequence. Our canonical records already carry ms.
-        gt_array = np.asarray(gt, dtype=float)
-        pred_array = np.asarray(pred, dtype=float)
-    else:
-        gt_array = np.asarray([(x, y) for x, y, _ in gt], dtype=float)
-        pred_array = np.asarray([(x, y) for x, y, _ in pred], dtype=float)
-    seq_gt = scorer.fixationToSequence(gt_array).astype(np.int32)
+    # ISP consumes milliseconds directly; predictions are never cached.
+    pred_array = (np.asarray(pred, dtype=float) if with_duration else
+                  np.asarray([(x, y) for x, y, _ in pred], dtype=float))
+    seq_gt = _cached_gt_scanmatch_sequence(scorer, tuple(gt), bool(with_duration))
     seq_pred = scorer.fixationToSequence(pred_array).astype(np.int32)
     return float(scorer.match(seq_gt, seq_pred)[0])
 
@@ -342,11 +350,19 @@ def _load_reference_vame():
     return module
 
 
+@lru_cache(maxsize=1)
+def _vame_stimulus():
+    """VAME only reads frame shape: share the identical zero-filled ISP frame."""
+    import numpy as np
+
+    return np.zeros((ISP_HEIGHT, ISP_WIDTH, 3), dtype=np.float32)
+
+
 def _vame_sed_score(gt, pred) -> int:
     import numpy as np
 
     module = _load_reference_vame()
-    stimulus = np.zeros((ISP_HEIGHT, ISP_WIDTH, 3), dtype=np.float32)
+    stimulus = _vame_stimulus()
     gt_array = np.asarray(gt, dtype=float)
     pred_array = np.asarray(pred, dtype=float)
     return int(module.string_edit_distance(stimulus, gt_array, pred_array))
@@ -402,6 +418,9 @@ def score_scanpath_pair(
     gt_image_height: int = COCO_RAW_HEIGHT,
     multimatch_module=None,
     require_multimatch: bool = True,
+    compute_multimatch: bool = True,
+    compute_scanmatch: bool = True,
+    compute_sed: bool = True,
 ) -> dict[str, Any]:
     """Score one same-subject GT/prediction pair with audited ISP behavior.
 
@@ -443,19 +462,20 @@ def score_scanpath_pair(
             "format_failure": True,
             "mm_numeric_failure": False,
         }
-    sm_no = _scanmatch_score(gt, pred, with_duration=False)
-    sm_with = _scanmatch_score(gt, pred, with_duration=True)
-    # Use the exact vendored VAME implementation. The local helper remains
-    # available for lightweight boundary tests and deterministic empty paths.
-    sed = _vame_sed_score(gt, pred)
-    try:
-        mm_components, mm_failure = _multimatch_score(
-            gt, pred, module=multimatch_module
-        )
-    except ScanpathMetricDependencyError:
-        if require_multimatch:
-            raise
-        mm_components, mm_failure = None, "optional MultiMatch dependency unavailable"
+    sm_no = _scanmatch_score(gt, pred, with_duration=False) if compute_scanmatch else 0.0
+    sm_with = _scanmatch_score(gt, pred, with_duration=True) if compute_scanmatch else 0.0
+    sed = _vame_sed_score(gt, pred) if compute_sed else 0
+    if not compute_multimatch:
+        mm_components, mm_failure = [0.0] * 5, None
+    else:
+        try:
+            mm_components, mm_failure = _multimatch_score(
+                gt, pred, module=multimatch_module
+            )
+        except ScanpathMetricDependencyError:
+            if require_multimatch:
+                raise
+            mm_components, mm_failure = None, "optional MultiMatch dependency unavailable"
     if mm_components is None:
         # A model-side/non-runtime degeneracy follows LOCK 5: retain the
         # query and contribute deterministic zeros to all five components.

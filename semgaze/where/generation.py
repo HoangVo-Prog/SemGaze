@@ -35,9 +35,11 @@ def where_generation_budget(bundle, episode):
 
 
 @torch.inference_mode()
-def generate_where_batch(bundle, episodes, *, cache=None):
+def generate_where_batch(bundle, episodes, *, cache=None, precomputed_samples=None):
     if not episodes or len({len(e.supports) for e in episodes}) != 1:
         raise ValueError('WHERE generation requires same-K episodes')
+    if precomputed_samples is not None and len(precomputed_samples) != len(episodes):
+        raise ValueError('precomputed WHERE samples must align with episodes')
     tokenizer = bundle.processor.tokenizer
     budgets = [where_generation_budget(bundle, e) for e in episodes]
     results = [None] * len(episodes)
@@ -46,8 +48,10 @@ def generate_where_batch(bundle, episodes, *, cache=None):
     for budget in dict.fromkeys(budgets):
         indices = [i for i, value in enumerate(budgets) if value == budget]
         group = [episodes[i] for i in indices]
-        samples = [collate_where(bundle.processor, e, bundle.end_fix_id, bundle.context_limit,
-                   teacher_forcing=False, config=bundle.config, image_cache=cache) for e in group]
+        samples = ([precomputed_samples[i] for i in indices]
+                   if precomputed_samples is not None else
+                   [collate_where(bundle.processor, e, bundle.end_fix_id, bundle.context_limit,
+                    teacher_forcing=False, config=bundle.config, image_cache=cache) for e in group])
         batch = pack_where_batch(bundle.processor, group, samples, cache)
         inputs = left_pad_generation(batch.inputs, tokenizer.pad_token_id)
         length = inputs['input_ids'].shape[1]

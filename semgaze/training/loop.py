@@ -75,8 +75,7 @@ def format_epoch_summary(entry):
     return (f"[EVAL][LOSS] Epoch {entry['epoch']} | step {entry['step']} | test: "
             f"{entry['test_queries']} unseen queries x K={entry.get('k_values', [])} ({entry['test_episodes']} episodes)\n"
             f"  response NLL (episode mean): {losses}\n"
-            f"  complete traversals: {entry.get('test_loss_traversals', '?')}\n"
-            '  WHAT/WHY/HOW: diagnostic sections of one flat response; generation-quality metrics not configured')
+            f"  complete traversals: {entry.get('test_loss_traversals', '?')}\n")
 
 
 def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,

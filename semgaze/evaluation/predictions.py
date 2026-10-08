@@ -84,11 +84,19 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
         results = {}
         for k in dict.fromkeys(len(e.supports) for e in block):
             indices = [i for i, e in enumerate(block) if len(e.supports) == k]
+            precomputed = {}
             if settings['bucket_by_length']:
                 from semgaze.where.collator import collate_where
-                indices.sort(key=lambda i: collate_where(bundle.processor, block[i], bundle.end_fix_id,
-                    bundle.context_limit, teacher_forcing=False, config=bundle.config,
-                    image_cache=cache).inputs['input_ids'].shape[1])
+
+                def sort_length(i):
+                    sample = collate_where(bundle.processor, block[i], bundle.end_fix_id,
+                        bundle.context_limit, teacher_forcing=False, config=bundle.config,
+                        image_cache=cache)
+                    if path in ('where', 'both') and settings['execution'] != 'serial':
+                        precomputed[i] = sample
+                    return sample.inputs['input_ids'].shape[1]
+
+                indices.sort(key=sort_length)
             size = physical_size(settings, k) if str(k) in settings['batch_size_by_k'] or k in settings['batch_size_by_k'] else 1
             for offset in range(0, len(indices), size):
                 selected = indices[offset:offset+size]
@@ -100,7 +108,12 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
                                    evaluate_flat_episode(bundle, e, generation_budget=budget))
                                   if path in ('semantic', 'both') else None) for e in group]
                 else:
-                    where = generate_where_batch(bundle, group, cache=cache) if path in ('where', 'both') else [None]*len(group)
+                    if path in ('where', 'both'):
+                        where = (generate_where_batch(bundle, group, cache=cache,
+                            precomputed_samples=[precomputed[i] for i in selected])
+                            if precomputed else generate_where_batch(bundle, group, cache=cache))
+                    else:
+                        where = [None] * len(group)
                     semantic = evaluate_flat_batch(bundle, group, generation_budget=budget, cache=cache,
                                                    projected_r_cache=projected_r_cache) if path in ('semantic', 'both') else [None]*len(group)
                     generated = [({'oracle_length_conditioned': True, **w} if w is not None else None, f)
@@ -340,7 +353,8 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         cider_r, cider_provenance = build_cider_r_scorer(
             reference_root=Path(__file__).resolve().parents[2] / 'third_party' / 'cider_r',
             n=semantic_config['cider_r'].get('n', 4), k_r=semantic_config['cider_r'].get('k_r', 0.8))
-    rows = [json.loads(line) for line in Path(path).read_text(encoding='utf-8').splitlines() if line.strip()]
+    with Path(path).open('r', encoding='utf-8') as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
     # In single-traversal semantic mode the combined file still contains all
     # WHERE draws, but only draw zero carries a semantic prediction. Keep the
     # two row populations separate so WHERE metrics still see every draw.
@@ -425,11 +439,10 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
                     score = score_scanpath_pair(
                         list(zip(gt_x, gt_y, gt_d)), prediction,
                         gt_image_width=query.image_width, gt_image_height=query.image_height,
-                        require_multimatch=bool(where_config.get('multimatch', False)))
-                    if not where_config.get('multimatch', False):
-                        # MM is intentionally disabled for this artifact; an
-                        # absent optional package is not a numerical failure.
-                        score['mm_numeric_failure'] = False
+                        require_multimatch=bool(where_config.get('multimatch', False)),
+                        compute_multimatch=bool(where_config.get('multimatch', False)),
+                        compute_scanmatch=bool(where_config.get('scanmatch', False)),
+                        compute_sed=bool(where_config.get('sed', False)))
                     score['format_failure'] = not bool(parsed.get('canonical_format_valid'))
                 scores.append(score)
             draw_metrics = aggregate_scanpath_draw(scores)
