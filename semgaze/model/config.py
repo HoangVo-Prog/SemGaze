@@ -129,7 +129,8 @@ def validate_config(config):
     positive_int(config['training']['gradient_diagnostics_every'], 'training.gradient_diagnostics_every', minimum=0)
     positive_int(config['training']['profile_every_steps'], 'training.profile_every_steps', minimum=0)
     positive_int(config['training']['preprocessing_cache_max_entries'], 'training.preprocessing_cache_max_entries')
-    for key in ('length_aware_batching', 'reuse_query_vision', 'cache_preprocessed_images'):
+    positive_int(config['training']['semantic_collation_cache_max_entries'], 'training.semantic_collation_cache_max_entries')
+    for key in ('length_aware_batching', 'reuse_query_vision', 'cache_preprocessed_images', 'cache_semantic_collation'):
         if type(config['training'][key]) is not bool:
             raise ValueError(f'training.{key} must be boolean')
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:

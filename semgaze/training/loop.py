@@ -10,6 +10,7 @@ from semgaze.model.checkpoint import save_checkpoint
 from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
 from semgaze.training.batching import sample_optimizer_batches
 from semgaze.training.profiling import TrainingProfiler
+from semgaze.semantic.flat.collation_cache import SemanticNativeLRU
 from contextlib import nullcontext
 from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
 from semgaze.model.visual_cache import InferenceVisualCache
@@ -89,6 +90,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
     prediction_capacity = settings['train_batches'] * t['per_device_train_batch_size']
     recent_episodes = []
     checkpoint = bundle.config['checkpoint']
+    semantic_cache = (SemanticNativeLRU(t['semantic_collation_cache_max_entries'])
+                      if t.get('cache_semantic_collation', False) else None)
     logging = bundle.config['logging']
     if not 0 <= start <= max_steps or (save_every is not None and save_every < 1):
         raise ValueError('invalid resume step or save interval')
@@ -134,7 +137,7 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
                     loss_scale=weights[micro], where_batch=batch,
                     diagnostics=diagnose and micro == len(batches) - 1,
-                    profiler=profiler)
+                     profiler=profiler, semantic_cache=semantic_cache)
                 losses.append(result['loss_total'] * weights[micro])
                 for key in component_losses:
                     if key in result and result[key] is not None:
@@ -193,6 +196,12 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 entry['physical_forwards'] = len(batches)
                 entry['effective_physical_batch_occupancy'] = (len(sampled_episodes) /
                     max(1, len(batches) * t['per_device_train_batch_size']))
+                if semantic_cache:
+                    entry['semantic_collation_cache'] = semantic_cache.statistics()
+                if preprocessing_stats is not None:
+                    for role in ('support', 'query'):
+                        entry[f'{role}_preprocessing_hits'] = preprocessing_stats['role_hits'][role]
+                        entry[f'{role}_preprocessing_misses'] = preprocessing_stats['role_misses'][role]
                 if profiler:
                     entry['profile_stages_sec'] = dict(profiler.times)
                     entry['sampling_collation_sec'] = sampling_time

@@ -16,7 +16,12 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
     group_size = size if sampling_group_size is None else sampling_group_size
     if type(group_size) is not int or group_size < size or group_size % size or count % group_size:
         raise ValueError('sampling_group_size must be a multiple of physical B and divide the optimizer batch')
-    original_episodes, rejected, cache = [], 0, {}
+    original_episodes, rejected = [], 0
+    # A single bounded native cache now handles support AND query processing
+    # throughout this optimizer window; false retains the original dict path.
+    cache = (InferenceVisualCache(preprocessing=True, features=False,
+             max_entries=t.get('preprocessing_cache_max_entries', 32))
+             if t.get('cache_preprocessed_images', False) else {})
     # Every call consumes the next query exactly once. Episodes are then
     # bucketed by their already sampled K solely so the collator can batch them.
     sampled_all = []
@@ -28,7 +33,10 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
         k = len(episode.supports)
         retries = 0
         while True:
-            candidate_cache = dict(cache)
+            # Native preprocessing cache is deterministic, so retaining a
+            # processed image from a rejected support realization is harmless.
+            # Legacy dict caches keep transactional behavior.
+            candidate_cache = cache if isinstance(cache, InferenceVisualCache) else dict(cache)
             try:
                 native = collate_where(bundle.processor, episode, bundle.end_fix_id,
                     bundle.context_limit, config=bundle.config, image_cache=candidate_cache)
@@ -55,17 +63,8 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
             part = group[i:i + size]
             batches.append(pack_where_batch(bundle.processor, [e for e, _ in part],
                 [n for _, n in part], cache))
-    # Keep WHERE's original batched native image preprocessing. Only seed the
-    # preprocessed query rows for later semantic collation, which would otherwise
-    # run the native image processor a second time for the same image.
-    if t.get('cache_preprocessed_images', False):
-        preprocessed = InferenceVisualCache(preprocessing=True, features=False,
-            max_entries=t.get('preprocessing_cache_max_entries', 32))
-        for episode, native in sampled_all:
-            path = episode.query.image_path
-            preprocessed.prime_preprocessed(path, native.inputs['pixel_values'][-1:], image=cache.get(path))
-        for batch in batches:
-            batch.image_cache = preprocessed
+    # `cache` has been used by native WHERE collation throughout this
+    # window; it already contains reusable support and query CPU pixel rows.
     return batches, original_episodes, rejected
 
 

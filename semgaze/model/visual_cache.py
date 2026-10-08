@@ -39,6 +39,9 @@ class InferenceVisualCache(OrderedDict):
         self.pixels, self.visual = OrderedDict(), OrderedDict()
         self.hits = dict(preprocessing=0, visual=0)
         self.misses = dict(preprocessing=0, visual=0)
+        self.role_hits = dict(support=0, query=0)
+        self.role_misses = dict(support=0, query=0)
+        self.evictions = dict(preprocessing=0, visual=0)
         self.closed = False
         self._processor_signature = None
         self._binding = None
@@ -88,6 +91,7 @@ class InferenceVisualCache(OrderedDict):
         store.move_to_end(key)
         while len(store) > self.max_entries:
             store.popitem(last=False)
+            self.evictions['preprocessing' if store is self.pixels else 'visual'] += 1
 
     def prime_preprocessed(self, path, pixels, *, image=None):
         """Seed the exact native, CPU-preprocessed row without recomputing it.
@@ -125,7 +129,8 @@ class InferenceVisualCache(OrderedDict):
                     raise ValueError('cache requires canonical 448x448 one-tile preprocessing')
                 owner._preprocessing_kwargs = signature
                 rows = []
-                for path, image in zip(paths, images):
+                for index, (path, image) in enumerate(zip(paths, images)):
+                    role = 'query' if index == len(paths)-1 else 'support'
                     # Visual entries pin their canonical CPU preprocessing even
                     # when the independent preprocessing LRU has evicted it.
                     row = owner.visual_pixels.get(path)
@@ -133,10 +138,12 @@ class InferenceVisualCache(OrderedDict):
                         row = owner.pixels.get(path)
                     if row is not None:
                         owner.hits['preprocessing'] += 1
+                        owner.role_hits[role] += 1
                         if path in owner.pixels:
                             owner.pixels.move_to_end(path)
                     else:
                         owner.misses['preprocessing'] += 1
+                        owner.role_misses[role] += 1
                         row = original(images=[image], **kwargs)
                         if set(row) != {'pixel_values', 'num_patches'} or list(row['num_patches']) != [1]:
                             raise ValueError('cache requires native one-tile preprocessing')
@@ -214,6 +221,9 @@ class InferenceVisualCache(OrderedDict):
 
     def statistics(self):
         return {name: dict(entries=len(store), hits=self.hits[name], misses=self.misses[name],
+                           evictions=self.evictions[name],
+                           role_hits=dict(self.role_hits) if name == 'preprocessing' else {},
+                           role_misses=dict(self.role_misses) if name == 'preprocessing' else {},
                           hit_rate=self.hits[name] / max(1, self.hits[name] + self.misses[name]))
                 for name, store in (('preprocessing', self.pixels), ('visual', self.visual))}
 

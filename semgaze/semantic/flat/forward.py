@@ -1,5 +1,6 @@
 from semgaze.where.collator import collate_native, to_model_device
 from semgaze.model.trainable_tokens import RowEmbedding
+from semgaze.semantic.flat.collation_cache import SemanticNativeLRU
 from semgaze.where.conversation import image_user
 from semgaze.state.insertion import insert_states, insert_states_batch
 import torch
@@ -62,7 +63,7 @@ def frozen_vision_is_reusable(model):
 
 
 def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=None,
-                           generation_budget=None, reuse_query_vision=None):
+                           generation_budget=None, reuse_query_vision=None, semantic_cache=None):
     """One native prompt per sample, followed by differentiable batched assembly."""
     if not queries or len(queries) != len(states):
         raise ValueError('query/state batch counts differ')
@@ -73,9 +74,21 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
     image_cache = where.batch.image_cache if where is not None else {}
     for b, (query, state) in enumerate(zip(queries, states)):
         prompt = build_flat_prompt(query)
-        native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
-            build_flat_target(query.semantic) if generation_budget is None else None,
-            prompt=prompt, image_cache=(visual_cache if visual_cache is not None else image_cache))
+        target = build_flat_target(query.semantic) if generation_budget is None else None
+        # Only training (WHERE available) can supply the exact current query
+        # pixel row on a text-cache hit. All other paths use native collation.
+        key = (semantic_cache.key(bundle.processor, query, prompt, target)
+               if semantic_cache is not None and where is not None else None)
+        if key is not None and where.batch.samples[b].image_paths[-1] != query.image_path:
+            raise ValueError('semantic text cache query/WHERE image identity mismatch')
+        native = (semantic_cache.get(key, pixels=where.batch.samples[b].inputs['pixel_values'][-1:])
+                  if key is not None else None)
+        if native is None:
+            native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
+                target, prompt=prompt,
+                image_cache=(visual_cache if visual_cache is not None else image_cache))
+            if key is not None:
+                semantic_cache.put(key, native)
         n = len(query.x_px)
         length = native.inputs['input_ids'].shape[1]
         if length + n + (generation_budget or 0) > bundle.context_limit:
@@ -127,11 +140,12 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
 
 
 def forward_flat_batch(bundle, queries, states, *, where=None, profiler=None, reuse_query_vision=None,
-                       response_offsets=False):
+                       response_offsets=False, semantic_cache=None):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('semantic_preparation'):
         inputs, positions, metadata = prepare_semantic_batch(bundle, queries, states, where=where,
-                                                            reuse_query_vision=reuse_query_vision)
+                                                            reuse_query_vision=reuse_query_vision,
+                                                             semantic_cache=semantic_cache)
     host_labels = inputs['labels']
     with stage('semantic_forward'):
         outputs = forward_backbone(bundle.model, to_model_device(

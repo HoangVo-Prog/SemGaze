@@ -64,7 +64,7 @@ def clip_and_check_gradients(bundle):
 
 def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
-                           where_batch=None, profiler=None,
+                           where_batch=None, profiler=None, semantic_cache=None,
                            audit_disable_where_attention_mask=False,
                            audit_capture=None):
     """One vectorized WHERE and semantic forward, one backward per physical batch.
@@ -104,7 +104,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
             raise RuntimeError('WHERE F / projected R were detached')
         flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-                                                               where=where, profiler=profiler)
+                                                               where=where, profiler=profiler,
+                                                                semantic_cache=semantic_cache)
         t = bundle.config['training']
         episode_total = t['lambda_where'] * where.episode_losses + t['lambda_sem'] * flat.episode_losses
         loss_total = episode_total.mean()
