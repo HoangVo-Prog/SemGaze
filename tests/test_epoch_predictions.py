@@ -24,7 +24,7 @@ def read_records(path):
     return [json.loads(line) for line in Path(path).read_text(encoding='utf-8').splitlines()]
 
 
-def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatch):
+def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatch, capsys):
     bundle = tiny_bundle(tmp_path, episode)
     bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     resolve_prediction_settings(bundle.config, 8)
@@ -48,6 +48,8 @@ def test_prediction_coverage_and_raw_gt_pred_files(tmp_path, episode, monkeypatc
         epoch=1, step=2, split_manifest_identity='fixture')
     train_rows = read_records(result['prediction_files']['train'])
     val_rows = read_records(result['prediction_files']['test'])
+    output = capsys.readouterr().out
+    assert 'ETA test predictions=' in output and 'finish~' not in output
     assert len(train_rows) == 2
     assert len(val_rows) == result['test_prediction_episodes'] == 60
     assert result['test_prediction_queries'] == 2

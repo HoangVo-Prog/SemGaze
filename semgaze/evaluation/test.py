@@ -16,8 +16,7 @@ from semgaze.evaluation.batching import schedule_batches, episode_id
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
-from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
-                                          progress_interval, should_report)
+from semgaze.evaluation.progress import RollingRate, format_eta, progress_interval, should_report
 from semgaze.evaluation.metrics_probability import score_probability_batch, aggregate_probability_draw, aggregate_probability_k
 from semgaze.evaluation.records import resolve_evaluation_draw_counts
 
@@ -211,6 +210,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     expected = [f'{k}:{draw}:{q.record_id}' for k in k_values
                 for draw in range(draw_counts[str(k)]) for q in queries]
     started = time.perf_counter()
+    total_rate = RollingRate(min_observations=2)
+    completed = 0
     print(f'[EVAL][LOSS] starting | queries={len(queries)} | K={k_values} | '
           f'episodes={len(expected)}', flush=True)
     try:
@@ -225,9 +226,7 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                 k_started = time.perf_counter()
                 subtotal, stats, keys = EpisodeAccumulator(), [], []
                 draw_count = draw_counts[str(k)]
-                k_rate = RollingRate()
                 for draw in range(draw_count):
-                    draw_rate = RollingRate()
                     query_index = 0
                     interval = progress_interval(len(queries))
                     print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
@@ -252,19 +251,18 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                             if episode_callback is not None:
                                 episode_callback(row)
                         query_index += len(rows)
-                        draw_rate.update(query_index)
-                        k_completed = draw * len(queries) + query_index
-                        k_rate.update(k_completed)
+                        completed += len(rows)
                         if should_report(query_index, len(queries), interval):
-                            draw_eta = draw_rate.eta(len(queries) - query_index)
-                            k_eta = k_rate.eta(draw_count * len(queries) - k_completed)
-                            finish_eta = k_eta if k_eta is not None else draw_eta
-                            print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
-                                  f'draw={draw + 1}/{draw_count} | {query_index}/{len(queries)} | '
-                                  f'{100 * query_index / len(queries):.1f}%', flush=True)
-                            print(f'             ETA draw={format_eta(draw_eta)} | '
-                                  f'ETA K={format_eta(k_eta)} | '
-                                  f'finish~{format_finish_time(finish_eta)}', flush=True)
+                            # Each interval includes whole physical-batch latency.
+                            total_rate.update(completed)
+                            total_eta = total_rate.eta(len(expected) - completed)
+                            running_total = overall.sums['test_total'] / completed
+                            print(f'[EVAL][LOSS] {completed}/{len(expected)} '
+                                  f'({100 * completed / len(expected):.1f}%) | '
+                                  f'K={k} ({k_position}/{len(k_values)}) '
+                                  f'draw={draw + 1}/{draw_count} [{query_index}/{len(queries)}] | '
+                                  f'running_loss={running_total:.4f} | '
+                                  f'ETA loss={format_eta(total_eta)}', flush=True)
                         stats.append({'physical_batch_size': len(rows), **{
                             f'{branch}_{kind}_tokens': (sum(lengths) if kind == 'real' else len(rows)*max(lengths))
                             for branch in ('where', 'semantic')

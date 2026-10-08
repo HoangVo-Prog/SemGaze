@@ -1,5 +1,4 @@
 """Small, dependency-free helpers for readable progress logs."""
-from datetime import datetime, timedelta
 import math
 import time
 
@@ -65,22 +64,23 @@ class RollingRate:
         return self
 
     def eta(self, remaining_units):
-        if (type(remaining_units) is not int or remaining_units < 0 or
-                self.rate is None or self.observations < self.min_observations):
+        if type(remaining_units) is not int or remaining_units < 0:
+            return None
+        if remaining_units == 0:
+            return 0.0
+        if self.rate is None or self.observations < self.min_observations:
             return None
         return remaining_units / self.rate if self.rate > 0 else None
 
 
 def format_eta(seconds):
-    return 'estimating...' if seconds is None else format_duration(seconds)
-
-
-def format_finish_time(seconds, *, now=None):
-    """Format a local wall-clock completion time derived from an ETA."""
+    """Human-friendly relative ETA; independent of server timezone."""
     if seconds is None:
         return 'estimating...'
-    current = datetime.now().astimezone() if now is None else now
-    finish = current + timedelta(seconds=max(0, seconds))
-    if finish.date() == current.date():
-        return finish.strftime('%H:%M')
-    return finish.strftime('%b %d %H:%M')
+    if seconds <= 0:
+        return '0m'
+    minutes = max(1, math.ceil(seconds / 60))
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h {minutes}m' if minutes else f'{hours}h'
+    return f'{minutes}m' 

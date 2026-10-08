@@ -254,7 +254,7 @@ def test_real_sampler_checkpoint_restores_next_episode_and_scheduler(tmp_path, e
     assert resumed.optimizer.param_groups[0]['lr'] == bundle.optimizer.param_groups[0]['lr']
 
 
-def test_real_small_hf_epoch_test(tmp_path, episode):
+def test_real_small_hf_epoch_test(tmp_path, episode, capsys):
     bundle = tiny_bundle(tmp_path, episode)
     bundle.config['test']['prediction']['execution'] = 'serial'  # retained reference API
     train, queries, manifest = evaluation_data(episode)
@@ -263,4 +263,7 @@ def test_real_small_hf_epoch_test(tmp_path, episode):
     assert set(result['test_by_k']) == {'1', '5', '10'}
     assert result['test_total'] == pytest.approx(result['test_where'] + result['test_flat'])
     assert all(p.grad is None for p in bundle.trainable_parameters())
+    output = capsys.readouterr().out
+    assert '[EVAL][LOSS]' in output and 'ETA loss=' in output
+    assert 'finish~' not in output
     print(loop.format_epoch_summary({'epoch': 1, 'step': 2, **result}))

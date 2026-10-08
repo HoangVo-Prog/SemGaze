@@ -1,6 +1,4 @@
-from datetime import datetime, timezone
-
-from semgaze.evaluation.progress import RollingRate, format_finish_time
+from semgaze.evaluation.progress import RollingRate, format_eta
 from semgaze.training.loop import format_train_step
 
 
@@ -13,9 +11,13 @@ def test_rolling_rate_waits_for_stable_observations():
     assert rate.eta(4) == 4.0
 
 
-def test_finish_time_uses_local_clock_date_boundary():
-    now = datetime(2026, 10, 6, 23, 30, tzinfo=timezone.utc)
-    assert format_finish_time(30 * 60, now=now) == 'Oct 07 00:00'
+def test_relative_eta_is_human_readable_and_timezone_independent():
+    assert format_eta(None) == 'estimating...'
+    assert format_eta(0) == '0m'
+    assert format_eta(59) == '1m'
+    assert format_eta(30 * 60) == '30m'
+    assert format_eta(10 * 3600 + 42 * 60) == '10h 42m'
+    assert RollingRate().eta(0) == 0.0
 
 
 def test_training_progress_is_epoch_centric_and_has_no_step_timer():
@@ -23,9 +25,11 @@ def test_training_progress_is_epoch_centric_and_has_no_step_timer():
         'step': 3500, 'epoch_index': 1, 'epoch_total': 5,
         'epoch_step': 3500, 'epoch_steps': 18508,
         'epoch_progress_pct': 18.9, 'epoch_eta_sec': 4355,
+        'train_eta_sec': 9000,
         'loss_total': 3.4821, 'loss_where': 0.9214, 'loss_flat': 2.5607,
         'learning_rate': 3.21e-5, 'rejected_where_episodes': 0,
     })
     assert '[TRAIN] epoch 1/5 | 3500/18508 | 18.9%' in text
-    assert 'ETA epoch=' in text and 'finish~' in text
+    assert 'ETA epoch=1h 13m' in text and 'ETA train=2h 30m' in text
+    assert 'finish~' not in text and 'rejected=' not in text
     assert 'elapsed=' not in text and 'time=' not in text

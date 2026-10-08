@@ -12,7 +12,7 @@ from semgaze.training.batching import sample_optimizer_batches
 from semgaze.training.profiling import TrainingProfiler
 from semgaze.semantic.flat.collation_cache import SemanticNativeLRU
 from contextlib import nullcontext
-from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
+from semgaze.evaluation.progress import RollingRate, format_eta
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.cache import ProjectedWhereCache
 
@@ -36,9 +36,9 @@ def format_train_step(entry, max_steps=None):
             f"  loss={_format_loss(entry.get('loss_total'))} | "
             f"where={_format_loss(entry.get('loss_where'))} | "
             f"flat={_format_loss(entry.get('loss_flat'))} | lr={lr_text}\n"
-            f"  rejected={entry.get('rejected_where_episodes', 0)} | "
-            f"ETA epoch={format_eta(entry.get('epoch_eta_sec'))} | "
-            f"finish~{format_finish_time(entry.get('epoch_eta_sec'))}")
+            f"  ETA train={format_eta(entry.get('train_eta_sec'))} | "
+            f"ETA epoch={format_eta(entry.get('epoch_eta_sec'))} "
+            "(optimizer time only; evaluation excluded)")
     if entry.get('epoch_complete'):
         text += '\n        epoch complete'
     return text
@@ -108,14 +108,15 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
         for entry in bundle.trainer_history:
             stream.write(json.dumps(entry, allow_nan=False) + '\n')
     with log_path.open('a', encoding='utf-8') as stream:
-        epoch_rate = RollingRate()
-        timed_epoch = None
+        # Sum only optimizer update durations. Exclude evaluation/checkpoint
+        # pauses from the remaining-training estimate across epochs.
+        train_rate = RollingRate()
+        train_rate.reset(now=0.0)
+        train_elapsed = 0.0
+        rejection_warning_emitted = False
         for step in range(start, max_steps):
             if sampler.epoch == 0 or sampler.epoch_complete():
                 sampler.start_epoch()
-            if timed_epoch != sampler.epoch:
-                epoch_rate.reset()
-                timed_epoch = sampler.epoch
             profile_interval = t.get('profile_every_steps', 0)
             profile_now = profile_interval > 0 and (step + 1) % profile_interval == 0
             profiler = TrainingProfiler(bundle.input_row.device) if profile_now else None
@@ -128,6 +129,10 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             sampling_started = time.perf_counter()
             batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
             sampling_time = time.perf_counter() - sampling_started
+            if rejected and not rejection_warning_emitted:
+                print(f'[TRAIN][WARN] sampling rejected {rejected} episode(s); '
+                      'further console warnings suppressed', flush=True)
+                rejection_warning_emitted = True
             prediction_batch = sampled_episodes[-prediction_capacity:] if prediction_capacity else []
             weights = [len(batch.episodes) / len(sampled_episodes) for batch in batches]
             interval = t.get('gradient_diagnostics_every', 0)
@@ -164,8 +169,10 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             step_time = time.perf_counter() - step_started
             epoch_step = min(updates_per_epoch, (sampler.cursor + window - 1) // window)
             epoch_complete = sampler.epoch_complete()
-            epoch_rate.update(epoch_step)
-            epoch_eta = epoch_rate.eta(updates_per_epoch - epoch_step)
+            train_elapsed += step_time
+            train_rate.update(global_step - start, now=train_elapsed)
+            epoch_eta = train_rate.eta(updates_per_epoch - epoch_step)
+            train_eta = train_rate.eta(max_steps - global_step)
             should_log = (global_step % logging['every_steps'] == 0 or
                           global_step == max_steps or epoch_complete or profile_now)
             if should_log:
@@ -174,7 +181,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                          'epoch_index': sampler.epoch, 'epoch_total': t['num_train_epochs'],
                          'epoch_step': epoch_step, 'epoch_steps': updates_per_epoch,
                          'epoch_progress_pct': 100 * epoch_step / updates_per_epoch,
-                         'epoch_eta_sec': epoch_eta, 'epoch_complete': epoch_complete,
+                         'epoch_eta_sec': epoch_eta, 'train_eta_sec': train_eta,
+                         'epoch_complete': epoch_complete,
                          'query_cursor': sampler.cursor, 'query_count': sampler.query_count,
                          'loss_total': float(sum(losses)),
                          'rejected_where_episodes': rejected,

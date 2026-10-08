@@ -17,8 +17,7 @@ from semgaze.where.serialization import parse_xyd_output
 from semgaze.evaluation.metrics_scanpath import (
     CoordinateProtocolError, DatasetIntegrityError, aggregate_scanpath_draw, score_scanpath_pair,
 )
-from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
-                                          progress_interval, should_report)
+from semgaze.evaluation.progress import RollingRate, format_eta, progress_interval, should_report
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
     aggregate_semantic_metrics, score_prediction_semantics)
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
@@ -169,7 +168,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     # The combined prediction file has one record per WHERE episode. Semantic
     # progress is reported separately because it may be a strict subset.
     prediction_total = sum(len(queries) * where_draw_counts[str(k)] for k in k_values)
-    prediction_rate = RollingRate()
+    prediction_rate = RollingRate(min_observations=2)
     prediction_completed = 0
     python_rng = random.getstate()
     try:
@@ -188,7 +187,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                     if split == 'train':
                         total = len(train_batch)
                         interval = progress_interval(total)
-                        train_rate = RollingRate()
+                        train_rate = RollingRate(min_observations=2)
                         for episode, generated in prediction_batches(bundle, train_batch,
                                 budget=settings['semantic_max_new_tokens'], cache=cache,
                                 projected_r_cache=projected_r_cache):
@@ -198,29 +197,27 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                 split_manifest_identity=split_manifest_identity, generated=generated)
                             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                             stream.flush()
-                            train_rate.update(count)
                             if should_report(count, total, interval):
+                                train_rate.update(count)
                                 eta = train_rate.eta(total - count)
-                                print(f"[EVAL][PRED][TRAIN] {count}/{total} | "
-                                      f"{100 * count / total:.1f}%", flush=True)
-                                print(f"                     ETA={format_eta(eta)} | "
-                                      f"finish~{format_finish_time(eta)}", flush=True)
+                                print(f"[EVAL][PRED][TRAIN] {count}/{total} "
+                                      f"({100 * count / total:.1f}%) | "
+                                      f"ETA train predictions={format_eta(eta)}", flush=True)
                     else:
+                        # Exclude earlier train generation from the test ETA.
+                        prediction_rate.reset()
                         for k_position, k in enumerate(k_values, 1):
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
                             draw_count = where_draw_counts[str(k)]
                             semantic_draw_count = semantic_draw_counts[str(k)]
                             draw_times = []
-                            k_rate = RollingRate()
-                            k_total = len(queries) * draw_count
                             semantic_label = str(semantic_draw_count) if semantic_use_draws else \
                                 'disabled / single traversal'
                             print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
                                   f"WHERE draws={draw_count} | semantic draws={semantic_label}", flush=True)
                             for draw in range(draw_count):
                                 draw_started = time.perf_counter()
-                                draw_rate = RollingRate()
                                 print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
                                       f"draw={draw + 1}/{draw_count} | "
                                       f"starting | queries={len(queries)}", flush=True)
@@ -237,24 +234,19 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                     record['draw_id'] = draw
                                     stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                                     stream.flush()
-                                    draw_rate.update(query_index)
-                                    k_completed = draw * len(queries) + query_index
-                                    k_rate.update(k_completed)
                                     prediction_completed += 1
-                                    prediction_rate.update(prediction_completed)
                                     if should_report(query_index, len(queries), interval):
-                                        draw_eta = draw_rate.eta(len(queries) - query_index)
-                                        k_eta = k_rate.eta(k_total - k_completed)
-                                        prediction_eta = prediction_rate.eta(prediction_total - prediction_completed)
-                                        finish_eta = prediction_eta if prediction_eta is not None else draw_eta
-                                        print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
-                                              f"draw={draw + 1}/{draw_count} | "
-                                              f"{query_index}/{len(queries)} | "
-                                              f"{100 * query_index / len(queries):.1f}%", flush=True)
-                                        print(f"             ETA draw={format_eta(draw_eta)} | "
-                                              f"ETA K={format_eta(k_eta)} | "
-                                              f"ETA prediction={format_eta(prediction_eta)} | "
-                                              f"finish~{format_finish_time(finish_eta)}", flush=True)
+                                        # Generated batch records arrive in bursts; time
+                                        # an interval, not each immediate file write.
+                                        prediction_rate.update(prediction_completed)
+                                        prediction_eta = prediction_rate.eta(
+                                            prediction_total - prediction_completed)
+                                        print(f"[EVAL][PRED] {prediction_completed}/{prediction_total} "
+                                              f"({100 * prediction_completed / prediction_total:.1f}%) | "
+                                              f"K={k} ({k_position}/{len(k_values)}) "
+                                              f"draw={draw + 1}/{draw_count} [{query_index}/{len(queries)}] | "
+                                              f"path={prediction_path} | "
+                                              f"ETA test predictions={format_eta(prediction_eta)}", flush=True)
                                 draw_time = time.perf_counter() - draw_started
                                 draw_times.append(draw_time)
                                 print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
