@@ -13,18 +13,20 @@ from semgaze.training.loop import resolve_epoch_schedule
 
 @pytest.fixture(scope='module')
 def persisted():
-    return {variant: read_persisted_splits(ROOT / 'data/COCO_Search18/split_subject_5_5' / variant)
-            for variant in ('all', 'tp_only', 'ta_only')}
+    return {variant: read_persisted_splits(
+                ROOT / 'data/split/COCO_Search18/split' / variant,
+                data_config=resolve_config({'data': {'variant': variant}})['data'])
+            for variant in ('all', 'tp', 'ta')}
 
 
 def test_master_partition_and_frozen_draws(persisted):
-    master_path = ROOT / 'data/COCO_Search18/split_subject_5_5/master_split_manifest.json'
+    master_path = ROOT / 'data/split/COCO_Search18/split/master_split_manifest.json'
     master = json.loads(master_path.read_text(encoding='utf-8'))
     master_train, master_eval = _master_stimulus_ids(master)
     for variant, (raw, manifest, identity) in persisted.items():
         assert set(raw) == {'train', 'test'} and len(identity) == 64
         assert 'validation_supports' not in manifest
-        variant_root = ROOT / 'data/COCO_Search18/split_subject_5_5' / variant
+        variant_root = ROOT / 'data/split/COCO_Search18/split' / variant
         test_rows = json.loads((variant_root / 'test.json').read_text(encoding='utf-8'))
         test_seen_rows = json.loads((variant_root / 'test_seen.json').read_text(encoding='utf-8'))
         assert [r['record_id'] for r in raw['test']] == [r['record_id'] for r in test_rows]
@@ -35,7 +37,8 @@ def test_master_partition_and_frozen_draws(persisted):
         assert test_images <= master_eval
         assert not train_images & master_eval
         assert {r['subject'] for r in raw['test']} <= {7, 8, 9}
-        assert test_images == set(manifest['test_stimulus_ids'])
+        assert test_images <= set(manifest['test_stimulus_ids'])
+        assert test_images | {r['stimulus_id'] for r in test_seen_rows} == set(manifest['test_stimulus_ids'])
         train = {r['record_id']: SimpleNamespace(**r) for r in raw['train']}
         queries = [SimpleNamespace(**r) for r in raw['test'] if r['subject'] in {7,8,9}]
         for k in (1,5,10):

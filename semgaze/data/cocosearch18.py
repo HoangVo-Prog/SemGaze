@@ -49,6 +49,11 @@ def read_persisted_splits(split_root=SPLIT_ROOT, *, data_config=None):
         raise FileNotFoundError(root)
     manifest_path = root / 'split_manifest.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    # prepare_split.py writes self-contained dataset manifests.  The combined
+    # directory needs dataset selection before the model sees any records.
+    if 'source_manifests' in manifest or 'source_file' in manifest:
+        from .json_splits import read_current_json_splits
+        return read_current_json_splits(root, manifest, data_config)
     master_path = root.parent / 'master_split_manifest.json'
     index_path = root.parent / 'split_index.json'
     master = json.loads(master_path.read_text(encoding='utf-8'))
@@ -173,9 +178,17 @@ class CocoSearch18Adapter:
             raise ValueError('data.annotation_frame unresolved: declare original_image or verified width/height')
         self.annotation_frame = annotation_frame
         self.index = {}
-        for path in self.root.rglob('*'):
-            if path.is_file():
-                self.index.setdefault(path.name, []).append(path)
+        # data/images may hold both AiR and COCO.  Never select an AiR image
+        # with the same basename as a COCO image.
+        aliases = ('COCO_Search18', 'COCO-Search18', 'COCOSearch18', 'cocosearch18')
+        scoped_roots = [self.root / name for name in aliases if (self.root / name).is_dir()]
+        for base in scoped_roots or [self.root]:
+            for path in base.rglob('*'):
+                if path.is_file():
+                    relative = path.relative_to(self.root).parts
+                    if not scoped_roots and relative[0].lower() == 'air':
+                        continue
+                    self.index.setdefault(path.name, []).append(path)
 
     @lru_cache(maxsize=None)
     def image_info(self, name, condition):
@@ -183,7 +196,10 @@ class CocoSearch18Adapter:
         matches = self.index.get(name, [])
         if len(matches) > 1:
             folder = 'tp' if condition == 'present' else 'ta'
-            matches = [p for p in matches if p.relative_to(self.root).parts[0] == folder]
+            conditioned = [p for p in matches if folder in
+                           (part.lower() for part in p.relative_to(self.root).parts[:-1])]
+            if conditioned:
+                matches = conditioned
         if len(matches) != 1:
             raise FileNotFoundError(f'{name}: expected one image under {self.root}, found {len(matches)}')
         with Image.open(matches[0]) as image:
@@ -200,6 +216,6 @@ class CocoSearch18Adapter:
     def __call__(self, raw):
         rid = raw['record_id']
         image_path, width, height = self.image_info(raw['name'], raw['condition'])
-        return NormalizedRecord(rid, raw['stimulus_id'], raw['subject'], image_path, width, height,
+        return NormalizedRecord(rid, raw['stimulus_id'], int(raw['subject']), image_path, width, height,
             raw['task'], raw['condition'], tuple(raw['X']), tuple(raw['Y']), tuple(raw[self.duration_field]),
             semantic_from_prediction(raw['prediction'], len(raw['X']), rid))

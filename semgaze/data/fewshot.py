@@ -147,6 +147,9 @@ def frozen_episode(query, train_by_id, manifest, k, *, draw_id=None, unseen_subj
     if any(s.stimulus_id not in manifest['train_stimulus_ids'] for s in supports):
         raise ValueError('frozen support image is outside train membership')
     for entry, record in zip(entries, supports):
-        if entry["image_name"] != record.stimulus_id or entry["task"] != record.task:
-            raise ValueError("frozen trial identity mismatch")
+        # The new JSON support entry uses unit_id (task), not task itself.
+        task = entry.get('task', entry.get('unit_id'))
+        if (entry['image_name'] != record.stimulus_id or task != record.task or
+                entry.get('trial_key') != f'{record.task}::{record.stimulus_id}'):
+            raise ValueError('frozen trial identity mismatch')
     return FlatEpisode(supports, query, draw_id=draw_id)

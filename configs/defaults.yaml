@@ -12,8 +12,8 @@ experiment:
 data:
   dataset: COCO-Search18
   variant: all
-  split_root: data/COCO_Search18/split_subject_5_5/all
-  images_root: data/COCO_Search18/images
+  split_root: data/split/all
+  images_root: data/images
   # Declare original_image only when these are the original annotation images,
   # or provide a verified {width: ..., height: ...} coordinate frame.
   annotation_frame: original_image
