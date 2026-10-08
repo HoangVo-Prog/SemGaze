@@ -130,9 +130,11 @@ def validate_config(config):
     positive_int(config['training']['profile_every_steps'], 'training.profile_every_steps', minimum=0)
     positive_int(config['training']['preprocessing_cache_max_entries'], 'training.preprocessing_cache_max_entries')
     positive_int(config['training']['semantic_collation_cache_max_entries'], 'training.semantic_collation_cache_max_entries')
-    for key in ('length_aware_batching', 'reuse_query_vision', 'cache_preprocessed_images', 'cache_semantic_collation'):
+    for key in ('length_aware_batching', 'reuse_query_vision', 'cache_preprocessed_images', 'cache_semantic_collation', 'cache_frozen_visual_features'):
         if type(config['training'][key]) is not bool:
             raise ValueError(f'training.{key} must be boolean')
+    if config['training']['cache_frozen_visual_features']:
+        raise ValueError('training frozen-feature cache is gated until real A100 train-mode RNG/gradient parity')
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']
@@ -189,6 +191,8 @@ def validate_config(config):
             raise ValueError(f'{name} must be a nonempty list of unique positive integers')
         for k in values:
             positive_int(k, name)
+    if config['data']['fewshot']['k_sampling_strategy'] not in ('per_episode', 'per_batch'):
+        raise ValueError('k_sampling_strategy must be per_episode or per_batch')
     probs = config['data']['fewshot']['train_k_probabilities']
     if len(probs) != len(config['data']['fewshot']['k_values']) or any(not math.isfinite(p) or p < 0 for p in probs) or not math.isclose(sum(probs), 1, abs_tol=1e-8):
         raise ValueError('train_k_probabilities must align with k_values and sum to one')

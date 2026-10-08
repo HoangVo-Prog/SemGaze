@@ -242,7 +242,8 @@ def load_real_sampler(config):
     return sampler, dict(
         split_manifest_sha256=identity, train_record_count=len(records),
         train_subjects=sorted({r.subject for r in records}), split='train',
-        k_values=data['fewshot']['k_values'], k_probabilities=data['fewshot']['train_k_probabilities'])
+        k_values=data['fewshot']['k_values'], k_probabilities=data['fewshot']['train_k_probabilities'],
+        k_sampling_strategy=data['fewshot'].get('k_sampling_strategy', 'per_episode'))
 
 
 def run_measured_step(bundle, sampler, step, profiler, result):
@@ -383,6 +384,11 @@ def check_comparability(results):
     if len(populated) < 2:
         return {'status': 'not_checked', 'reason': 'fewer than two variants reached real episode collation',
                 'variants_checked': [r['id'] for r in populated]}
+    if any(r.get('dataset', {}).get('k_sampling_strategy') == 'per_batch' for r in populated):
+        return {'status': 'policy_not_comparable', 'reason': (
+            'per_batch changes K correlation and episode draws across physical B variants; '
+            'compare throughput with distribution-matched runs, not exact workload identity'),
+            'variants_checked': [r['id'] for r in populated]}
     reference = max(populated, key=lambda r: len(r['workload_groups']))
     differences = []
     for row in populated:

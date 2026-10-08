@@ -28,8 +28,20 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
     target = min(count, sampler.remaining)
     if not target:
         raise StopIteration("query-coverage epoch is complete; start the next epoch explicitly")
-    for _ in range(target):
-        episode = sampler.sample()
+    policy = bundle.config.get('data', {}).get('fewshot', {}).get(
+        'k_sampling_strategy', t.get('k_sampling_strategy', 'per_episode'))
+    if policy not in ('per_episode', 'per_batch'):
+        raise ValueError('unsupported K sampling strategy')
+    batch_k = None
+    for episode_index in range(target):
+        if policy == 'per_batch':
+            # Each contiguous physical group makes one K draw, including tails.
+            if episode_index % size == 0:
+                batch_k = sampler.draw_k()
+            query = sampler.next_query()
+            episode = sampler.sample_for_query(query, k=batch_k)
+        else:
+            episode = sampler.sample()
         k = len(episode.supports)
         retries = 0
         while True:
@@ -52,8 +64,14 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
             original_episodes.append(episode)
             break
     groups = {}
-    for pair in sampled_all:
-        groups.setdefault(len(pair[0].supports), []).append(pair)
+    if policy == 'per_batch':
+        # Do not regroup same-K batches across physical boundaries. Group order
+        # must remain aligned with its one K draw (including optimizer tails).
+        for start in range(0, len(sampled_all), size):
+            groups[start] = sampled_all[start:start + size]
+    else:
+        for pair in sampled_all:
+            groups.setdefault(len(pair[0].supports), []).append(pair)
     batches = []
     for group in groups.values():
         if t.get('length_aware_batching', True):

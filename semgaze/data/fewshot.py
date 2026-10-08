@@ -14,6 +14,9 @@ class TrainingEpisodeSampler:
 
         self.k_values = tuple(data_config['fewshot']['k_values'])
         self.probabilities = tuple(data_config['fewshot']['train_k_probabilities'])
+        self.k_sampling_strategy = data_config['fewshot'].get('k_sampling_strategy', 'per_episode')
+        if self.k_sampling_strategy not in ('per_episode', 'per_batch'):
+            raise ValueError('invalid K sampling strategy')
         # Config validation owns range/normalization; fail closed for direct callers.
         if (not self.k_values or len(self.k_values) != len(self.probabilities) or
                 len(set(self.k_values)) != len(self.k_values) or
@@ -86,17 +89,19 @@ class TrainingEpisodeSampler:
         self._cursor += 1
         return query
 
+    def draw_k(self):
+        """Exactly one configured K draw; reproduces legacy per-episode RNG."""
+        if all(p == self.probabilities[0] for p in self.probabilities):
+            return self.rng.choice(self.k_values)
+        return self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
+
     def sample_for_query(self, query, *, k=None):
         if self._query_by_id.get(query.record_id) != query:
             raise ValueError('support sampling query is outside Q_train')
         if k is not None and (type(k) is not int or k not in self.k_values):
             raise ValueError(f'K_train={k} is not in configured k_values={self.k_values}')
         if k is None:
-            # Preserve legacy seeded trajectories for uniform K=1..10.
-            if all(p == self.probabilities[0] for p in self.probabilities):
-                k = self.rng.choice(self.k_values)
-            else:
-                k = self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
+            k = self.draw_k()
         candidates = [i for i in self.images[query.subject] if i != query.stimulus_id]
         if len(candidates) < k:
             raise RuntimeError(f'query {query.record_id} has only {len(candidates)} eligible support images for K_train={k}')
@@ -115,7 +120,8 @@ class TrainingEpisodeSampler:
         return {'version': 1, 'query_ids': self.query_ids, 'rng': self.rng.getstate(),
                 'epoch': self.epoch, 'cursor': self.cursor,
                 'permutation': list(self._permutation) if self._permutation is not None else None,
-                'k_values': self.k_values, 'k_probabilities': self.probabilities}
+                'k_values': self.k_values, 'k_probabilities': self.probabilities,
+                 'k_sampling_strategy': self.k_sampling_strategy}
 
     def load_state_dict(self, state):
         if not isinstance(state, dict) or state.get('version') != 1:
@@ -125,6 +131,8 @@ class TrainingEpisodeSampler:
         # Legacy v1 checkpoint omitted K because old code always sampled K=1..10 uniformly.
         stored_k = tuple(state.get('k_values', range(1, 11)))
         stored_prob = tuple(state.get('k_probabilities', (0.1,) * 10))
+        if state.get('k_sampling_strategy', 'per_episode') != self.k_sampling_strategy:
+            raise ValueError('checkpoint K sampling strategy differs from current config')
         if stored_k != self.k_values or stored_prob != self.probabilities:
             raise ValueError('checkpoint training K distribution differs from current config; start a new run')
         permutation, cursor, epoch = state['permutation'], state['cursor'], state['epoch']

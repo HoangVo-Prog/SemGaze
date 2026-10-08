@@ -28,6 +28,7 @@ data:
   fewshot:
     k_values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     train_k_probabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    k_sampling_strategy: per_episode # per_episode (original) or per_batch (statistical change)
     require_same_subject: true
     require_distinct_support_stimuli: true
     exclude_query_stimulus: true
@@ -142,6 +143,7 @@ training:
   cache_preprocessed_images: true # window-local, CPU-only native pixel cache; no feature/gradient caching
   preprocessing_cache_max_entries: 32 # bound both PIL and preprocessed-pixel LRUs
   cache_semantic_collation: true
+  cache_frozen_visual_features: false # disabled pending A100 gradient/RNG proof
   semantic_collation_cache_max_entries: 128
   max_grad_norm: 1.0
   weight_decay: 0.01
