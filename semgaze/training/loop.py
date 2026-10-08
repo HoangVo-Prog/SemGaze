@@ -9,6 +9,8 @@ from semgaze.evaluation.predictions import predict_epoch, format_prediction_summ
 from semgaze.model.checkpoint import save_checkpoint
 from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
 from semgaze.training.batching import sample_optimizer_batches
+from semgaze.training.profiling import TrainingProfiler
+from contextlib import nullcontext
 from semgaze.evaluation.progress import RollingRate, format_eta, format_finish_time
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.cache import ProjectedWhereCache
@@ -112,11 +114,18 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             if timed_epoch != sampler.epoch:
                 epoch_rate.reset()
                 timed_epoch = sampler.epoch
+            profile_interval = t.get('profile_every_steps', 0)
+            profile_now = profile_interval > 0 and (step + 1) % profile_interval == 0
+            profiler = TrainingProfiler(bundle.input_row.device) if profile_now else None
+            if profile_now:
+                profiler.sync()
             step_started = time.perf_counter()
             losses, rejected = [], 0
             component_losses = {'loss_where': [], 'loss_flat': []}
             diagnostic_losses = {key: [] for key in ('loss_what', 'loss_why', 'loss_how')}
+            sampling_started = time.perf_counter()
             batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
+            sampling_time = time.perf_counter() - sampling_started
             prediction_batch = sampled_episodes[-prediction_capacity:] if prediction_capacity else []
             weights = [len(batch.episodes) / len(sampled_episodes) for batch in batches]
             interval = t.get('gradient_diagnostics_every', 0)
@@ -124,7 +133,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             for micro, batch in enumerate(batches):
                 result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
                     loss_scale=weights[micro], where_batch=batch,
-                    diagnostics=diagnose and micro == len(batches) - 1)
+                    diagnostics=diagnose and micro == len(batches) - 1,
+                    profiler=profiler)
                 losses.append(result['loss_total'] * weights[micro])
                 for key in component_losses:
                     if key in result and result[key] is not None:
@@ -134,9 +144,10 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                         diagnostic_losses[key].append(result[key] * weights[micro])
             if prediction_capacity:
                 recent_episodes = (recent_episodes + prediction_batch)[-prediction_capacity:]
-            clip_and_check_gradients(bundle)
-            bundle.optimizer.step()
-            bundle.scheduler.step()
+            with (profiler.stage('clip_optimizer') if profiler else nullcontext()):
+                clip_and_check_gradients(bundle)
+                bundle.optimizer.step()
+                bundle.scheduler.step()
             # All WHERE and semantic forwards for this update have finished.
             # Release window-local CPU preprocessing buffers before evaluation.
             image_cache = getattr(batches[0], 'image_cache', None) if batches else None
@@ -146,35 +157,45 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             else:
                 preprocessing_stats = None
             global_step = step + 1
+            if profiler:
+                profiler.sync()
             step_time = time.perf_counter() - step_started
             epoch_step = min(updates_per_epoch, (sampler.cursor + window - 1) // window)
             epoch_complete = sampler.epoch_complete()
             epoch_rate.update(epoch_step)
             epoch_eta = epoch_rate.eta(updates_per_epoch - epoch_step)
-            entry = {'event': 'train_step', 'step': global_step,
-                     'epoch': sampler.epoch - 1 + sampler.cursor / sampler.query_count,
-                     'epoch_index': sampler.epoch, 'epoch_total': t['num_train_epochs'],
-                     'epoch_step': epoch_step, 'epoch_steps': updates_per_epoch,
-                     'epoch_progress_pct': 100 * epoch_step / updates_per_epoch,
-                     'epoch_eta_sec': epoch_eta, 'epoch_complete': epoch_complete,
-                     'query_cursor': sampler.cursor, 'query_count': sampler.query_count,
-                     'loss_total': float(sum(losses)),
-                     'rejected_where_episodes': rejected,
-                     'learning_rate': float(bundle.optimizer.param_groups[0]['lr']),
-                     'step_time_sec': step_time, 'physical_batch_size': t['per_device_train_batch_size'],
-                     'gradient_accumulation_steps': t['gradient_accumulation_steps'],
-                     'episodes_per_second': len(sampled_episodes) / step_time}
-            if preprocessing_stats is not None:
-                entry['preprocessing_cache_hits'] = preprocessing_stats['hits']
-                entry['preprocessing_cache_misses'] = preprocessing_stats['misses']
-                entry['preprocessing_cache_hit_rate'] = preprocessing_stats['hit_rate']
-            for key, values in component_losses.items():
-                entry[key] = float(sum(values)) if values else None
-            for key, values in diagnostic_losses.items():
-                if values:
-                    entry[key] = float(sum(values))
-            if (global_step % logging['every_steps'] == 0 or global_step == max_steps or
-                    epoch_complete):
+            should_log = (global_step % logging['every_steps'] == 0 or
+                          global_step == max_steps or epoch_complete or profile_now)
+            if should_log:
+                entry = {'event': 'train_step', 'step': global_step,
+                         'epoch': sampler.epoch - 1 + sampler.cursor / sampler.query_count,
+                         'epoch_index': sampler.epoch, 'epoch_total': t['num_train_epochs'],
+                         'epoch_step': epoch_step, 'epoch_steps': updates_per_epoch,
+                         'epoch_progress_pct': 100 * epoch_step / updates_per_epoch,
+                         'epoch_eta_sec': epoch_eta, 'epoch_complete': epoch_complete,
+                         'query_cursor': sampler.cursor, 'query_count': sampler.query_count,
+                         'loss_total': float(sum(losses)),
+                         'rejected_where_episodes': rejected,
+                         'learning_rate': float(bundle.optimizer.param_groups[0]['lr']),
+                         'step_time_sec': step_time, 'physical_batch_size': t['per_device_train_batch_size'],
+                         'gradient_accumulation_steps': t['gradient_accumulation_steps'],
+                         'episodes_per_second': len(sampled_episodes) / step_time}
+                if preprocessing_stats is not None:
+                    entry['preprocessing_cache_hits'] = preprocessing_stats['hits']
+                    entry['preprocessing_cache_misses'] = preprocessing_stats['misses']
+                    entry['preprocessing_cache_hit_rate'] = preprocessing_stats['hit_rate']
+                for key, values in component_losses.items():
+                    entry[key] = float(sum(values)) if values else None
+                for key, values in diagnostic_losses.items():
+                    if values:
+                        entry[key] = float(sum(values))
+                entry['step_time_basis'] = ('cuda_synchronized' if profile_now else 'host_wall_approx')
+                entry['physical_forwards'] = len(batches)
+                entry['effective_physical_batch_occupancy'] = (len(sampled_episodes) /
+                    max(1, len(batches) * t['per_device_train_batch_size']))
+                if profiler:
+                    entry['profile_stages_sec'] = dict(profiler.times)
+                    entry['sampling_collation_sec'] = sampling_time
                 bundle.trainer_history.append(entry)
                 stream.write(json.dumps(entry, allow_nan=False) + '\n')
                 stream.flush()

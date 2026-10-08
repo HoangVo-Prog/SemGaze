@@ -22,6 +22,14 @@ class RowEmbedding(nn.Module):
         ordinary = self.base(input_ids)
         return torch.where((input_ids == self.token_id).unsqueeze(-1), self.end_fix_row.to(ordinary.dtype), ordinary)
 
+    def forward_without_end_fix(self, input_ids):
+        """Fast path ONLY after caller verified no END_FIX IDs on the host.
+
+        The frozen base embedding still executes normally; this method does not
+        alter token rows used in the WHERE branch.
+        """
+        return self.base(input_ids)
+
 
 class RowHead(nn.Module):
     def __init__(self, base, token_id, row):

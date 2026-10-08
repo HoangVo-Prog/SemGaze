@@ -2,7 +2,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 
-def extract_query_states(hidden, input_ids, labels, end_fix_id, counts):
+def extract_query_states(hidden, input_ids, labels, end_fix_id, counts, *, return_unpadded=False):
     if hidden.shape[:2] != input_ids.shape or labels.shape != input_ids.shape:
         raise ValueError('hidden/input/label shapes do not align')
     if len(counts) != hidden.shape[0]:
@@ -14,6 +14,8 @@ def extract_query_states(hidden, input_ids, labels, end_fix_id, counts):
             raise ValueError(f'query {b}: expected {n} END_FIX states, found {len(pos)}')
         selected.append(hidden[b, pos.to(hidden.device)])
         positions.append(pos)
+    if return_unpadded:
+        return selected, None, positions
     padded = pad_sequence(selected, batch_first=True)
     mask = torch.arange(padded.shape[1], device=hidden.device)[None, :] < torch.tensor(counts, device=hidden.device)[:, None]
     return padded, mask, positions

@@ -1,4 +1,5 @@
 from semgaze.where.collator import collate_native, to_model_device
+from semgaze.model.trainable_tokens import RowEmbedding
 from semgaze.where.conversation import image_user
 from semgaze.state.insertion import insert_states, insert_states_batch
 import torch
@@ -87,7 +88,13 @@ def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=
         ids = native.inputs['input_ids']
         if bool((ids == bundle.end_fix_id).any()):
             raise ValueError('semantic conversation must not contain END_FIX')
-        embedding = bundle.model.get_input_embeddings()(ids.to(bundle.input_row.device))
+        embedding_module = bundle.model.get_input_embeddings()
+        device_ids = ids.to(bundle.input_row.device)
+        # The host-side END_FIX check above makes RowEmbedding's full-tensor
+        # torch.where redundant for this semantic-only path.
+        embedding = (embedding_module.forward_without_end_fix(device_ids)
+                     if isinstance(embedding_module, RowEmbedding)
+                     else embedding_module(device_ids))
         if reuse:
             # Feature identity includes native preprocessing. Compare on host before reuse.
             if where is not None:

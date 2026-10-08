@@ -32,6 +32,7 @@ SCHEMA_VERSION = 2
 STAGES = ('sampling_collation', 'where_forward', 'semantic_preparation',
           'semantic_forward', 'backward', 'gradient_clipping', 'optimizer_step', 'scheduler_step')
 METRICS = ('episodes_per_second', 'seconds_per_episode', 'step_time_mean_sec',
+           'physical_forwards_per_update_mean', 'effective_physical_batch_occupancy_mean',
            'step_time_median_sec', 'step_time_p95_sec', 'total_measured_sec',
            'peak_memory_allocated_bytes', 'peak_memory_reserved_bytes',
            *(f'{stage}_mean_sec' for stage in STAGES),
@@ -212,6 +213,10 @@ def summarize(result):
         for stage in STAGES:
             metrics[f'{stage}_mean_sec'] = statistics.mean(r['stage_seconds'].get(stage, 0) for r in rows)
         metrics.update(sequence_statistics(rows))
+        metrics.update(physical_forwards_per_update_mean=statistics.mean(
+            r.get('physical_forwards', 0) for r in rows),
+            effective_physical_batch_occupancy_mean=statistics.mean(
+                r.get('effective_physical_batch_occupancy', 0.0) for r in rows))
     # Never label model-loading or warmup peaks as measured-step peaks.
     measured_memory = result['memory'].get('measured', {})
     for key in ('peak_memory_allocated_bytes', 'peak_memory_reserved_bytes'):
@@ -253,6 +258,8 @@ def run_measured_step(bundle, sampler, step, profiler, result):
             batches, accepted, rejected = sample_optimizer_batches(
                 bundle, sampler, sampling_group_size=result['sampling_group_size'])
         result['workload_groups'].append([episode_identity(e) for e in accepted])
+        physical_forwards = len(batches)
+        effective_occupancy = len(accepted) / max(1, physical_forwards * t['per_device_train_batch_size'])
         result['inflight_episodes'] = [
             {k: v for k, v in m.items() if k != 'semantic_target'} | episode_identity(e)
             for batch in batches for e, m in zip(batch.episodes, batch.metadata)]
@@ -277,6 +284,7 @@ def run_measured_step(bundle, sampler, step, profiler, result):
         raise RuntimeError('non-finite total loss')
     result.pop('inflight_episodes', None)
     return dict(optimizer_step=step+1, step_time_sec=profiler.times['step'],
+                physical_forwards=physical_forwards, effective_physical_batch_occupancy=effective_occupancy,
                 stage_seconds=dict(profiler.times), episodes=episode_rows,
                 sequence_statistics=sequence_statistics([{'episodes': episode_rows}]),
                 rejected_where_episodes=rejected, loss_total=loss)

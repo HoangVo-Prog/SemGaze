@@ -43,9 +43,9 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
         loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'], bundle.model.get_output_embeddings())
     counts = [len(e.query.x_px) for e in episodes]
     states, mask, positions = extract_query_states(outputs.last_hidden_state, batch.inputs['input_ids'],
-        batch.inputs['labels'], bundle.end_fix_id, counts)
+        batch.inputs['labels'], bundle.end_fix_id, counts, return_unpadded=True)
     features = outputs.image_hidden_states if features is None else features
     if features.shape[:2] != (sum(m['image_count'] for m in batch.metadata), bundle.processor.image_seq_length):
         raise ValueError('native image feature groups differ from collated image ordering')
-    return WhereOutput(loss.loss, [states[b, :n] for b, n in enumerate(counts)], batch, positions,
+    return WhereOutput(loss.loss, states, batch, positions,
                        loss.episode_losses, [features[m['query_image_index']] for m in batch.metadata])
