@@ -72,7 +72,8 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
     return record
 
 
-def prediction_batches(bundle, episodes, *, budget, cache, path='both', projected_r_cache=None):
+def prediction_batches(bundle, episodes, *, budget, cache, path='both', projected_r_cache=None,
+                       on_window_ready=None):
     """Yield canonical-order predictions while grouping same-K work internally.
 
     Index-based restoration permits repeated supplied training episodes.
@@ -121,6 +122,10 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
                 results.update(zip(selected, generated))
         if set(results) != set(range(len(block))):
             raise ValueError('prediction coverage mismatch')
+        # The entire inference window is ready BEFORE its records are yielded.
+        # A yielded-record clock measures disk/serialization bursts, not inference.
+        if on_window_ready is not None:
+            on_window_ready(len(block))
         for i, e in enumerate(block):
             yield e, results[i]
 
@@ -170,7 +175,16 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     # progress is reported separately because it may be a strict subset.
     prediction_total = sum(len(queries) * where_draw_counts[str(k)] for k in k_values)
     prediction_rate = RollingRate(min_observations=2)
-    prediction_completed = 0
+    prediction_completed = 0  # records written, for display/coverage
+    prediction_ready = 0      # records inferred in completed windows, for ETA
+
+    def test_window_ready(window_size):
+        nonlocal prediction_ready
+        prediction_ready += window_size
+        if prediction_ready > prediction_total:
+            raise RuntimeError('prediction window readiness exceeded planned evaluation coverage')
+        prediction_rate.update(prediction_ready)
+
     python_rng = random.getstate()
     try:
         # Greedy inference normally consumes no RNG. Preserve it explicitly so
@@ -189,9 +203,19 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                         total = len(train_batch)
                         interval = progress_interval(total)
                         train_rate = RollingRate(min_observations=2)
+                        train_ready = 0
+
+                        def train_window_ready(window_size):
+                            nonlocal train_ready
+                            train_ready += window_size
+                            if train_ready > total:
+                                raise RuntimeError('train prediction window exceeds requested coverage')
+                            train_rate.update(train_ready)
+
                         for episode, generated in prediction_batches(bundle, train_batch,
                                 budget=settings['semantic_max_new_tokens'], cache=cache,
-                                projected_r_cache=projected_r_cache):
+                                projected_r_cache=projected_r_cache,
+                                on_window_ready=train_window_ready):
                             count += 1
                             record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                 split=split, index=count, budget=settings['semantic_max_new_tokens'],
@@ -199,14 +223,14 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                             stream.flush()
                             if should_report(count, total, interval):
-                                train_rate.update(count)
-                                eta = train_rate.eta(total - count)
+                                eta = train_rate.eta(total - train_ready)
                                 print(f"[EVAL][PRED][TRAIN] {count}/{total} "
                                       f"({100 * count / total:.1f}%) | "
                                       f"ETA train predictions={format_eta(eta)}", flush=True)
                     else:
                         # Exclude earlier train generation from the test ETA.
                         prediction_rate.reset()
+                        prediction_ready = 0
                         for k_position, k in enumerate(k_values, 1):
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
@@ -227,7 +251,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                 prediction_path = 'both' if draw < semantic_draw_count else 'where'
                                 for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
                                         budget=settings['semantic_max_new_tokens'], cache=cache, path=prediction_path,
-                                        projected_r_cache=projected_r_cache), 1):
+                                        projected_r_cache=projected_r_cache,
+                                        on_window_ready=test_window_ready), 1):
                                     count += 1
                                     record = _prediction_record(bundle, episode, epoch=epoch, step=step,
                                         split=split, index=count, budget=settings['semantic_max_new_tokens'],
@@ -237,11 +262,10 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                     stream.flush()
                                     prediction_completed += 1
                                     if should_report(query_index, len(queries), interval):
-                                        # Generated batch records arrive in bursts; time
-                                        # an interval, not each immediate file write.
-                                        prediction_rate.update(prediction_completed)
+                                        # ETA is sampled when each *inference window* finishes.
+                                        # Writing the window's records cannot fake a high rate.
                                         prediction_eta = prediction_rate.eta(
-                                            prediction_total - prediction_completed)
+                                            prediction_total - prediction_ready)
                                         print(f"[EVAL][PRED] {prediction_completed}/{prediction_total} "
                                               f"({100 * prediction_completed / prediction_total:.1f}%) | "
                                               f"K={k} ({k_position}/{len(k_values)}) "

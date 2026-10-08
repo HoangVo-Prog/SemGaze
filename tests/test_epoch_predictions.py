@@ -192,3 +192,27 @@ def test_prediction_budget_is_explicit(tmp_path, episode, budget):
     validate_config(config)
     config['evaluation']['predictions']['train_batches'] = 2
     validate_config(config)
+
+def test_window_ready_is_emitted_once_per_inference_window_before_record_yields(
+        tmp_path, episode, monkeypatch,
+    ):
+    """Progress units follow computed windows, not near-instant result yields."""
+    bundle = tiny_bundle(tmp_path, episode)
+    bundle.config['test']['prediction'].update(
+        execution='serial', bucket_window=2, bucket_by_length=False)
+    monkeypatch.setattr(predictions, 'evaluate_where_episode',
+                        lambda bundle, ep: {'text': 'WHERE'})
+    monkeypatch.setattr(predictions, 'evaluate_flat_episode',
+                        lambda bundle, ep, *, generation_budget: {'text': 'SEMANTIC'})
+    events = []
+    for _episode, _generated in predictions.prediction_batches(
+        bundle, [episode] * 5, budget=4, cache={},
+        on_window_ready=lambda n: events.append(('ready', n))
+    ):
+        events.append(('yield', 1))
+    assert events == [
+        ('ready', 2), ('yield', 1), ('yield', 1),
+        ('ready', 2), ('yield', 1), ('yield', 1),
+        ('ready', 1), ('yield', 1),
+    ]
+
