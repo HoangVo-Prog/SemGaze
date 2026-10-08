@@ -153,6 +153,7 @@ evaluation:
   strategy: epoch # epoch | steps | no (smoke/benchmark only)
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 10 # complete persisted support-set evaluation traversals per K
+  semantic_use_draws: true # repeat semantic prediction over evaluation.draw support draws
   k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:
@@ -166,12 +167,12 @@ evaluation:
   # local ISP-SENet and DeepGaze-VL reference trees. Canonical IG still
   # requires the per-image COCO-Search18 center-bias asset.
   metrics:
-    enabled: false
+    enabled: true
     split: test
     where:
-      scanmatch: false
+      scanmatch: true
       multimatch: false
-      sed: false
+      sed: true
       isp_reference:
         width: 512
         height: 320

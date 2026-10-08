@@ -27,6 +27,10 @@ class CoordinateProtocolError(ValueError):
     """Raised when a record cannot be adapted to the audited frame."""
 
 
+class DatasetIntegrityError(CoordinateProtocolError):
+    """Raised when ground-truth data is missing or dimensionally invalid."""
+
+
 class ScanpathMetricDependencyError(RuntimeError):
     """Raised when an audited optional runtime dependency is unavailable."""
 
@@ -43,6 +47,11 @@ LEGACY_PREDICTION_INVERSES = frozenset(
 ISP_SCANMATCH_SOURCE = "third_party/isp_reference/COCO_Search18/scanmatch.py"
 ISP_VAME_SOURCE = "third_party/isp_reference/COCO_Search18/visual_attention_metrics.py"
 DEEPGAZE_INVERSE_SOURCE = "DeepGaze-VL/predict_scanpath.py:238-244"
+
+# Constructed lazily because importing this module must remain cheap for
+# training and frozen-artifact inspection.
+_SCANMATCH_REFERENCES: dict[bool, Any] = {}
+_VAME_REFERENCE: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -228,7 +237,13 @@ def _scanmatch_score(
     }
     if with_duration:
         kwargs["TempBin"] = 50
-    scorer = ScanMatch(**kwargs)
+    # The reference object is immutable after construction.  Reuse it across
+    # queries so metric evaluation never pays a per-query setup cost.
+    key = bool(with_duration)
+    scorer = _SCANMATCH_REFERENCES.get(key)
+    if scorer is None:
+        scorer = ScanMatch(**kwargs)
+        _SCANMATCH_REFERENCES[key] = scorer
     if with_duration:
         # ISP's test.py converts seconds to milliseconds immediately before
         # fixationToSequence. Our canonical records already carry ms.
@@ -269,7 +284,13 @@ def _multimatch_points(points: list[tuple[float, float, float]]):
 
 def _multimatch_score(gt, pred, module=None):
     scorer = _multimatch_module(module)
-    result = scorer.docomparison(
+    try:
+        compare = scorer.docomparison
+    except AttributeError as exc:
+        raise ScanpathMetricDependencyError(
+            "multimatch-gaze==0.1.3 does not expose audited docomparison API"
+        ) from exc
+    result = compare(
         _multimatch_points([(x, y, d / 1000.0) for x, y, d in gt]),
         _multimatch_points([(x, y, d / 1000.0) for x, y, d in pred]),
         screensize=[ISP_WIDTH, ISP_HEIGHT],
@@ -290,6 +311,9 @@ def _load_reference_vame():
     functions. Keeping those imports lazy lets the parity wrapper run in a
     minimal CPU environment without replacing the reference implementation.
     """
+    global _VAME_REFERENCE
+    if _VAME_REFERENCE is not None:
+        return _VAME_REFERENCE
     path = Path(__file__).resolve().parents[2] / ISP_VAME_SOURCE
     if not path.exists():
         raise ScanpathMetricDependencyError(f"audited VAME source is missing: {path}")
@@ -314,6 +338,7 @@ def _load_reference_vame():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = previous
+    _VAME_REFERENCE = module
     return module
 
 
@@ -349,7 +374,11 @@ def _hmean(values):
     values = [float(v) for v in values]
     if any(v <= 0 or not math.isfinite(v) for v in values):
         return 0.0
-    return len(values) / sum(1.0 / v for v in values)
+    try:
+        from scipy.stats import hmean
+        return float(hmean(values))
+    except ImportError:  # keep lightweight coordinate-only environments usable
+        return len(values) / sum(1.0 / v for v in values)
 
 
 def _require_in_frame(points: Sequence[tuple[float, float, float]], *, name: str):
@@ -435,7 +464,7 @@ def score_scanpath_pair(
         if require_multimatch and mm_failure == "optional MultiMatch dependency unavailable":
             raise ScanpathMetricDependencyError(mm_failure)
         mm_components = [0.0] * 5
-        mm_numeric_failure = True
+        mm_numeric_failure = mm_failure != "optional MultiMatch dependency unavailable"
     else:
         mm_numeric_failure = False
     return {

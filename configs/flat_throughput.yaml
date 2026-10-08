@@ -15,3 +15,4 @@ training:
 evaluation:
   strategy: 'no'
   draw: 10 # complete persisted support-set evaluation traversals per K
+  semantic_use_draws: true # preserve draw-aware semantic prediction by default

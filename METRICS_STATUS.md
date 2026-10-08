@@ -3,15 +3,18 @@
 Gate B1 and Gate B2 are resolved from the checked-in reference trees and
 executable fixtures under `tests/fixtures/isp_coordinate_pairs.json`.
 
-* **SM/MM/SED — IMPLEMENTED_BUT_GATED.** The coordinate protocol is proven:
-  raw COCO-Search18 coordinates use `x*512/1680` and `y*320/1050`, subjects
-  map from SemGaze `1..10` to ISP `0..9`, and prediction bins use the
-  DeepGaze-VL representative `int(round(bin/100*frame_size))`. The local
-  TP reference has 13,167 full-length matches and 833 shorter valid prefixes
-  across 14,000 present-condition key matches; this is a source-population
-  difference, not a coordinate mismatch. Runtime MultiMatch remains an
-  optional audited dependency and full evaluation orchestration is still
-  separately gated.
+* **SM — PRODUCTION_READY.** The runtime uses the vendored ISP ScanMatch
+  reference with 512x320, 16x12, zero offset, 50 ms duration bins, and 3.5
+  threshold. It records both variants and applies the SciPy harmonic mean.
+* **MM — IMPLEMENTED_BUT_GATED.** The runtime preserves all five audited
+  `multimatch-gaze==0.1.3` components, converts durations to seconds, pads
+  short paths with `(1.0, 1.0, 0.001)`, and has deterministic zero/count
+  handling for non-finite output. The package is declared in `pyproject.toml`
+  but is unavailable in this restricted environment, so an installed-package
+  parity run remains the blocker.
+* **SED — PRODUCTION_READY.** The runtime calls the vendored ISP VAME
+  implementation on a 512x320 frame with a 5x5 grid and reports raw edit
+  distance without sequence-length normalization.
 * **LL — IMPLEMENTED_BUT_GATED.** Outcome B performs an exact SemGaze-context
   teacher-forced probability pass and reduces digit-normalized transitions to
   scalars. It is disabled by default and covered by configuration guards.
@@ -24,8 +27,31 @@ executable fixtures under `tests/fixtures/isp_coordinate_pairs.json`.
 * **CIDEr-R — IMPLEMENTED_BUT_GATED.** The authors' scorer and PTB wrapper
   are vendored with provenance; the authors-runtime parity check remains.
 
-The canonical metrics block remains opt-in (`evaluation.metrics.enabled:
-false`) because IG and independent runtime/preflight gates are unresolved.
+The active canonical configurations enable SM and SED; MM remains disabled
+until its installed-package parity run is available. IG remains disabled and unchanged. Metrics are produced from the existing prediction
+records; frozen rescoring does not load the VLM or generate additional text.
+
+Focused result: 93 repository tests passed, plus 4 new frozen-runtime/failure-policy
+tests passed. Two COCO protocol tests could not start because the checked-out
+dataset split is absent; 16 tests were skipped by optional model dependencies.
+Full model-generation and
+installed-MultiMatch regression tests were skipped or blocked by this
+environment (`peft` and `multimatch-gaze==0.1.3` are unavailable). Generation
+call regression, real frozen artifact replay, and batch-size invariance are
+therefore not claimed as passed here.
+
+* Tests: 93 passed, 2 failed to start because the COCO split is absent, and
+  16 skipped (optional model/dependency coverage); the added frozen-runtime
+  suite is 4/4 passed.
+* Generation-call regression: not run (no `peft` runtime).
+* Frozen rescoring: passed with the checked-in synthetic frozen records; real
+  package replay is blocked by missing MultiMatch.
+* Batch-size invariance: not run in the model runtime.
+* Config: SM and SED are enabled in `configs/defaults.yaml` and
+  `configs/flat_single.yaml`; MM is explicitly disabled pending parity. IG and
+  unrelated semantic/probability metrics are unchanged.
+* Remaining blocker: install `multimatch-gaze==0.1.3` and run the real model
+  generation-call, reference-parity, and batch-invariance regressions.
 The coordinate adapter is now explicitly identified as
 `deepgaze_vl_predict_scanpath_round` in both YAML configurations.
 

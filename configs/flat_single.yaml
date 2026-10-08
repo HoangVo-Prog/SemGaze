@@ -153,6 +153,7 @@ evaluation:
   strategy: steps # epoch | steps | no (smoke/benchmark only)
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
+  semantic_use_draws: true # preserve draw-aware semantic prediction by default
   k_values: [1]
   loss_aggregation: episode_mean
   predictions:
@@ -167,7 +168,7 @@ evaluation:
     split: test
     where:
       scanmatch: true
-      multimatch: true
+      multimatch: false
       sed: true
       isp_reference:
         width: 512

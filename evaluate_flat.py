@@ -9,11 +9,11 @@ from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.evaluation.predictions import prediction_batches
 from semgaze.evaluation.test import test_mode
 from semgaze.model.visual_cache import InferenceVisualCache
-from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
-    score_prediction_semantics)
+from semgaze.evaluation.metrics_semantic import (aggregate_semantic_metrics, build_bertscorer,
+    build_cider_r_scorer, score_prediction_semantics)
 from semgaze.evaluation.records import (assert_key_sets_equal, expected_episode_keys,
                                          implementation_head, resolve_evaluation_draw_counts,
-                                         write_metrics_artifact)
+                                         resolve_semantic_draw_counts, write_metrics_artifact)
 
 
 def main():
@@ -57,6 +57,7 @@ def main():
     queries = [adapter(r) for r in raw['test'] if r['subject'] in data['unseen_subjects']]
     policy = {'split': args.split, 'path': args.path, 'semantic_max_new_tokens': budget,
               'evaluation_draw': config['evaluation']['draw'],
+              'semantic_use_draws': config['evaluation'].get('semantic_use_draws', True),
               'do_sample': False, 'split_manifest_identity': identity,
               'report_kind': 'prediction_and_validity_diagnostics',
               'metrics_gate': 'SM/MM/SED implementations and invalid treatment, semantic metrics and selection scalar require explicit protocol choices'}
@@ -85,25 +86,39 @@ def main():
             n=semantic_config['cider_r'].get('n', 4),
             k_r=semantic_config['cider_r'].get('k_r', 0.8))
     metrics_by_k = {str(k): {'draws': {}} for k in config['evaluation']['k_values']}
-    draw_counts = resolve_evaluation_draw_counts(config['evaluation']['draw'], manifest,
-                                                 config['evaluation']['k_values'])
+    semantic_use_draws = config['evaluation'].get('semantic_use_draws', True)
+    where_required = args.path in ('where', 'both')
+    draw_counts = resolve_evaluation_draw_counts(
+        config['evaluation']['draw'] if where_required or semantic_use_draws else 1,
+        manifest, config['evaluation']['k_values'])
+    semantic_draw_counts = resolve_semantic_draw_counts(draw_counts, semantic_use_draws)
     cache_settings = config['test']['cache']
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries'])
     with test_mode(bundle), (output_dir / 'predictions.jsonl').open('w', encoding='utf-8') as stream:
         for k in config['evaluation']['k_values']:
-            draws = range(draw_counts[str(k)])
+            # A WHERE-containing run still traverses every configured draw.
+            # A semantic-only run needs only the effective semantic count.
+            traversal_count = draw_counts[str(k)] if args.path in ('where', 'both') \
+                else semantic_draw_counts[str(k)]
+            semantic_draw_count = semantic_draw_counts[str(k)]
             draw_rates = []
-            for draw_id in draws:
+            for draw_id in range(traversal_count):
+                semantic_traversal = args.path in ('semantic', 'both') and (
+                    args.path == 'semantic' or draw_id < semantic_draw_count)
                 counts = {'queries': 0}
                 if args.path in ('where', 'both'):
                     counts['where_under_generated'] = 0
-                if args.path in ('semantic', 'both'):
+                if semantic_traversal:
                     counts['flat_format_valid'] = 0
                 episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
                             unseen_subjects=data['unseen_subjects']) for query in queries]
                 draw_prediction_rows = []
-                for episode, generated in prediction_batches(bundle, episodes, budget=budget, cache=cache, path=args.path):
+                prediction_path = 'both' if semantic_traversal and args.path == 'both' else \
+                    'semantic' if semantic_traversal else 'where'
+                semantic_prediction_rows = []
+                for episode, generated in prediction_batches(bundle, episodes, budget=budget, cache=cache,
+                                                              path=prediction_path):
                     query = episode.query
                     result = {'record_id': query.record_id, 'query_id': query.record_id, 'subject': query.subject,
                               'split': args.split, 'K': k, 'k': k, 'draw_id': draw_id,
@@ -111,9 +126,10 @@ def main():
                     if args.path in ('where', 'both'):
                         result['where'] = generated[0]
                         counts['where_under_generated'] += int(result['where']['under_generated'])
-                    if args.path in ('semantic', 'both'):
+                    if semantic_traversal:
                         result['semantic'] = generated[1]
                         counts['flat_format_valid'] += int(result['semantic']['flat_format_valid'])
+                        semantic_prediction_rows.append(result)
                     counts['queries'] += 1
                     draw_prediction_rows.append(result)
                     stream.write(json.dumps(result, ensure_ascii=False) + '\n')
@@ -122,21 +138,28 @@ def main():
                 rates = {key + '_rate': value / counts['queries'] for key, value in counts.items() if key != 'queries'}
                 draw_rates.append(rates)
                 summary[f'K={k},draw={draw_id}'] = counts | rates
-                if metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
+                if semantic_traversal and metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
                     expected_rows = [{'query_id': q.record_id, 'K': k, 'draw_id': draw_id}
                                      for q in queries]
-                    assert_key_sets_equal(draw_prediction_rows, expected_rows)
+                    assert_key_sets_equal(semantic_prediction_rows, expected_rows)
                     references = {(q.record_id, k, draw_id): q.semantic for q in queries}
                     metrics_by_k[str(k)]['draws'][str(draw_id)] = score_prediction_semantics(
-                        draw_prediction_rows, references, bertscorer=bertscorer, cider_r=cider_r,
+                        semantic_prediction_rows, references, bertscorer=bertscorer, cider_r=cider_r,
                         batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
-            summary[f'K={k},draw_mean'] = {key: sum(r[key] for r in draw_rates) / len(draw_rates) for key in draw_rates[0]}
+            summary[f'K={k},draw_mean'] = {
+                key: sum(r[key] for r in draw_rates if key in r) /
+                sum(key in r for r in draw_rates)
+                for key in {name for rate in draw_rates for name in rate}
+            }
+            summary[f'K={k},semantic_draws'] = semantic_draw_count
+            summary[f'K={k},semantic_metric_aggregation'] = \
+                'draw_mean' if semantic_use_draws else 'single_traversal'
     cache.close()
     (output_dir / 'validity_summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
     if metrics_config.get('enabled') and (bertscorer is not None or cider_r is not None):
         expected = expected_episode_keys(
             [q.record_id for q in queries], config['evaluation']['k_values'],
-            draw_counts)
+            semantic_draw_counts)
         observed = []
         for k, block in metrics_by_k.items():
             for draw_id in block['draws']:
@@ -147,14 +170,9 @@ def main():
             raise ValueError('metrics artifact does not cover every configured test episode')
         for k, block in metrics_by_k.items():
             draws = list(block['draws'].values())
-            if draws:
-                numeric = sorted({name for draw in draws for name, value in draw.items()
-                                  if name.startswith('eval_') and isinstance(value, (int, float))})
-                block['draw_mean'] = {name: sum(draw[name] for draw in draws if isinstance(draw.get(name), (int, float))) /
-                                      sum(isinstance(draw.get(name), (int, float)) for draw in draws)
-                                      for name in numeric if any(isinstance(draw.get(name), (int, float)) for draw in draws)}
-            else:
-                block['draw_mean'] = {}
+            block['semantic_draw_count'] = len(draws)
+            block['semantic_metric_aggregation'] = 'draw_mean' if semantic_use_draws else 'single_traversal'
+            block['draw_mean'] = aggregate_semantic_metrics(draws, use_draws=semantic_use_draws)
         write_metrics_artifact(output_dir / 'metrics.json', checkpoint=args.checkpoint,
             config=args.config or args.checkpoint / 'resolved_config.json',
             split_manifest_identity=identity, by_k=metrics_by_k,

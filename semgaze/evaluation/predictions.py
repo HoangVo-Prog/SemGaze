@@ -13,12 +13,17 @@ from semgaze.evaluation.where import evaluate_where_episode
 from semgaze.evaluation.test import test_mode, test_queries
 from semgaze.semantic.flat.target import build_flat_target
 from semgaze.where.serialization import serialize_xyd_record
+from semgaze.where.serialization import parse_xyd_output
+from semgaze.evaluation.metrics_scanpath import (
+    CoordinateProtocolError, DatasetIntegrityError, aggregate_scanpath_draw, score_scanpath_pair,
+)
 from semgaze.evaluation.progress import (RollingRate, format_eta, format_finish_time,
                                           progress_interval, should_report)
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
-    score_prediction_semantics)
+    aggregate_semantic_metrics, score_prediction_semantics)
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
-                                         resolve_evaluation_draw_counts, write_metrics_artifact)
+                                         resolve_evaluation_draw_counts,
+                                         resolve_semantic_draw_counts, write_metrics_artifact)
 
 
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
@@ -43,10 +48,8 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
     semantic = evaluate_flat_episode(bundle, episode, generation_budget=budget) if generated is None else generated[1]
     query = episode.query
     where_diagnostics = dict(where)
-    semantic_diagnostics = dict(semantic)
     where_text = where_diagnostics.pop('text')
-    semantic_text = semantic_diagnostics.pop('text')
-    return {'epoch': epoch, 'step': step, 'split': split, 'prediction_index': index,
+    record = {'epoch': epoch, 'step': step, 'split': split, 'prediction_index': index,
             'split_manifest_identity': split_manifest_identity,
             'query_id': query.record_id, 'subject': query.subject,
             'stimulus_id': query.stimulus_id, 'task': query.task, 'k': len(episode.supports),
@@ -55,8 +58,18 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
             'gt_raw_pixels': [[x, y] for x, y in zip(query.x_px, query.y_px)],
             'gt_duration_ms_raw': list(query.duration_ms),
             'WHERE': {'GT': serialize_xyd_record(query, bundle.config['where']['end_fix_token']), 'PRED': where_text},
+            'where_generation': where_diagnostics}
+    # A WHERE record can outlive the single semantic traversal when semantic
+    # draws are disabled.  Do not serialize a placeholder or a duplicate
+    # semantic prediction for those later WHERE draws.
+    if semantic is not None:
+        semantic_diagnostics = dict(semantic)
+        semantic_text = semantic_diagnostics.pop('text')
+        record.update({
             'SEMANTIC': {'GT': build_flat_target(query.semantic), 'PRED': semantic_text},
-            'where_generation': where_diagnostics, 'semantic_generation': semantic_diagnostics}
+            'semantic_generation': semantic_diagnostics,
+        })
+    return record
 
 
 def prediction_batches(bundle, episodes, *, budget, cache, path='both', projected_r_cache=None):
@@ -115,7 +128,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
         raise ValueError('unseen query in train prediction batch')
     queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects']) if settings['test_scope'] == 'all_unseen' else ()
     k_values = bundle.config['evaluation']['k_values']
-    draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
+    where_draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
+    semantic_use_draws = bundle.config.get('evaluation', {}).get('semantic_use_draws', True)
+    semantic_draw_counts = resolve_semantic_draw_counts(where_draw_counts, semantic_use_draws)
     tag = f'epoch-{epoch:04d}' if bundle.config['evaluation']['strategy'] == 'epoch' else f'step-{step:08d}'
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
     directory.mkdir(parents=True, exist_ok=True)
@@ -124,16 +139,23 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     prediction_started = time.perf_counter()
     print(f"[EVAL][PRED] starting training predictions | episodes={len(train_batch)}", flush=True)
     if queries:
+        where_total = sum(len(queries) * where_draw_counts[str(k)] for k in k_values)
+        semantic_total = sum(len(queries) * semantic_draw_counts[str(k)] for k in k_values)
+        semantic_draw_label = str(sum(semantic_draw_counts.values())) if semantic_use_draws else \
+            'disabled / single traversal'
         print(f"[EVAL][PRED] starting test predictions | queries={len(queries)} | "
-              f"K={list(k_values)} | draws={sum(draw_counts.values())} | "
-              f"total_episodes={sum(len(queries) * draw_counts[str(k)] for k in k_values)}", flush=True)
+              f"K={list(k_values)} | WHERE draws={sum(where_draw_counts.values())} | "
+              f"semantic draws={semantic_draw_label} | total_episodes={where_total} | "
+              f"semantic_episodes={semantic_total}", flush=True)
     else:
         print('[EVAL][PRED] test predictions disabled', flush=True)
     cache_settings = bundle.config['test']['cache']
     owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
-    prediction_total = sum(len(queries) * draw_counts[str(k)] for k in k_values)
+    # The combined prediction file has one record per WHERE episode. Semantic
+    # progress is reported separately because it may be a strict subset.
+    prediction_total = sum(len(queries) * where_draw_counts[str(k)] for k in k_values)
     prediction_rate = RollingRate()
     prediction_completed = 0
     python_rng = random.getstate()
@@ -174,10 +196,15 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                         for k_position, k in enumerate(k_values, 1):
                             k_started = time.perf_counter()
                             interval = progress_interval(len(queries))
-                            draw_count = draw_counts[str(k)]
+                            draw_count = where_draw_counts[str(k)]
+                            semantic_draw_count = semantic_draw_counts[str(k)]
                             draw_times = []
                             k_rate = RollingRate()
                             k_total = len(queries) * draw_count
+                            semantic_label = str(semantic_draw_count) if semantic_use_draws else \
+                                'disabled / single traversal'
+                            print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
+                                  f"WHERE draws={draw_count} | semantic draws={semantic_label}", flush=True)
                             for draw in range(draw_count):
                                 draw_started = time.perf_counter()
                                 draw_rate = RollingRate()
@@ -186,8 +213,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                       f"starting | queries={len(queries)}", flush=True)
                                 episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
                                     unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
+                                prediction_path = 'both' if draw < semantic_draw_count else 'where'
                                 for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
-                                        budget=settings['semantic_max_new_tokens'], cache=cache,
+                                        budget=settings['semantic_max_new_tokens'], cache=cache, path=prediction_path,
                                         projected_r_cache=projected_r_cache), 1):
                                     count += 1
                                     record = _prediction_record(bundle, episode, epoch=epoch, step=step,
@@ -222,12 +250,16 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                             prediction_by_k[str(k)] = {
                                 'episodes': len(queries) * draw_count,
                                 'draws': draw_count,
+                                'where_draws': draw_count,
+                                'semantic_draws': semantic_draw_count,
+                                'semantic_episodes': len(queries) * semantic_draw_count,
                                 'complete_query_traversals': draw_count,
+                                'semantic_query_traversals': semantic_draw_count,
                                 'draw_time_sec': draw_times,
                                 'prediction_k_time_sec': k_time,
                             }
                             print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
-                                  f"draws={draw_count} | complete", flush=True)
+                                  f"WHERE draws={draw_count} | semantic draws={semantic_label} | complete", flush=True)
                 partial.replace(path)
                 counts[split], paths[split] = count, str(path)
     finally:
@@ -248,11 +280,16 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'test_prediction_queries': len(queries),
             'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
             'evaluation_draw': bundle.config['evaluation']['draw'],
+            'semantic_use_draws': semantic_use_draws,
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
             'prediction_time_sec': prediction_time, 'prediction_by_k': prediction_by_k,
             'metrics_artifact': metrics_artifact,
             'test_prediction_traversals': sum(value['complete_query_traversals']
                                               for value in prediction_by_k.values()),
+            'test_semantic_prediction_episodes': sum(value['semantic_episodes']
+                                                      for value in prediction_by_k.values()),
+            'test_semantic_prediction_traversals': sum(value['semantic_query_traversals']
+                                                        for value in prediction_by_k.values()),
             'where_conditioning': 'oracle_length; no query GT trajectory',
             'semantic_conditioning': 'teacher_forced_GT_XYD states; gold WHY groups'}
 
@@ -267,19 +304,30 @@ def format_prediction_summary(entry):
             f"  train: {batches} {batch_word} ({entry['train_prediction_episodes']} queries) -> {paths['train']}\n"
             f"  test: {entry['test_prediction_queries']} unseen queries x K={k_text} "
             f"({entry['test_prediction_episodes']} episodes) -> {paths['test']}\n"
-            '  Each record: WHERE GT/PRED; SEMANTIC GT/PRED. '
+            f"  semantic test predictions: {entry.get('test_semantic_prediction_episodes', 'n/a')} episodes; "
+            f"draws={'enabled' if entry.get('semantic_use_draws', True) else 'disabled / single traversal'}\n"
+            '  Records contain WHERE GT/PRED; semantic fields appear only on semantic traversals. '
             'WHERE is free-running; semantic uses GT WHERE states + gold WHY groups.')
 
 
 def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='integrated',
                               split_manifest_identity=''):
-    """Rescore frozen semantic predictions without loading or generating with the VLM."""
+    """Rescore frozen predictions without loading or generating with the VLM.
+
+    WHERE metrics consume the exact records emitted by ``predict_epoch``.  The
+    query id is the join key and the subject is checked before scoring, which
+    prevents an image-level human average from silently replacing a
+    personalized pair.
+    """
     metrics_config = config.get('evaluation', {}).get('metrics', {})
     if not metrics_config.get('enabled'):
         return None
+    where_config = metrics_config.get('where', {})
+    scanpath_enabled = any(bool(where_config.get(name)) for name in ('scanmatch', 'multimatch', 'sed'))
     semantic_config = metrics_config.get('semantic', {})
-    if not (semantic_config.get('bertscore', {}).get('enabled') or
-            semantic_config.get('cider_r', {}).get('enabled')):
+    semantic_enabled = bool(semantic_config.get('bertscore', {}).get('enabled') or
+                            semantic_config.get('cider_r', {}).get('enabled'))
+    if not scanpath_enabled and not semantic_enabled:
         # Probability metrics are produced during the test loss traversal and
         # cannot be reconstructed from frozen prediction text.
         return None
@@ -293,23 +341,37 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
             reference_root=Path(__file__).resolve().parents[2] / 'third_party' / 'cider_r',
             n=semantic_config['cider_r'].get('n', 4), k_r=semantic_config['cider_r'].get('k_r', 0.8))
     rows = [json.loads(line) for line in Path(path).read_text(encoding='utf-8').splitlines() if line.strip()]
+    # In single-traversal semantic mode the combined file still contains all
+    # WHERE draws, but only draw zero carries a semantic prediction. Keep the
+    # two row populations separate so WHERE metrics still see every draw.
+    test_rows = [row for row in rows if row.get('split') == 'test']
+    semantic_rows = [row for row in test_rows if 'semantic_generation' in row]
     refs = {}
     by_id = {q.record_id: q for q in queries}
-    grouped = {}
-    for row in rows:
-        if row.get('split') != 'test':
-            continue
+    where_grouped = {}
+    semantic_grouped = {}
+    for row in test_rows:
         key = (row.get('query_id', row.get('record_id')), int(row.get('K', row.get('k'))), int(row['draw_id']))
         query = by_id.get(key[0])
         if query is None:
             raise ValueError(f'missing query reference for frozen prediction {key}')
+        if int(row.get('subject', query.subject)) != int(query.subject):
+            raise ValueError(f'subject mismatch for frozen prediction {key}')
+        where_grouped.setdefault((key[1], key[2]), []).append(row)
+    for row in semantic_rows:
+        key = (row.get('query_id', row.get('record_id')), int(row.get('K', row.get('k'))), int(row['draw_id']))
+        query = by_id.get(key[0])
+        if query is None:
+            raise ValueError(f'missing query reference for frozen prediction {key}')
+        if int(row.get('subject', query.subject)) != int(query.subject):
+            raise ValueError(f'subject mismatch for frozen prediction {key}')
         refs[key] = query.semantic
-        grouped.setdefault((key[1], key[2]), []).append(row)
+        semantic_grouped.setdefault((key[1], key[2]), []).append(row)
     # Frozen prediction artifacts are allowed to be inspected independently;
     # each observed draw must nevertheless contain every eligible test query,
     # exactly once, and joins remain key based.
     expected_query_ids = {q.record_id for q in queries}
-    for (k, draw), group in grouped.items():
+    for (k, draw), group in where_grouped.items():
         assert_key_sets_equal(group)
         observed_query_ids = {row.get('query_id', row.get('record_id')) for row in group}
         if observed_query_ids != expected_query_ids:
@@ -317,22 +379,116 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
             extra = sorted(observed_query_ids - expected_query_ids)
             raise ValueError(f'incomplete frozen prediction draw K={k}, draw={draw}: '
                              f'missing={missing!r}, extra={extra!r}')
+    for (k, draw), group in semantic_grouped.items():
+        assert_key_sets_equal(group)
+        observed_query_ids = {row.get('query_id', row.get('record_id')) for row in group}
+        if observed_query_ids != expected_query_ids:
+            missing = sorted(expected_query_ids - observed_query_ids)
+            extra = sorted(observed_query_ids - expected_query_ids)
+            raise ValueError(f'incomplete semantic prediction draw K={k}, draw={draw}: '
+                             f'missing={missing!r}, extra={extra!r}')
     by_k = {}
-    for (k, draw), group in sorted(grouped.items()):
-        by_k.setdefault(str(k), {'draws': {}})['draws'][str(draw)] = score_prediction_semantics(
-            group, {(row.get('query_id', row.get('record_id')), k, draw): refs[(row.get('query_id', row.get('record_id')), k, draw)] for row in group},
-            bertscorer=bertscorer, cider_r=cider_r,
-            batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
+    grouped_keys = sorted((set(where_grouped) if scanpath_enabled else set()) |
+                          set(semantic_grouped))
+    for (k, draw) in grouped_keys:
+        where_group = where_grouped.get((k, draw), [])
+        semantic_group = semantic_grouped.get((k, draw), [])
+        block = by_k.setdefault(str(k), {'draws': {}})
+        draw_metrics = {}
+        if scanpath_enabled:
+            scores = []
+            for row in where_group:
+                query = by_id[row.get('query_id', row.get('record_id'))]
+                try:
+                    gt_x, gt_y, gt_d = query.x_px, query.y_px, query.duration_ms
+                    gt_dims = (query.image_width, query.image_height)
+                    invalid_gt = (not gt_x or len(gt_x) != len(gt_y) or
+                                  len(gt_x) != len(gt_d) or gt_dims != (1680, 1050))
+                except (AttributeError, TypeError):
+                    invalid_gt = True
+                if invalid_gt:
+                    raise DatasetIntegrityError(
+                        f'invalid GT dimensions for query {query.record_id!r}')
+                where = row.get('where_generation', {})
+                text = row.get('WHERE', {}).get('PRED', where.get('text', ''))
+                parsed = parse_xyd_output(text, len(gt_x), config.get('where', {}).get('end_fix_token', '<END_FIX>'))
+                # Preserve parser recovery: malformed format with recovered
+                # fixations is a scored query and remains a format failure.
+                prediction = parsed.get('fixations', [])
+                if not prediction:
+                    gt_symbols = len(gt_x)
+                    score = {'sm': 0.0, 'mm': 0.0, 'sed': gt_symbols,
+                             'sm_no_duration': 0.0, 'sm_with_duration': 0.0,
+                             'mm_components': [0.0] * 5, 'valid': False,
+                             'format_failure': True, 'mm_numeric_failure': False}
+                else:
+                    score = score_scanpath_pair(
+                        list(zip(gt_x, gt_y, gt_d)), prediction,
+                        gt_image_width=query.image_width, gt_image_height=query.image_height,
+                        require_multimatch=bool(where_config.get('multimatch', False)))
+                    if not where_config.get('multimatch', False):
+                        # MM is intentionally disabled for this artifact; an
+                        # absent optional package is not a numerical failure.
+                        score['mm_numeric_failure'] = False
+                    score['format_failure'] = not bool(parsed.get('canonical_format_valid'))
+                scores.append(score)
+            draw_metrics = aggregate_scanpath_draw(scores)
+            draw_metrics.update({
+                'SM': draw_metrics['eval_where_sm'],
+                'MM': draw_metrics['eval_where_mm'],
+                'SED': draw_metrics['eval_where_sed'],
+                'valid': draw_metrics['where_valid_count'],
+                'failed': len(scores) - draw_metrics['where_valid_count'],
+                'query_count': len(scores),
+                         'under_generation_count': sum(bool(r.get('where_generation', {}).get('under_generated')) for r in where_group),
+            })
+            print(f"[EVAL][METRIC][WHERE] K={k} draw={draw} SM={draw_metrics['SM']:.6f} "
+                  f"MM={draw_metrics['MM']:.6f} SED={draw_metrics['SED']:.6f} "
+                  f"valid={draw_metrics['valid']} failed={draw_metrics['failed']}", flush=True)
+        if semantic_enabled and semantic_group:
+            semantic_metrics = score_prediction_semantics(
+                semantic_group, {(row.get('query_id', row.get('record_id')), k, draw): refs[(row.get('query_id', row.get('record_id')), k, draw)] for row in semantic_group},
+                bertscorer=bertscorer, cider_r=cider_r,
+                batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
+            draw_metrics.update(semantic_metrics)
+        block['draws'][str(draw)] = draw_metrics
+    semantic_use_draws = config.get('evaluation', {}).get('semantic_use_draws', True)
     for block in by_k.values():
         draws = list(block['draws'].values())
-        block['draw_mean'] = {name: sum(d[name] for d in draws) / len(draws)
-                              for name in draws[0] if name.startswith('eval_') and
-                              all(isinstance(d.get(name), (int, float)) for d in draws)} if draws else {}
+        semantic_draws = [draw for draw in draws if any(name.startswith('eval_sem_') for name in draw)]
+        block['semantic_draw_count'] = len(semantic_draws)
+        block['semantic_metric_aggregation'] = 'draw_mean' if semantic_use_draws else 'single_traversal'
+        block['draw_mean'] = aggregate_semantic_metrics(semantic_draws, use_draws=semantic_use_draws)
+        if scanpath_enabled and draws:
+            for name in ('SM', 'MM', 'SED', 'valid', 'failed', 'query_count',
+                         'under_generation_count', 'mm_numeric_failure_count',
+                         'where_format_failure_count', 'where_valid_count'):
+                values = [d[name] for d in draws if isinstance(d.get(name), (int, float))]
+                if values:
+                    block['draw_mean'][name] = sum(values) / len(values)
     artifact = write_metrics_artifact(Path(output_dir) / 'metrics.json', checkpoint=checkpoint,
         config=config.get('_resolved_config_path', 'resolved_config.json'),
         split_manifest_identity=split_manifest_identity, by_k=by_k,
         provenance={'bertscore': bert_provenance, 'cider_r': cider_provenance,
                     'scanpath': {
+                        'enabled': scanpath_enabled,
+                        'multimatch_gaze_version': '0.1.3',
+                        'query_pairing': 'same_subject_canonical_query_id',
+                        'frame': [512, 320],
+                        'scanmatch': {'Xres': 512, 'Yres': 320, 'Xbin': 16, 'Ybin': 12,
+                                      'Offset': [0, 0], 'TempBin_ms': 50, 'Threshold': 3.5},
+                        'sed': {'grid': [5, 5], 'normalization': 'raw_edit_distance'},
+                        'query_counts': {
+                            'draws': sum(len(block['draws']) for block in by_k.values()),
+                            'queries': sum(int(d.get('query_count', 0))
+                                           for block in by_k.values() for d in block['draws'].values()),
+                            'valid': sum(int(d.get('valid', 0))
+                                         for block in by_k.values() for d in block['draws'].values()),
+                            'failed': sum(int(d.get('failed', 0))
+                                          for block in by_k.values() for d in block['draws'].values()),
+                            'under_generation': sum(int(d.get('under_generation_count', 0))
+                                                   for block in by_k.values() for d in block['draws'].values()),
+                        },
                         'gate_b1': 'passed',
                         'gate_b2': 'passed',
                         'inverse': 'deepgaze_vl_predict_scanpath_round',

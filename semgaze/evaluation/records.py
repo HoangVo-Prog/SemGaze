@@ -96,6 +96,21 @@ def resolve_evaluation_draw_counts(draw_count, manifest, k_values):
     return counts
 
 
+def resolve_semantic_draw_counts(where_draw_counts, semantic_use_draws=True):
+    """Resolve semantic prediction traversals from the WHERE traversal plan.
+
+    WHERE evaluation always owns validation against the persisted support draws.
+    When semantic draws are disabled, draw zero is still used as the normal
+    support realization for every K; no synthetic or unsampled episode is
+    introduced.
+    """
+    if type(semantic_use_draws) is not bool:
+        raise ValueError('evaluation.semantic_use_draws must be boolean')
+    if semantic_use_draws:
+        return dict(where_draw_counts)
+    return {str(k): 1 for k in where_draw_counts}
+
+
 def write_metrics_artifact(path, *, checkpoint, config, split_manifest_identity, by_k,
                            provenance, implementation_head, split="test", evaluation_draw=None):
     if split != "test":

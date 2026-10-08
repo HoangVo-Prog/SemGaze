@@ -33,6 +33,9 @@ def resolve_config(config, overrides=None):
     result = _merge(defaults, config)
     if overrides:
         result = _merge(result, overrides)
+    # Keep older run/config files backward-compatible even if they predate the
+    # explicit semantic draw switch.
+    result['evaluation'].setdefault('semantic_use_draws', True)
     validate_config(result)
     return result
 
@@ -174,6 +177,8 @@ def validate_config(config):
     if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
         raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
     positive_int(evaluation['draw'], 'evaluation.draw')
+    if type(evaluation.get('semantic_use_draws', True)) is not bool:
+        raise ValueError('evaluation.semantic_use_draws must be boolean')
     if evaluation['strategy'] == 'steps':
         positive_int(evaluation.get('eval_steps'), 'evaluation.eval_steps')
     for name, values in [('data.fewshot.k_values',config['data']['fewshot']['k_values']), ('evaluation.k_values',evaluation['k_values'])]:

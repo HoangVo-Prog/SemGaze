@@ -211,6 +211,29 @@ def score_prediction_semantics(rows, references_by_key, *, bertscorer=None, cide
     return result
 
 
+def aggregate_semantic_metrics(draw_metrics, *, use_draws):
+    """Reduce semantic prediction metrics without inventing draw samples.
+
+    The draw-aware path preserves the historical mean across complete draws.
+    The single-traversal path returns the only result directly, which keeps the
+    aggregation semantics explicit and avoids treating absent draws as zeros or
+    as duplicated copies of draw zero.
+    """
+    if not draw_metrics:
+        return {}
+    if not isinstance(use_draws, bool):
+        raise ValueError('semantic_use_draws must be boolean')
+    if not use_draws:
+        if len(draw_metrics) != 1:
+            raise ValueError('single-traversal semantic aggregation requires one draw result')
+        return {name: value for name, value in draw_metrics[0].items()
+                if name.startswith('eval_') and isinstance(value, (int, float))}
+    return {name: sum(draw[name] for draw in draw_metrics) / len(draw_metrics)
+            for name in draw_metrics[0]
+            if name.startswith('eval_') and
+            all(isinstance(draw.get(name), (int, float)) for draw in draw_metrics)}
+
+
 def aggregate_semantic_draw(records: Sequence[Mapping], *, bertscorer=None,
                             cider_scorer=None, cider_tokenizer=None,
                             batch_size=64):
