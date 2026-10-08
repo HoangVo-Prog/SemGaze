@@ -1,5 +1,6 @@
 """Build physical batches without changing query coverage or K sampling."""
 from semgaze.where.collator import collate_where, pack_where_batch, WhereContextOverflowError
+from semgaze.model.visual_cache import InferenceVisualCache
 
 
 def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
@@ -54,6 +55,17 @@ def _sample_optimizer_batches(bundle, sampler, *, sampling_group_size=None):
             part = group[i:i + size]
             batches.append(pack_where_batch(bundle.processor, [e for e, _ in part],
                 [n for _, n in part], cache))
+    # Keep WHERE's original batched native image preprocessing. Only seed the
+    # preprocessed query rows for later semantic collation, which would otherwise
+    # run the native image processor a second time for the same image.
+    if t.get('cache_preprocessed_images', False):
+        preprocessed = InferenceVisualCache(preprocessing=True, features=False,
+            max_entries=t.get('preprocessing_cache_max_entries', 32))
+        for episode, native in sampled_all:
+            path = episode.query.image_path
+            preprocessed.prime_preprocessed(path, native.inputs['pixel_values'][-1:], image=cache.get(path))
+        for batch in batches:
+            batch.image_cache = preprocessed
     return batches, original_episodes, rejected
 
 

@@ -89,6 +89,21 @@ class InferenceVisualCache(OrderedDict):
         while len(store) > self.max_entries:
             store.popitem(last=False)
 
+    def prime_preprocessed(self, path, pixels, *, image=None):
+        """Seed the exact native, CPU-preprocessed row without recomputing it.
+
+        Training uses this with features=False only, after WHERE collation.
+        """
+        if self.closed or not self.preprocessing:
+            raise ValueError('preprocessing cache is disabled or closed')
+        if pixels.device.type != 'cpu' or tuple(pixels.shape) != (1, 3, 448, 448):
+            raise ValueError('priming requires one canonical CPU pixel row')
+        if path in self.pixels and not torch.equal(self.pixels[path]['pixel_values'], pixels):
+            raise ValueError('the same image path has inconsistent preprocessing')
+        self._put(self.pixels, path, {'pixel_values': pixels.clone(), 'num_patches': [1]})
+        if image is not None:
+            self[path] = image
+
     def processor_for(self, processor, paths):
         self._check_processor(processor)
         if not self.preprocessing and not self.features:

@@ -1,5 +1,6 @@
 """COCO-Search18 query-coverage epochs and stochastic support construction."""
 from collections import defaultdict
+import math
 import random
 from .schema import FlatEpisode, UNSEEN_SUBJECTS
 
@@ -11,8 +12,15 @@ class TrainingEpisodeSampler:
         if data_config['variant'] != 'all':
             raise ValueError('Q_train must be built from the all-variant train.json')
 
-        self.k_values = tuple(range(1, 11))
-        self.probabilities = tuple(0.1 for _ in self.k_values)
+        self.k_values = tuple(data_config['fewshot']['k_values'])
+        self.probabilities = tuple(data_config['fewshot']['train_k_probabilities'])
+        # Config validation owns range/normalization; fail closed for direct callers.
+        if (not self.k_values or len(self.k_values) != len(self.probabilities) or
+                len(set(self.k_values)) != len(self.k_values) or
+                any(type(k) is not int or not 1 <= k <= 10 for k in self.k_values) or
+                any(not isinstance(p, (int, float)) or not math.isfinite(p) or p < 0 for p in self.probabilities) or
+                abs(sum(self.probabilities) - 1.0) > 1e-8):
+            raise ValueError('invalid configured training K distribution')
         unseen_subjects = data_config['unseen_subjects']
         self.rng = random.Random(seed)
         self.images = defaultdict(lambda: defaultdict(list))
@@ -33,8 +41,9 @@ class TrainingEpisodeSampler:
         if len(set(self.query_ids)) != len(self.query_ids):
             raise ValueError('duplicate optimization query record')
         for subject, images in self.images.items():
-            if len(images) < 11:
-                raise ValueError(f'subject {subject} needs 11 distinct train images for K_train_max=10')
+            needed = max(self.k_values) + 1
+            if len(images) < needed:
+                raise ValueError(f'subject {subject} needs {needed} distinct train images for K_train_max={max(self.k_values)}')
         self._epoch = 0
         self._cursor = 0
         self._permutation = None
@@ -80,11 +89,14 @@ class TrainingEpisodeSampler:
     def sample_for_query(self, query, *, k=None):
         if self._query_by_id.get(query.record_id) != query:
             raise ValueError('support sampling query is outside Q_train')
-        if k is not None and (type(k) is not int or not any(
-                k == value for value in self.k_values)):
-            raise ValueError(f'K_train={k} must be in 1..10')
+        if k is not None and (type(k) is not int or k not in self.k_values):
+            raise ValueError(f'K_train={k} is not in configured k_values={self.k_values}')
         if k is None:
-            k = self.rng.choice(self.k_values)
+            # Preserve legacy seeded trajectories for uniform K=1..10.
+            if all(p == self.probabilities[0] for p in self.probabilities):
+                k = self.rng.choice(self.k_values)
+            else:
+                k = self.rng.choices(self.k_values, weights=self.probabilities, k=1)[0]
         candidates = [i for i in self.images[query.subject] if i != query.stimulus_id]
         if len(candidates) < k:
             raise RuntimeError(f'query {query.record_id} has only {len(candidates)} eligible support images for K_train={k}')
@@ -102,13 +114,19 @@ class TrainingEpisodeSampler:
     def state_dict(self):
         return {'version': 1, 'query_ids': self.query_ids, 'rng': self.rng.getstate(),
                 'epoch': self.epoch, 'cursor': self.cursor,
-                'permutation': list(self._permutation) if self._permutation is not None else None}
+                'permutation': list(self._permutation) if self._permutation is not None else None,
+                'k_values': self.k_values, 'k_probabilities': self.probabilities}
 
     def load_state_dict(self, state):
         if not isinstance(state, dict) or state.get('version') != 1:
             raise ValueError('checkpoint lacks query-coverage state; explicitly start a new run')
         if tuple(state['query_ids']) != self.query_ids:
             raise ValueError('checkpoint optimization query universe differs')
+        # Legacy v1 checkpoint omitted K because old code always sampled K=1..10 uniformly.
+        stored_k = tuple(state.get('k_values', range(1, 11)))
+        stored_prob = tuple(state.get('k_probabilities', (0.1,) * 10))
+        if stored_k != self.k_values or stored_prob != self.probabilities:
+            raise ValueError('checkpoint training K distribution differs from current config; start a new run')
         permutation, cursor, epoch = state['permutation'], state['cursor'], state['epoch']
         if type(cursor) is not int or type(epoch) is not int or epoch < 0:
             raise ValueError('invalid epoch/cursor in checkpoint')

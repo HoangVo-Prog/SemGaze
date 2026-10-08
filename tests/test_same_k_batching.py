@@ -9,6 +9,7 @@ import pytest
 from semgaze.data.fewshot import TrainingEpisodeSampler
 from semgaze.data.schema import FlatEpisode, normalized_episode_from_dict
 from semgaze.model.config import ROOT, default_section
+from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.training import batching
 
 
@@ -87,6 +88,34 @@ def test_k_is_uniform_per_query(sampler_factory):
         assert n / sum(counts.values()) == pytest.approx(0.1, abs=0.02)
 
 
+def test_preprocessing_cache_toggle_does_not_change_episode_sampling(bundle, sampler_factory, monkeypatch):
+    import torch
+    mock_collate = batching.collate_where
+
+    def collate_with_pixel_row(*args, **kwargs):
+        native = mock_collate(*args, **kwargs)
+        native.inputs['pixel_values'] = torch.zeros((1, 3, 448, 448))
+        return native
+
+    monkeypatch.setattr(batching, 'collate_where', collate_with_pixel_row)
+    cached_sampler, baseline_sampler = sampler_factory(), sampler_factory()
+    bundle.config['training'].update(cache_preprocessed_images=True, preprocessing_cache_max_entries=3)
+    cached_batches, cached_episodes, cached_rejections = batching.sample_optimizer_batches(bundle, cached_sampler)
+    cache = cached_batches[0].image_cache
+    assert isinstance(cache, InferenceVisualCache)
+    assert cache.max_entries == 3
+    assert len(cache) <= 3
+    assert len(cache.pixels) <= 3
+
+    bundle.config['training']['cache_preprocessed_images'] = False
+    baseline_batches, baseline_episodes, baseline_rejections = batching.sample_optimizer_batches(bundle, baseline_sampler)
+    assert not isinstance(baseline_batches[0].image_cache, InferenceVisualCache)
+    assert cached_episodes == baseline_episodes
+    assert cached_rejections == baseline_rejections == 0
+    assert cached_sampler.state_dict() == baseline_sampler.state_dict()
+    cache.close()
+
+
 def test_overflow_retains_query_and_k_and_rolls_back_on_failure(bundle, sampler_factory, monkeypatch):
     sampler, reference = sampler_factory(), sampler_factory()
     first = reference.sample()
@@ -141,3 +170,53 @@ def test_benchmark_replays_identical_work_across_sizes(bundle, sampler_factory):
         states.append(sampler.state_dict())
     assert workloads[0] == workloads[1] == workloads[2]
     assert states[0] == states[1] == states[2]
+
+def test_configured_training_k_distribution_and_zero_weight(sampler_factory):
+    from collections import Counter
+    from semgaze.model.config import default_section
+    records = sampler_factory().records
+    data = default_section('data')
+    data['fewshot']['k_values'] = [1, 5, 10]
+    data['fewshot']['train_k_probabilities'] = [0.6, 0.3, 0.1]
+    sampler = TrainingEpisodeSampler(records, 42, data_config=data)
+    counts = Counter()
+    for _ in range(40):
+        sampler.start_epoch()
+        counts.update(len(sampler.sample().supports) for _ in range(sampler.query_count))
+    assert set(counts) == {1, 5, 10}
+    for k, p in zip((1, 5, 10), (0.6, 0.3, 0.1)):
+        assert counts[k] / sum(counts.values()) == pytest.approx(p, abs=0.05)
+    data['fewshot']['train_k_probabilities'] = [1.0, 0.0, 0.0]
+    fixed = TrainingEpisodeSampler(records, 42, data_config=data)
+    assert all(len(fixed.sample().supports) == 1 for _ in range(fixed.query_count))
+
+
+def test_training_k_checkpoint_fails_closed_on_distribution_change(sampler_factory):
+    from semgaze.model.config import default_section
+    original = sampler_factory()
+    original.sample()
+    checkpoint = original.state_dict()
+    data = default_section('data')
+    data['fewshot']['k_values'] = [1]
+    data['fewshot']['train_k_probabilities'] = [1.0]
+    configured = TrainingEpisodeSampler(original.records, 42, data_config=data)
+    with pytest.raises(ValueError, match='K distribution'):
+        configured.load_state_dict(checkpoint)
+    # Legacy checkpoints without explicit K fields resume only under legacy K distribution.
+    legacy = dict(checkpoint)
+    legacy.pop('k_values')
+    legacy.pop('k_probabilities')
+    baseline = sampler_factory()
+    baseline.load_state_dict(legacy)
+    assert baseline.state_dict()['cursor'] == checkpoint['cursor']
+    with pytest.raises(ValueError, match='K distribution'):
+        configured.load_state_dict(legacy)
+
+
+def test_configured_single_k_uses_only_k1(sampler_factory):
+    from semgaze.model.config import default_section
+    data = default_section('data')
+    data['fewshot']['k_values'] = [1]
+    data['fewshot']['train_k_probabilities'] = [1.0]
+    sampler = TrainingEpisodeSampler(sampler_factory().records, 42, data_config=data)
+    assert all(len(sampler.sample().supports) == 1 for _ in range(sampler.query_count))

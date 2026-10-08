@@ -14,6 +14,39 @@ from semgaze.data.fewshot import TrainingEpisodeSampler
 from semgaze.data.schema import FlatEpisode
 
 
+def test_train_image_preprocessing_cache_reuses_exact_query_pixels(tmp_path, episode):
+    from semgaze.model.visual_cache import InferenceVisualCache
+    from semgaze.where.collator import collate_native, collate_where
+    from semgaze.where.conversation import image_user
+    from semgaze.semantic.flat.prompt import build_flat_prompt
+    from semgaze.semantic.flat.target import build_flat_target
+
+    bundle = tiny_bundle(tmp_path, episode)
+    cache = InferenceVisualCache(preprocessing=True, features=False, max_entries=16)
+    where_images = {}
+    native_where = collate_where(bundle.processor, episode, bundle.end_fix_id,
+                  bundle.context_limit, config=bundle.config, image_cache=where_images)
+    cache.prime_preprocessed(episode.query.image_path, native_where.inputs['pixel_values'][-1:],
+                             image=where_images[episode.query.image_path])
+    with pytest.raises(ValueError, match='inconsistent preprocessing'):
+        cache.prime_preprocessed(episode.query.image_path, native_where.inputs['pixel_values'][-1:] + 1)
+    misses_before = cache.misses['preprocessing']
+    hits_before = cache.hits['preprocessing']
+    prompt = build_flat_prompt(episode.query)
+    kwargs = dict(processor=bundle.processor, messages=[image_user(prompt.text)],
+                  image_paths=[episode.query.image_path], target=build_flat_target(episode.query.semantic),
+                  prompt=prompt)
+    cached = collate_native(**kwargs, image_cache=cache)
+    baseline = collate_native(**kwargs, image_cache={})
+
+    assert cache.hits['preprocessing'] == hits_before + 1
+    assert cache.misses['preprocessing'] == misses_before
+    for key in ('input_ids', 'attention_mask', 'labels', 'pixel_values'):
+        torch.testing.assert_close(cached.inputs[key], baseline.inputs[key], rtol=0, atol=0)
+    assert cached.response_offsets == baseline.response_offsets
+    cache.close()
+
+
 def mixed_episode(episode):
     # K=2, shorter WHERE and semantic targets, N=3, distinct image contents/order.
     query = replace(episode.supports[0], record_id='mixed-query', stimulus_id='mixed-query')

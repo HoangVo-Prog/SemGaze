@@ -138,6 +138,8 @@ training:
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
   length_aware_batching: true # sort within each same-K physical batch only
   reuse_query_vision: true # requires frozen deterministic producers and identical pixels
+  cache_preprocessed_images: true # window-local, CPU-only native pixel cache; no feature/gradient caching
+  preprocessing_cache_max_entries: 32 # bound both PIL and preprocessed-pixel LRUs
   max_grad_norm: 1.0
   weight_decay: 0.01
   adam_beta1: 0.9

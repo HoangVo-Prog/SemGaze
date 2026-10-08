@@ -137,6 +137,14 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             clip_and_check_gradients(bundle)
             bundle.optimizer.step()
             bundle.scheduler.step()
+            # All WHERE and semantic forwards for this update have finished.
+            # Release window-local CPU preprocessing buffers before evaluation.
+            image_cache = getattr(batches[0], 'image_cache', None) if batches else None
+            if isinstance(image_cache, InferenceVisualCache):
+                preprocessing_stats = image_cache.statistics()['preprocessing']
+                image_cache.close()
+            else:
+                preprocessing_stats = None
             global_step = step + 1
             step_time = time.perf_counter() - step_started
             epoch_step = min(updates_per_epoch, (sampler.cursor + window - 1) // window)
@@ -156,6 +164,10 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                      'step_time_sec': step_time, 'physical_batch_size': t['per_device_train_batch_size'],
                      'gradient_accumulation_steps': t['gradient_accumulation_steps'],
                      'episodes_per_second': len(sampled_episodes) / step_time}
+            if preprocessing_stats is not None:
+                entry['preprocessing_cache_hits'] = preprocessing_stats['hits']
+                entry['preprocessing_cache_misses'] = preprocessing_stats['misses']
+                entry['preprocessing_cache_hit_rate'] = preprocessing_stats['hit_rate']
             for key, values in component_losses.items():
                 entry[key] = float(sum(values)) if values else None
             for key, values in diagnostic_losses.items():
