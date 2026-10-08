@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import torch
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
+from semgaze.data.joint import JointAdapter
 from semgaze.data.fewshot import TrainingEpisodeSampler
 from semgaze.data.schema import normalized_episode_from_dict
 from semgaze.model.build import build_flat_model_bundle
@@ -48,10 +49,22 @@ def main():
         parser.error('choose an empty output directory; resume reads from --resume')
     data = config['data']
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
-    adapter = CocoSearch18Adapter(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
-                                  duration_field=data['duration']['source_field'])
+    adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
+    adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
+                          duration_field=data['duration']['source_field'])
     records = [adapter(r) for r in raw['train']]
     test_records = [adapter(r) for r in raw['test']]
+    from collections import Counter
+    from semgaze.data.joint import unseen_subject_ids
+    counts_train = Counter(r.dataset for r in records)
+    counts_test = Counter(r.dataset for r in test_records)
+    if data['dataset'] == 'all' and (set(counts_train) != {'AiR', 'COCO-Search18'}
+                                    or set(counts_test) != {'AiR', 'COCO-Search18'}):
+        raise ValueError('joint dataset loader omitted AiR or COCO-Search18')
+    unseen = unseen_subject_ids(data, manifest)
+    eligible = Counter(r.dataset for r in records if r.subject not in unseen)
+    print(f'[DATA] train={dict(counts_train)} eligible_queries={dict(eligible)} '
+          f'test={dict(counts_test)}', flush=True)
     sampler = TrainingEpisodeSampler(records, config['experiment']['seed'], data_config=data)
     resolve_epoch_schedule(config, sampler.query_count)
     max_steps = config['training']['total_optimizer_updates']

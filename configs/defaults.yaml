@@ -18,6 +18,7 @@ data:
   # or provide a verified {width: ..., height: ...} coordinate frame.
   annotation_frame: original_image
   unseen_subjects: [7, 8, 9]
+  air_unseen_subjects: ['JY', 'SC', 'YN']
 
   duration:
     source_field: T

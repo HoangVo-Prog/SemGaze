@@ -79,7 +79,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     if not episodes:
         raise ValueError('empty physical episode batch')
     for e in episodes:
-        require_seen_training_episode(e, bundle.config['data']['unseen_subjects'])
+        from semgaze.data.joint import unseen_subject_ids
+        require_seen_training_episode(e, unseen_subject_ids(bundle.config['data']))
     bundle.model.train()
     bundle.projector.train()
     if zero_grad:

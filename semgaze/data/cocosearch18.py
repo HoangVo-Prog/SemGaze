@@ -52,6 +52,9 @@ def read_persisted_splits(split_root=SPLIT_ROOT, *, data_config=None):
     # prepare_split.py writes self-contained dataset manifests.  The combined
     # directory needs dataset selection before the model sees any records.
     if 'source_manifests' in manifest or 'source_file' in manifest:
+        if data_config and data_config['dataset'] == 'all':
+            from .joint import read_joint_splits
+            return read_joint_splits(root, manifest, data_config)
         from .json_splits import read_current_json_splits
         return read_current_json_splits(root, manifest, data_config)
     master_path = root.parent / 'master_split_manifest.json'

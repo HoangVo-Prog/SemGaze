@@ -51,6 +51,7 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
     record = {'epoch': epoch, 'step': step, 'split': split, 'prediction_index': index,
             'split_manifest_identity': split_manifest_identity,
             'query_id': query.record_id, 'subject': query.subject,
+            'dataset': getattr(query, 'dataset', 'COCO-Search18'),
             'stimulus_id': query.stimulus_id, 'task': query.task, 'k': len(episode.supports),
             'K': len(episode.supports), 'support_ids': [s.record_id for s in episode.supports],
             'annotation_width': query.image_width, 'annotation_height': query.image_height,
@@ -136,9 +137,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     batch_size = bundle.config['training']['per_device_train_batch_size']
     if len(train_batch) > batch_size * settings['train_batches']:
         raise ValueError('train predictions require the configured number of complete batches')
-    if any(ep.query.subject in bundle.config['data']['unseen_subjects'] for ep in train_batch):
+    if any(ep.query.subject in set(manifest['unseen_subject_ids']) for ep in train_batch):
         raise ValueError('unseen query in train prediction batch')
-    queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects']) if settings['test_scope'] == 'all_unseen' else ()
+    queries = test_queries(train_by_id, test_records, manifest) if settings['test_scope'] == 'all_unseen' else ()
     k_values = bundle.config['evaluation']['k_values']
     where_draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
     semantic_use_draws = bundle.config.get('evaluation', {}).get('semantic_use_draws', True)
@@ -222,7 +223,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                       f"draw={draw + 1}/{draw_count} | "
                                       f"starting | queries={len(queries)}", flush=True)
                                 episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
-                                    unseen_subjects=bundle.config['data']['unseen_subjects']) for query in queries]
+                                    unseen_subjects=manifest['unseen_subject_ids']) for query in queries]
                                 prediction_path = 'both' if draw < semantic_draw_count else 'where'
                                 for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
                                         budget=settings['semantic_max_new_tokens'], cache=cache, path=prediction_path,
@@ -284,6 +285,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'train_prediction_source': 'final_training_batches_before_evaluation',
             'test_prediction_queries': len(queries),
             'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
+            'test_queries_by_dataset': {
+                ds: sum(getattr(q, 'dataset', 'COCO-Search18') == ds for q in queries)
+                for ds in sorted({getattr(q, 'dataset', 'COCO-Search18') for q in queries})},
             'evaluation_draw': bundle.config['evaluation']['draw'],
             'semantic_use_draws': semantic_use_draws,
             'prediction_files': paths, 'semantic_max_new_tokens': settings['semantic_max_new_tokens'],
@@ -324,6 +328,38 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     prevents an image-level human average from silently replacing a
     personalized pair.
     """
+    if config.get('data', {}).get('dataset') == 'all':
+        import copy
+        from collections import Counter
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        with Path(path).open('r', encoding='utf-8') as stream:
+            rows = [json.loads(line) for line in stream if line.strip()]
+        counts = Counter(getattr(q, 'dataset', 'COCO-Search18') for q in queries)
+        artifacts = {}
+        for dataset in ('AiR', 'COCO-Search18'):
+            selected_queries = [q for q in queries if getattr(q, 'dataset', 'COCO-Search18') == dataset]
+            if not selected_queries:
+                raise ValueError(f'joint metrics missing test queries: {dataset}')
+            subdir = output / dataset.replace('-', '_')
+            subdir.mkdir(parents=True, exist_ok=True)
+            selected_rows = [r for r in rows if r.get('split') == 'test' and
+                             r.get('dataset', 'COCO-Search18') == dataset]
+            subset_path = subdir / 'test_predictions.jsonl'
+            with subset_path.open('w', encoding='utf-8') as stream:
+                for row in selected_rows:
+                    stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
+            scoped_config = copy.deepcopy(config)
+            scoped_config['data']['dataset'] = dataset
+            artifact = score_prediction_artifact(subset_path, queries=selected_queries,
+                config=scoped_config, output_dir=subdir, checkpoint=checkpoint,
+                split_manifest_identity=split_manifest_identity)
+            artifacts[dataset] = artifact
+        result = {'metrics_path': str(output / 'metrics_by_dataset.json'),
+                  'by_dataset': artifacts, 'test_queries_by_dataset': dict(counts),
+                  'aggregation': 'separate_dataset_metrics_no_joint_scalar'}
+        (output / 'metrics_by_dataset.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+        return result
     metrics_config = config.get('evaluation', {}).get('metrics', {})
     if not metrics_config.get('enabled'):
         return None
@@ -361,7 +397,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         query = by_id.get(key[0])
         if query is None:
             raise ValueError(f'missing query reference for frozen prediction {key}')
-        if int(row.get('subject', query.subject)) != int(query.subject):
+        if str(row.get('subject', query.subject)) != str(query.subject):
             raise ValueError(f'subject mismatch for frozen prediction {key}')
         where_grouped.setdefault((key[1], key[2]), []).append(row)
     for row in semantic_rows:
@@ -369,7 +405,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         query = by_id.get(key[0])
         if query is None:
             raise ValueError(f'missing query reference for frozen prediction {key}')
-        if int(row.get('subject', query.subject)) != int(query.subject):
+        if str(row.get('subject', query.subject)) != str(query.subject):
             raise ValueError(f'subject mismatch for frozen prediction {key}')
         refs[key] = query.semantic
         semantic_grouped.setdefault((key[1], key[2]), []).append(row)
@@ -409,7 +445,9 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
                     gt_x, gt_y, gt_d = query.x_px, query.y_px, query.duration_ms
                     gt_dims = (query.image_width, query.image_height)
                     invalid_gt = (not gt_x or len(gt_x) != len(gt_y) or
-                                  len(gt_x) != len(gt_d) or gt_dims != (1680, 1050))
+                                  len(gt_x) != len(gt_d) or
+                                  (getattr(query, 'dataset', 'COCO-Search18') == 'COCO-Search18'
+                                   and gt_dims != (1680, 1050)))
                 except (AttributeError, TypeError):
                     invalid_gt = True
                 if invalid_gt:

@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
+from semgaze.data.joint import JointAdapter
 from semgaze.data.fewshot import frozen_episode
 from semgaze.model.checkpoint import load_checkpoint_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
@@ -51,10 +52,14 @@ def main():
     config['runtime']['output_dir'] = str(output_dir.resolve())
     bundle.config = config
     write_run_config(config, output_dir)
-    adapter = CocoSearch18Adapter(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
-                                  duration_field=data['duration']['source_field'])
+    adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
+    adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
+                          duration_field=data['duration']['source_field'])
     train = {r['record_id']: adapter(r) for r in raw['train']}
-    queries = [adapter(r) for r in raw['test'] if r['subject'] in data['unseen_subjects']]
+    from semgaze.data.joint import unseen_subject_ids, qualified_subject
+    unseen = unseen_subject_ids(data, manifest)
+    queries = [adapter(r) for r in raw['test']
+               if qualified_subject(r.get('dataset', 'COCO-Search18'), r['subject']) in unseen]
     policy = {'split': args.split, 'path': args.path, 'semantic_max_new_tokens': budget,
               'evaluation_draw': config['evaluation']['draw'],
               'semantic_use_draws': config['evaluation'].get('semantic_use_draws', True),
@@ -112,7 +117,7 @@ def main():
                 if semantic_traversal:
                     counts['flat_format_valid'] = 0
                 episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
-                            unseen_subjects=data['unseen_subjects']) for query in queries]
+                            unseen_subjects=unseen) for query in queries]
                 draw_prediction_rows = []
                 prediction_path = 'both' if semantic_traversal and args.path == 'both' else \
                     'semantic' if semantic_traversal else 'where'

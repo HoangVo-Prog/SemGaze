@@ -120,6 +120,7 @@ def batch_losses(bundle, episodes, *, batch=None, cache=None, profiler=None, pro
         if len(where.states[b]) != counts[b] or len(positions[b]) != counts[b]:
             raise ValueError('query state-count mismatch')
         row.update(test_where=float(where_losses[b]), test_flat=float(flat_losses[b]),
+                   dataset=getattr(ep.query, 'dataset', 'COCO-Search18'),
                    episode_id=episode_id(ep), K=len(ep.supports), query_id=ep.query.record_id,
                    support_ids=[s.record_id for s in ep.supports], state_count=counts[b],
                    fixation_count=counts[b], where_length=where.batch.metadata[b]['where_length'],
@@ -184,7 +185,7 @@ def test_queries(train_by_id, test_records, manifest, unseen_subjects=None):
 def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_callback=None, profiler=None,
                         visual_cache=None, projected_r_cache=None, cycle_id=None):
     """Full unseen-subject test queries at each configured persisted draw for K."""
-    queries = test_queries(train_by_id, test_records, manifest, bundle.config['data']['unseen_subjects'])
+    queries = test_queries(train_by_id, test_records, manifest)
     k_values = bundle.config['evaluation']['k_values']
     settings = bundle.config['test']['loss']
     cache_settings = bundle.config['test']['cache']
@@ -192,6 +193,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
         features=cache_settings['frozen_visual_features'], max_entries=cache_settings['max_entries']) if owns_cache else visual_cache
     overall, by_k, k_times, batch_stats = EpisodeAccumulator(), {}, {}, {}
+    dataset_accumulators = {}
+    dataset_k_accumulators = {}
     probability_config = bundle.config.get('evaluation', {}).get('metrics', {}).get('probability', {})
     probability_enabled = bool(bundle.config.get('evaluation', {}).get('metrics', {}).get('enabled')) and \
         bool(probability_config.get('ll') or probability_config.get('ig'))
@@ -232,14 +235,19 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                     print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
                           f'draw={draw + 1}/{draw_count} | starting | queries={len(queries)}', flush=True)
                     episodes = [frozen_episode(q, train_by_id, manifest, k, draw_id=draw,
-                        unseen_subjects=bundle.config['data']['unseen_subjects']) for q in queries]
+                        unseen_subjects=manifest['unseen_subject_ids']) for q in queries]
                     probability_rows = []
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler):
                         rows = batch_losses(bundle, batch.episodes, batch=batch, cache=cache, profiler=profiler,
                                             projected_r_cache=projected_r_cache)
                         if probability_enabled:
-                            probability_rows.extend(score_probability_batch(bundle, batch.episodes,
-                                visual_cache=cache))
+                            # DeepGaze probability scoring has only COCO reference
+                            # calibration; never label AiR LL/IG as canonical.
+                            coco_episodes = [ep for ep in batch.episodes
+                                             if getattr(ep.query, 'dataset', 'COCO-Search18') == 'COCO-Search18']
+                            if coco_episodes:
+                                probability_rows.extend(score_probability_batch(bundle, coco_episodes,
+                                    visual_cache=cache))
                         if len(rows) != len(batch.episodes):
                             raise ValueError('test loss batch lost episodes')
                         for ep, row in zip(batch.episodes, rows):
@@ -247,6 +255,9 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                             row = dict(row, draw_id=draw, episode_id=key)
                             subtotal.add(key, row)
                             overall.add(key, row)
+                            dataset = getattr(ep.query, 'dataset', 'COCO-Search18')
+                            dataset_accumulators.setdefault(dataset, EpisodeAccumulator()).add(key, row)
+                            dataset_k_accumulators.setdefault(dataset, {}).setdefault(str(k), EpisodeAccumulator()).add(key, row)
                             keys.append(key)
                             if episode_callback is not None:
                                 episode_callback(row)
@@ -286,7 +297,18 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     if probability_enabled:
         for block in probability_by_k.values():
             block['draw_mean'] = aggregate_probability_k(list(block['draws'].values()))
-    return {**overall.finish(expected), 'test_by_k': by_k, 'probability_by_k': probability_by_k,
+    by_dataset = {ds: acc.finish(list(acc.rows)) | {'episodes': len(acc.rows)}
+                  for ds, acc in dataset_accumulators.items()}
+    by_dataset_k = {ds: {k: acc.finish(list(acc.rows)) | {'episodes': len(acc.rows)}
+                         for k, acc in blocks.items()}
+                    for ds, blocks in dataset_k_accumulators.items()}
+    print('[EVAL][LOSS] by_dataset=' + ', '.join(
+        f'{ds}: queries={sum(q.dataset == ds for q in queries)} loss={v["test_total"]:.4f}'
+        for ds, v in sorted(by_dataset.items())), flush=True)
+    return {**overall.finish(expected), 'test_by_k': by_k,
+            'test_by_dataset': by_dataset, 'test_by_dataset_k': by_dataset_k,
+            'probability_by_k': probability_by_k,
+            'probability_supported_datasets': ['COCO-Search18'] if probability_enabled else [],
             'k_values': list(k_values),
             'evaluation_draw': bundle.config['evaluation']['draw'],
             'test_queries': len(queries), 'test_episodes': len(expected),

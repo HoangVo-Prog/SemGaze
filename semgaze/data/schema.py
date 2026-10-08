@@ -13,7 +13,7 @@ K_VALUES = tuple(default_section('data')['fewshot']['k_values'])
 class NormalizedRecord:
     record_id: str
     stimulus_id: str
-    subject: int
+    subject: int | str
     image_path: str
     image_width: int
     image_height: int
@@ -23,6 +23,7 @@ class NormalizedRecord:
     y_px: tuple[float, ...]
     duration_ms: tuple[float, ...]
     semantic: NormalizedSemantic
+    dataset: str = 'COCO-Search18'
 
     def __post_init__(self):
         n = len(self.x_px)
@@ -33,7 +34,11 @@ class NormalizedRecord:
             raise ValueError(f"{self.record_id}: finite numeric fixation fields required")
         if any(type(v) is not int or v <= 0 for v in (self.image_width, self.image_height)):
             raise ValueError(f"{self.record_id}: positive annotation image dimensions required")
-        if type(self.subject) is not int or self.condition not in ("present", "absent"):
+        valid_coco = (self.dataset == 'COCO-Search18' and type(self.subject) is int
+                      and self.condition in ('present', 'absent'))
+        valid_air = (self.dataset == 'AiR' and isinstance(self.subject, str)
+                     and self.subject.startswith('AiR::') and self.condition == 'vqa')
+        if not (valid_coco or valid_air):
             raise ValueError(f"{self.record_id}: invalid subject/condition")
         if not all(isinstance(v, str) and v.strip() for v in
                    (self.record_id, self.stimulus_id, self.image_path, self.task)):
@@ -50,7 +55,7 @@ class FlatEpisode:
     def __post_init__(self):
         if not self.supports:
             raise ValueError("at least one support is required")
-        if any(s.subject != self.query.subject for s in self.supports):
+        if any(s.subject != self.query.subject or s.dataset != self.query.dataset for s in self.supports):
             raise ValueError("supports and query must have the same subject")
         stimuli = [s.stimulus_id for s in self.supports]
         if len(set(stimuli)) != len(stimuli) or self.query.stimulus_id in stimuli:

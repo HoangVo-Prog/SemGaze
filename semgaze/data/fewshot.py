@@ -24,12 +24,13 @@ class TrainingEpisodeSampler:
                 any(not isinstance(p, (int, float)) or not math.isfinite(p) or p < 0 for p in self.probabilities) or
                 abs(sum(self.probabilities) - 1.0) > 1e-8):
             raise ValueError('invalid configured training K distribution')
-        unseen_subjects = data_config['unseen_subjects']
+        from .joint import unseen_subject_ids
+        unseen_subjects = unseen_subject_ids(data_config)
         self.rng = random.Random(seed)
         self.images = defaultdict(lambda: defaultdict(list))
         self.records = []
-        if set(unseen_subjects) != {7, 8, 9}:
-            raise ValueError("COCO unseen subjects must remain {7,8,9}")
+        if not {7, 8, 9} <= set(unseen_subjects):
+            raise ValueError('COCO unseen subjects must remain {7,8,9}')
         for r in train_records:
             if getattr(r, 'split', 'train') != 'train' or getattr(r, 'variant', 'all') != 'all':
                 raise ValueError('optimization records must come from all/train')
@@ -150,32 +151,41 @@ class TrainingEpisodeSampler:
 
 
 def frozen_episode(query, train_by_id, manifest, k, *, draw_id=None, unseen_subjects=None):
-    if unseen_subjects is None:
-        unseen_subjects = manifest.get("unseen_subject_ids", UNSEEN_SUBJECTS)
-    if type(k) is not int or k not in (1,5,10):
-        raise ValueError('K_eval must be one of 1/5/10')
+    """Dataset-local frozen support lookup; no AiR/COCO cross-contamination."""
+    if type(k) is not int or k not in (1, 5, 10):
+        raise ValueError('K_eval must be 1/5/10')
     if type(draw_id) is not int:
-        raise ValueError('frozen test evaluation requires an explicit integer draw_id')
-    else:
-        if str(k) not in manifest["support_draws"]:
-            raise ValueError(f"no persisted final support draws for K={k}")
-        if query.subject not in unseen_subjects or not 0 <= draw_id < len(manifest["support_draws"][str(k)]):
-            raise ValueError("final evaluation requires unseen subject and a persisted draw index")
-        entries = manifest["support_draws"][str(k)][draw_id]
-        ids = [e["resolved_record_id_by_subject"][str(query.subject)] for e in entries]
-    if len(ids) != k:
-        raise ValueError("frozen support count differs from K")
-    if query.stimulus_id not in manifest['test_stimulus_ids']:
-        raise ValueError('frozen evaluation query must come from test')
-    if any(i not in train_by_id for i in ids):
-        raise ValueError('frozen evaluation support must come from train')
-    supports = tuple(train_by_id[i] for i in ids)
-    if any(s.stimulus_id not in manifest['train_stimulus_ids'] for s in supports):
-        raise ValueError('frozen support image is outside train membership')
+        raise ValueError('frozen evaluation needs integer draw_id')
+    dataset = getattr(query, 'dataset', 'COCO-Search18')
+    scoped = manifest.get('datasets', {}).get(dataset, manifest)
+    valid_subjects = set(manifest.get('unseen_subject_ids', UNSEEN_SUBJECTS)) if unseen_subjects is None else set(unseen_subjects)
+    if query.subject not in valid_subjects:
+        raise ValueError('test query is not an unseen subject')
+    blocks = scoped['support_draws'].get(str(k), ())
+    if draw_id < 0 or draw_id >= len(blocks):
+        raise ValueError('missing frozen support draw')
+    raw_subject = query.subject.removeprefix('AiR::') if dataset == 'AiR' else str(query.subject)
+    name = query.stimulus_id.removeprefix('AiR::') if dataset == 'AiR' else query.stimulus_id
+    if name not in scoped['test_stimulus_ids']:
+        raise ValueError('test query is outside dataset-local held-out images')
+    entries = blocks[draw_id]
+    ids = [entry['resolved_record_id_by_subject'][str(raw_subject)] for entry in entries]
+    if len(ids) != k or any(rid not in train_by_id for rid in ids):
+        raise ValueError('unresolvable frozen supports')
+    supports = tuple(train_by_id[rid] for rid in ids)
     for entry, record in zip(entries, supports):
-        # The new JSON support entry uses unit_id (task), not task itself.
-        task = entry.get('task', entry.get('unit_id'))
-        if (entry['image_name'] != record.stimulus_id or task != record.task or
-                entry.get('trial_key') != f'{record.task}::{record.stimulus_id}'):
-            raise ValueError('frozen trial identity mismatch')
+        raw_image = record.stimulus_id.removeprefix('AiR::') if dataset == 'AiR' else record.stimulus_id
+        if (record.dataset != dataset or record.subject != query.subject
+                or raw_image not in scoped['train_stimulus_ids']
+                or entry['image_name'] != raw_image):
+            raise ValueError('cross-dataset, cross-subject or invalid support image')
+        if dataset == 'COCO-Search18':
+            task = entry.get('task', entry.get('unit_id'))
+            if task != record.task or entry.get('trial_key') != f'{record.task}::{raw_image}':
+                raise ValueError('COCO frozen trial identity mismatch')
+        else:
+            # AiR support unit is qid, not the question text in record.task.
+            # read_joint_splits already verifies qid -> record_id for every draw.
+            if entry.get('dataset') != 'AiR':
+                raise ValueError('AiR frozen trial dataset mismatch')
     return FlatEpisode(supports, query, draw_id=draw_id)
