@@ -155,3 +155,37 @@ The patcher now accepts `semgaze/data/joint.py` and `tests/test_joint_air_coco.p
 when their bytes exactly match the bundled files. It prints `EXISTS IDENTICAL`
 during dry-run and `UNCHANGED (identical)` during apply. Any differing file is
 rejected before writing; no force-overwrite is supported.
+
+## Java 17 Setup
+
+CIDEr-R requires Java 17 for Stanford PTBTokenizer. No Conda or sudo required.
+
+```bash
+# Activate Python environment
+source /data/shared/cvpr/hoang/envs/semgaze-flat/bin/activate
+
+# Install Java 17 if not already installed
+export JAVA_HOME=/data/shared/cvpr/hoang/tools/java17
+
+if [ ! -x "$JAVA_HOME/bin/java" ]; then
+    mkdir -p "$JAVA_HOME"
+
+    curl -fL \
+      "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jre/hotspot/normal/eclipse" \
+      -o /tmp/java17.tar.gz
+
+    tar -xzf /tmp/java17.tar.gz \
+      -C "$JAVA_HOME" --strip-components=1
+
+    rm /tmp/java17.tar.gz
+fi
+
+# Add Java to PATH
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# Verify
+java -version
+```
+
+For SLURM or nohup, set `JAVA_HOME` and `PATH` in the job script before running training.
+
