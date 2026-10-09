@@ -188,6 +188,7 @@ def validate_config(config):
     if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
         raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
     positive_int(evaluation['draw'], 'evaluation.draw')
+    positive_int(evaluation['eval_epoch'], 'evaluation.eval_epoch')
     if type(evaluation.get('semantic_use_draws', True)) is not bool:
         raise ValueError('evaluation.semantic_use_draws must be boolean')
     if evaluation['strategy'] == 'steps':
@@ -260,6 +261,9 @@ def validate_config(config):
             raise ValueError('test cache flags must be boolean')
     if cache['prefix_kv']:
         raise ValueError('prefix KV caching requires separate server profiling and parity')
+    for branch in ('where', 'semantic'):
+        if type(predictions[branch]) is not bool:
+            raise ValueError(f'evaluation.predictions.{branch} must be boolean')
     positive_int(predictions['train_batches'], 'evaluation.predictions.train_batches', minimum=0)
     positive_int(predictions['semantic_max_new_tokens'], 'semantic_max_new_tokens', allow_none=True)
     if predictions['test_scope'] not in ('all_unseen', 'none'):

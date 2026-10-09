@@ -154,12 +154,15 @@ training:
 
 evaluation:
   strategy: steps # epoch | steps | no (smoke/benchmark only)
+  eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
   k_values: [1]
   loss_aggregation: episode_mean
   predictions:
+    where: true # autoregressive WHERE predictions and their scanpath metrics
+    semantic: true # autoregressive semantic predictions and their metrics
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.

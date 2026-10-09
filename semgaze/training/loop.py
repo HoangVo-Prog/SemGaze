@@ -86,7 +86,9 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
 
     evaluation = bundle.config['evaluation']
     settings = resolve_prediction_settings(bundle.config) if evaluation['strategy'] != 'no' else evaluation['predictions']
-    prediction_capacity = settings['train_batches'] * t['per_device_train_batch_size']
+    prediction_active = settings['where'] or settings['semantic']
+    prediction_capacity = (settings['train_batches'] * t['per_device_train_batch_size']
+                           if prediction_active else 0)
     recent_episodes = []
     checkpoint = bundle.config['checkpoint']
     semantic_cache = (SemanticNativeLRU(t['semantic_collation_cache_max_entries'])
@@ -217,13 +219,15 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 stream.flush()
                 print(format_train_step(entry, max_steps), flush=True)
             epoch_end = epoch_complete
-            should_evaluate = ((evaluation['strategy'] == 'epoch' and epoch_end) or
+            should_evaluate = ((evaluation['strategy'] == 'epoch' and epoch_end and
+                                sampler.epoch % evaluation['eval_epoch'] == 0) or
                                (evaluation['strategy'] == 'steps' and
                                 global_step % evaluation['eval_steps'] == 0))
             if should_evaluate:
                 evaluation_started = time.perf_counter()
                 print(f"[EVAL] starting epoch {sampler.epoch} evaluation", flush=True)
-                has_predictions = settings['train_batches'] or settings['test_scope'] != 'none'
+                has_predictions = prediction_active and (
+                    settings['train_batches'] > 0 or settings['test_scope'] != 'none')
                 cache_settings = bundle.config['test']['cache']
                 shared_visual = InferenceVisualCache(
                     preprocessing=cache_settings['support_preprocessing'],
@@ -262,14 +266,25 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                         stream.flush()
                         print(format_prediction_summary(predictions), flush=True)
                         if predictions.get('metrics_artifact'):
-                            metric_event = {'event': 'epoch_metrics', 'step': step + 1,
-                                            'epoch': summary['epoch'], 'split': 'test',
-                                            'metrics_file': predictions['metrics_artifact'].get('metrics_path'),
-                                            'metric_namespaces': ('[EVAL][METRIC][WHERE]', '[EVAL][METRIC][SEM]')}
-                            bundle.trainer_history.append(metric_event)
-                            stream.write(json.dumps(metric_event, allow_nan=False) + '\n')
-                            stream.flush()
-                            print('[EVAL][METRIC][SEM] frozen semantic metrics complete', flush=True)
+                            metrics_config = evaluation['metrics']
+                            names = []
+                            where_cfg = metrics_config.get('where', {})
+                            semantic_cfg = metrics_config.get('semantic', {})
+                            if settings['where'] and any(where_cfg.get(n) for n in ('scanmatch', 'multimatch', 'sed')):
+                                names.append('[EVAL][METRIC][WHERE]')
+                            if settings['semantic'] and (semantic_cfg.get('bertscore', {}).get('enabled') or
+                                                         semantic_cfg.get('cider_r', {}).get('enabled')):
+                                names.append('[EVAL][METRIC][SEM]')
+                            if names:
+                                metric_event = {'event': 'epoch_metrics', 'step': step + 1,
+                                                'epoch': summary['epoch'], 'split': 'test',
+                                                'metrics_file': predictions['metrics_artifact'].get('metrics_path'),
+                                                'metric_namespaces': names}
+                                bundle.trainer_history.append(metric_event)
+                                stream.write(json.dumps(metric_event, allow_nan=False) + '\n')
+                                stream.flush()
+                                for name in names:
+                                    print(f'{name} frozen metrics complete', flush=True)
                 finally:
                     if projected is not None:
                         projected.close()

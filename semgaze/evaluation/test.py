@@ -196,7 +196,9 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     dataset_accumulators = {}
     dataset_k_accumulators = {}
     probability_config = bundle.config.get('evaluation', {}).get('metrics', {}).get('probability', {})
-    probability_enabled = bool(bundle.config.get('evaluation', {}).get('metrics', {}).get('enabled')) and \
+    # LL/IG are WHERE prediction metrics, not required for teacher-forced loss.
+    probability_enabled = bool(bundle.config['evaluation']['predictions']['where']) and \
+        bool(bundle.config.get('evaluation', {}).get('metrics', {}).get('enabled')) and \
         bool(probability_config.get('ll') or probability_config.get('ig'))
     if probability_enabled and probability_config.get('outcome') != 'B':
         raise RuntimeError('probability Outcome A is not enabled: exact predictor-state reuse is unproven')
