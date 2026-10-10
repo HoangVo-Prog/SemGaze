@@ -94,7 +94,7 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
     semantic_cache = (SemanticNativeLRU(t['semantic_collation_cache_max_entries'])
                       if t.get('cache_semantic_collation', False) else None)
     logging = bundle.config['logging']
-    if not 0 <= start <= max_steps or (save_every is not None and save_every < 1):
+    if not 0 <= start <= max_steps or (save_every is not None and save_every < 0):
         raise ValueError('invalid resume step or save interval')
     window = t['per_device_train_batch_size'] * t['gradient_accumulation_steps']
     consumed_updates = ((sampler.epoch - 1) * updates_per_epoch +
@@ -291,8 +291,10 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                     if shared_visual is not None:
                         shared_visual.close()
                 print('[EVAL] complete', flush=True)
-            # Save after test and generation, including at epoch ends even when the
-            # ordinary step-based save interval does not land on the boundary.
-            if (epoch_end and checkpoint['save_at_epoch_end']) or (save_every is not None and (step + 1) % save_every == 0) or (step + 1 == max_steps and checkpoint['save_at_end']):
+            # Save after test and generation. A zero/None save_every disables
+            # only interval saves; epoch-end and final saves are independent.
+            if ((epoch_end and checkpoint['save_at_epoch_end']) or
+                    (save_every is not None and save_every > 0 and (step + 1) % save_every == 0) or
+                    (step + 1 == max_steps and checkpoint['save_at_end'])):
                 save_checkpoint(bundle, output / f'checkpoint-{step + 1}',
                     split_manifest_identity=split_manifest_identity, step=step + 1, sampler=sampler)

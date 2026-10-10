@@ -268,7 +268,7 @@ def validate_config(config):
     positive_int(predictions['semantic_max_new_tokens'], 'semantic_max_new_tokens', allow_none=True)
     if predictions['test_scope'] not in ('all_unseen', 'none'):
         raise ValueError('test_scope supports all_unseen or none')
-    positive_int(config['checkpoint']['save_every'], 'checkpoint.save_every', allow_none=True)
+    positive_int(config['checkpoint']['save_every'], 'checkpoint.save_every', allow_none=True, minimum=0)
     positive_int(config['logging']['every_steps'], 'logging.every_steps')
     subjects = config['data']['unseen_subjects']
     if not isinstance(subjects,list) or any(type(u) is not int for u in subjects) or len(set(subjects)) != len(subjects):

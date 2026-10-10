@@ -248,7 +248,7 @@ logging:
   filename: trainer_log.jsonl
 
 checkpoint:
-  save_every: 100
+  save_every: 100 # 0 or null disables periodic saves; epoch/end saves remain independent
   save_at_epoch_end: true
   save_at_end: true
   save_processor_and_tokenizer: true

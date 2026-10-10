@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--max-steps', type=int, help='Debug/smoke optimizer-update cap; may stop mid-epoch')
     parser.add_argument('--semantic-max-new-tokens', type=int, help='Explicit epoch semantic generation budget')
     parser.add_argument('--num-train-epochs', '--epochs', dest='num_train_epochs', type=int)
-    parser.add_argument('--save-every', type=int)
+    parser.add_argument('--save-every', type=int, help='Save every N optimizer steps; 0 disables interval saves')
     parser.add_argument('--resume', type=Path)
     args = parser.parse_args()
     overrides = {}
