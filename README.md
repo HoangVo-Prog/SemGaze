@@ -189,3 +189,33 @@ java -version
 
 For SLURM or nohup, set `JAVA_HOME` and `PATH` in the job script before running training.
 
+## LLada BLEU-4 / ROUGE-L / METEOR 1.5 setup
+
+Both the **training evaluation** and **standalone** `evaluate_flat.py` use the
+same `score_prediction_artifact` semantic scorer. BLEU-4 is computed across
+all semantic units **per (dataset, K, draw, branch)**, not as a mean of sentence
+BLEU scores. ROUGE in LLada is **ROUGE-L**, so SemGaze writes
+`eval_sem_{what,why,how}_rouge_l` and the identical `..._rouge` alias.
+Missing predictions are retained in the denominator. Metrics are reported
+separately for WHAT, WHY and HOW, with the existing GT-WHERE conditioning.
+
+Enable each metric with `evaluation.metrics.semantic.{bleu4,rouge_l,meteor}.enabled`.
+BLEU-4 and ROUGE-L need no extra dependencies. METEOR must use LLada's Java
+METEOR 1.5 scorer; do **not** replace it with NLTK METEOR.
+
+```bash
+# From the SemGaze repository root (download once on an Internet-connected node):
+mkdir -p third_party/llada_meteor
+curl -fL 'https://raw.githubusercontent.com/yuchen2199/Explainable-Driver-Attention-Prediction/a36db49ec56a1ea19534607ee4458552d011974e/utils/eval_utils/meteor/meteor-1.5.jar' \
+  -o third_party/llada_meteor/meteor-1.5.jar
+java -version  # Java 17 from the setup above works if your METEOR JAR supports it
+```
+
+Alternatively, copy that JAR from a networked workstation to the cluster.
+If storing elsewhere, set `evaluation.metrics.semantic.meteor.jar_path` to its
+absolute path. Set `evaluation.metrics.semantic.meteor.enabled: true` to run it.
+The process fails explicitly if Java or the JAR is unavailable; it never emits
+fabricated METEOR scores. Java processing is CPU-based, but requires roughly
+2 GB heap per evaluator process. `metrics.json` stores scorer provenance.
+Standalone example: `python evaluate_flat.py --checkpoint ... --config
+configs/flat_single.yaml --output-dir ... --skip-loss`.

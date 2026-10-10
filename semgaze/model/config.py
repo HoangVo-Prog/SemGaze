@@ -241,7 +241,18 @@ def validate_config(config):
         raise ValueError('metrics.probability.outcome must explicitly select Outcome A or B')
     if probability_metrics.get('log_z', 0.0) != 0.0:
         raise ValueError('metrics.probability.log_z is a fixed no-op and must be 0.0')
-    semantic_enabled = bool(semantic_metrics.get('bertscore', {}).get('enabled')) or bool(semantic_metrics.get('cider_r', {}).get('enabled'))
+    for metric_name in ('bleu4', 'rouge_l', 'meteor'):
+        options = semantic_metrics.get(metric_name, {})
+        if not isinstance(options, dict) or type(options.get('enabled', False)) is not bool:
+            raise ValueError(f'metrics.semantic.{metric_name}.enabled must be bool')
+    meteor_options = semantic_metrics.get('meteor', {})
+    if meteor_options.get('enabled'):
+        if meteor_options.get('jar_path') is not None and not isinstance(meteor_options['jar_path'], str):
+            raise ValueError('metrics.semantic.meteor.jar_path must be null or a path')
+        if not isinstance(meteor_options.get('java_bin', 'java'), str) or not meteor_options.get('java_bin', 'java'):
+            raise ValueError('metrics.semantic.meteor.java_bin must be a nonempty string')
+    from semgaze.evaluation.metrics_semantic import semantic_metrics_enabled
+    semantic_enabled = semantic_metrics_enabled(semantic_metrics)
     if metrics['enabled'] and not (scanpath_enabled or probability_metrics.get('ll') or probability_metrics.get('ig') or semantic_enabled):
         raise ValueError('metrics.enabled requires at least one enabled metric')
     for branch in ('loss', 'prediction'):

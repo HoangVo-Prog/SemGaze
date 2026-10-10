@@ -19,7 +19,8 @@ from semgaze.evaluation.metrics_scanpath import (
 )
 from semgaze.evaluation.progress import RollingRate, format_eta, progress_interval, should_report
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
-    aggregate_semantic_metrics, score_prediction_semantics)
+    aggregate_semantic_metrics, score_prediction_semantics, semantic_metrics_enabled)
+from semgaze.evaluation.metrics_text_overlap import build_meteor_scorer
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
                                          resolve_evaluation_draw_counts,
                                          resolve_semantic_draw_counts, write_metrics_artifact)
@@ -383,9 +384,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     sem_opts = metric_opts.get('semantic', {})
     score_where = active_opts.get('where', True) and any(
         where_opts.get(k) for k in ('scanmatch', 'multimatch', 'sed'))
-    score_sem = active_opts.get('semantic', True) and (
-        sem_opts.get('bertscore', {}).get('enabled') or
-        sem_opts.get('cider_r', {}).get('enabled'))
+    score_sem = active_opts.get('semantic', True) and semantic_metrics_enabled(sem_opts)
     if not metric_opts.get('enabled') or not (score_where or score_sem):
         return None
     if config.get('data', {}).get('dataset') == 'all':
@@ -428,14 +427,15 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     scanpath_enabled = pred_config.get('where', True) and any(
         bool(where_config.get(name)) for name in ('scanmatch', 'multimatch', 'sed'))
     semantic_config = metrics_config.get('semantic', {})
-    semantic_enabled = pred_config.get('semantic', True) and bool(
-        semantic_config.get('bertscore', {}).get('enabled') or
-        semantic_config.get('cider_r', {}).get('enabled'))
+    semantic_enabled = pred_config.get('semantic', True) and semantic_metrics_enabled(semantic_config)
     if not scanpath_enabled and not semantic_enabled:
         # Probability metrics are produced during the test loss traversal and
         # cannot be reconstructed from frozen prediction text.
         return None
     bertscorer = bert_provenance = cider_r = cider_provenance = None
+    meteor = meteor_provenance = None
+    bleu4_enabled = semantic_enabled and bool(semantic_config.get('bleu4', {}).get('enabled'))
+    rouge_l_enabled = semantic_enabled and bool(semantic_config.get('rouge_l', {}).get('enabled'))
     if semantic_enabled and semantic_config.get('bertscore', {}).get('enabled'):
         options = {key: value for key, value in semantic_config['bertscore'].items()
                    if key not in ('enabled', 'batch_size')}
@@ -444,6 +444,10 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         cider_r, cider_provenance = build_cider_r_scorer(
             reference_root=Path(__file__).resolve().parents[2] / 'third_party' / 'cider_r',
             n=semantic_config['cider_r'].get('n', 4), k_r=semantic_config['cider_r'].get('k_r', 0.8))
+    if semantic_enabled and semantic_config.get('meteor', {}).get('enabled'):
+        meteor, meteor_provenance = build_meteor_scorer(
+            jar_path=semantic_config['meteor'].get('jar_path'),
+            java_bin=semantic_config['meteor'].get('java_bin', 'java'))
     with Path(path).open('r', encoding='utf-8') as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
     # In single-traversal semantic mode the combined file still contains all
@@ -557,8 +561,12 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
             semantic_metrics = score_prediction_semantics(
                 semantic_group, {(row.get('query_id', row.get('record_id')), k, draw): refs[(row.get('query_id', row.get('record_id')), k, draw)] for row in semantic_group},
                 bertscorer=bertscorer, cider_r=cider_r,
-                batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64))
+                batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64),
+                bleu4=bleu4_enabled, rouge_l=rouge_l_enabled, meteor=meteor)
             draw_metrics.update(semantic_metrics)
+            enabled_scores = {name: value for name, value in semantic_metrics.items()
+                              if name.startswith('eval_sem_')}
+            print(f'[EVAL][METRIC][SEM] K={k} draw={draw} {enabled_scores}', flush=True)
         block['draws'][str(draw)] = draw_metrics
     semantic_use_draws = config.get('evaluation', {}).get('semantic_use_draws', True)
     for block in by_k.values():
@@ -580,7 +588,14 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     artifact = write_metrics_artifact(Path(output_dir) / 'metrics.json', checkpoint=checkpoint,
         config=config.get('_resolved_config_path', 'resolved_config.json'),
         split_manifest_identity=split_manifest_identity, by_k=by_k,
-        provenance={**({'bertscore': bert_provenance, 'cider_r': cider_provenance}
+        provenance={**({'bertscore': bert_provenance, 'cider_r': cider_provenance,
+                         'bleu4': ({'implementation': 'LLada_COCO',
+                                    'aggregation': 'corpus', 'n': 4, 'closest': True,
+                                    'small': 1e-9, 'tiny': 1e-15} if bleu4_enabled else None),
+                         'rouge_l': ({'implementation': 'LLada_COCO',
+                                      'aggregation': 'mean_sample', 'beta': 1.2,
+                                      'alias': 'rouge'} if rouge_l_enabled else None),
+                         'meteor': meteor_provenance}
                        if semantic_enabled else {}),
                     'scanpath': {
                         'enabled': scanpath_enabled,
@@ -612,5 +627,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
                     'probability': 'not_integrated; tokenizer outcome unresolved'},
         implementation_head=implementation_head(), evaluation_draw=config['evaluation']['draw'])
     artifact['metrics_path'] = str(Path(output_dir) / 'metrics.json')
+    if meteor is not None:
+        meteor.close()
     return artifact
 

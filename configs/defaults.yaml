@@ -221,6 +221,17 @@ evaluation:
         n: 4
         k_r: 0.8
         tokenizer: stanford_ptb_reference
+      # LLada-style COCO corpus BLEU-4; references are per WHAT/WHY/HOW unit.
+      bleu4:
+        enabled: false
+      # LLada calls ROUGE-L simply "ROUGE"; both output labels alias one score.
+      rouge_l:
+        enabled: false
+      # Java METEOR 1.5, enable after downloading the authors' JAR (README).
+      meteor:
+        enabled: false
+        jar_path: null
+        java_bin: java
 
 test:
   loss:

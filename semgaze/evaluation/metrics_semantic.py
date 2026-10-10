@@ -14,7 +14,16 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
+from semgaze.evaluation.metrics_text_overlap import (
+    score_bleu4_corpus, score_rouge_l_corpus,
+)
+
 BRANCHES = ("what", "why", "how")
+
+
+def semantic_metrics_enabled(options):
+    return any(options.get(metric, {}).get('enabled', False)
+               for metric in ('bertscore', 'cider_r', 'bleu4', 'rouge_l', 'meteor'))
 
 
 def normalize_text(text):
@@ -177,7 +186,7 @@ def build_cider_r_scorer(*, reference_root=None, n=4, k_r=0.8):
 
 
 def score_prediction_semantics(rows, references_by_key, *, bertscorer=None, cider_r=None,
-                               batch_size=64):
+                               batch_size=64, bleu4=False, rouge_l=False, meteor=None):
     """Score complete semantic corpora from frozen prediction rows.
 
     ``references_by_key`` maps ``(query_id, K, draw_id)`` to normalized query
@@ -206,6 +215,14 @@ def score_prediction_semantics(rows, references_by_key, *, bertscorer=None, cide
             result[f"eval_sem_{branch}_bertscore_f1"] = score_bertscore_branch(units, bertscorer, batch_size=batch_size)["f1"]
         if cider_scorer is not None:
             result[f"eval_sem_{branch}_cider_r"] = score_cider_r_branch(units, cider_scorer, cider_tokenizer)["score"]
+        if bleu4:
+            result[f"eval_sem_{branch}_bleu4"] = score_bleu4_corpus(units)
+        if rouge_l:
+            score = score_rouge_l_corpus(units)
+            result[f"eval_sem_{branch}_rouge_l"] = score
+            result[f"eval_sem_{branch}_rouge"] = score  # LLada's ROUGE is ROUGE-L
+        if meteor is not None:
+            result[f"eval_sem_{branch}_meteor"] = meteor.score_units(units)
         result[f"semantic_{branch}_unit_count"] = len(units)
         result[f"semantic_{branch}_missing_count"] = sum(u.get("candidate") is None for u in units)
     return result
@@ -236,7 +253,7 @@ def aggregate_semantic_metrics(draw_metrics, *, use_draws):
 
 def aggregate_semantic_draw(records: Sequence[Mapping], *, bertscorer=None,
                             cider_scorer=None, cider_tokenizer=None,
-                            batch_size=64):
+                            batch_size=64, bleu4=False, rouge_l=False, meteor=None):
     """Score one complete ``(K, draw_id)`` semantic corpus.
 
     ``cider_scorer`` may also be the ``(scorer, tokenizer)`` tuple returned by
@@ -257,6 +274,14 @@ def aggregate_semantic_draw(records: Sequence[Mapping], *, bertscorer=None,
         if cider_scorer is not None:
             result[f"eval_sem_{branch}_cider_r"] = score_cider_r_branch(
                 units, cider_scorer, cider_tokenizer)["score"]
+        if bleu4:
+            result[f"eval_sem_{branch}_bleu4"] = score_bleu4_corpus(units)
+        if rouge_l:
+            score = score_rouge_l_corpus(units)
+            result[f"eval_sem_{branch}_rouge_l"] = score
+            result[f"eval_sem_{branch}_rouge"] = score
+        if meteor is not None:
+            result[f"eval_sem_{branch}_meteor"] = meteor.score_units(units)
         result[f"semantic_{branch}_unit_count"] = len(units)
         result[f"semantic_{branch}_missing_count"] = sum(u["missing"] for u in units)
     return result
