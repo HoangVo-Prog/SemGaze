@@ -92,9 +92,15 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
     Index-based restoration permits repeated supplied training episodes.
     """
     settings = bundle.config['test']['prediction']
-    common_batch_size = bundle.config.get('evaluation', {}).get('batch_size')
-    # Never let the legacy window cap an explicitly configured physical batch.
-    window = max(settings['bucket_window'], common_batch_size or 1)
+    evaluation_config = bundle.config.get('evaluation', {})
+    common_batch_size = evaluation_config.get('batch_size')
+    per_k_batch_size = evaluation_config.get('batch_size_by_k', {})
+    # A window must fit the largest requested physical batch for any K here.
+    window = max([settings['bucket_window']] + [
+        physical_size(settings, k, batch_size=common_batch_size,
+                      batch_size_by_k=per_k_batch_size)
+        for k in {len(e.supports) for e in episodes}
+    ])
     for start in range(0, len(episodes), window):
         block = episodes[start:start+window]
         results = {}
@@ -113,7 +119,8 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
                     return sample.inputs['input_ids'].shape[1]
 
                 indices.sort(key=sort_length)
-            size = physical_size(settings, k, batch_size=common_batch_size)
+            size = physical_size(settings, k, batch_size=common_batch_size,
+                                 batch_size_by_k=per_k_batch_size)
             for offset in range(0, len(indices), size):
                 selected = indices[offset:offset+size]
                 group = [block[i] for i in selected]

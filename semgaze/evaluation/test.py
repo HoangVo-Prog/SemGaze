@@ -189,6 +189,7 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     k_values = bundle.config['evaluation']['k_values']
     settings = bundle.config['test']['loss']
     common_batch_size = bundle.config['evaluation'].get('batch_size')
+    per_k_batch_size = bundle.config['evaluation'].get('batch_size_by_k', {})
     cache_settings = bundle.config['test']['cache']
     owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],
@@ -241,7 +242,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                         unseen_subjects=manifest['unseen_subject_ids']) for q in queries]
                     probability_rows = []
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler,
-                                                  batch_size=common_batch_size):
+                                                  batch_size=common_batch_size,
+                                                  batch_size_by_k=per_k_batch_size):
                         rows = batch_losses(bundle, batch.episodes, batch=batch, cache=cache, profiler=profiler,
                                             projected_r_cache=projected_r_cache)
                         if probability_enabled:

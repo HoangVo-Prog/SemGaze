@@ -160,7 +160,8 @@ training:
 evaluation:
   strategy: epoch # epoch | steps | no (smoke/benchmark only)
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
-  batch_size: null # shared physical size for all K, loss/prediction; null uses test.*.batch_size_by_k
+  batch_size: null # common physical size fallback; null uses test.*.batch_size_by_k
+  batch_size_by_k: {} # optional per-K overrides for both evaluation loss and prediction
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 10 # complete persisted support-set evaluation traversals per K
   semantic_use_draws: true # repeat semantic prediction over evaluation.draw support draws

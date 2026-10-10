@@ -214,6 +214,14 @@ def validate_config(config):
         positive_int(ctx[key], 'where.context.' + key)
     if max(config['data']['fewshot']['k_values'] + evaluation['k_values']) > min(ctx['max_k'], ctx['max_images_per_episode'] - 1):
         raise ValueError('configured K exceeds episode support/image capacity')
+    per_k_batch_size = evaluation.get('batch_size_by_k', {})
+    if not isinstance(per_k_batch_size, dict):
+        raise ValueError('evaluation.batch_size_by_k must be a mapping')
+    allowed_ks = {str(k) for k in range(1, ctx['max_k'] + 1)}
+    for k, size in per_k_batch_size.items():
+        if type(k) is not str or k not in allowed_ks:
+            raise ValueError(f'evaluation.batch_size_by_k has invalid K={k!r}')
+        positive_int(size, f'evaluation.batch_size_by_k[{k}]')
     if not isinstance(config['where']['end_fix_token'], str) or not config['where']['end_fix_token'].strip():
         raise ValueError('end_fix_token must be nonempty')
     predictions = evaluation['predictions']
@@ -262,7 +270,8 @@ def validate_config(config):
             raise ValueError('test execution must be serial or same_k_batched')
         from semgaze.evaluation.batching import physical_size
         for k in evaluation['k_values']:
-            physical_size(settings, k, batch_size=evaluation.get('batch_size'))
+            physical_size(settings, k, batch_size=evaluation.get('batch_size'),
+                          batch_size_by_k=evaluation.get('batch_size_by_k', {}))
         positive_int(settings['bucket_window'], 'test.bucket_window')
         if type(settings['bucket_by_length']) is not bool:
             raise ValueError('bucket_by_length must be boolean')
