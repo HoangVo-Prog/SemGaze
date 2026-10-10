@@ -156,7 +156,7 @@ evaluation:
   strategy: steps # epoch | steps | no (smoke/benchmark only)
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
-  batch_size_by_k: {{'1': 64, '5': 32, '10': 16}} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
+  batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
