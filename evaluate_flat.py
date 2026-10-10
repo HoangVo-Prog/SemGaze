@@ -244,7 +244,8 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
                     draw_completed = 0
                     interval = progress_interval(len(coco_queries))
                     next_report = interval
-                    for batch in schedule_batches(bundle, episodes, settings, cache=cache):
+                    for batch in schedule_batches(bundle, episodes, settings, cache=cache,
+                                                  batch_size=bundle.config['evaluation'].get('batch_size')):
                         scored = score_probability_batch(bundle, batch.episodes, visual_cache=cache)
                         if len(scored) != len(batch.episodes):
                             raise ValueError('LL scorer returned incomplete physical batch')
@@ -391,6 +392,7 @@ def main():
         'compute_loss': compute_loss,
         'k_values': config['evaluation']['k_values'],
         'draw': config['evaluation']['draw'],
+        'evaluation_batch_size': config['evaluation'].get('batch_size'),
         'semantic_use_draws': config['evaluation']['semantic_use_draws'],
         'semantic_max_new_tokens': budget if enabled_semantic else None,
         'where_conditioning': 'oracle_length; no query GT trajectory' if enabled_where else None,

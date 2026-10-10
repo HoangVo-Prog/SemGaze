@@ -8,15 +8,19 @@ def episode_id(episode):
     return f'{len(episode.supports)}:{draw}{episode.query.record_id}'
 
 
-def physical_size(settings, k):
-    mapping = settings['batch_size_by_k']
-    size = mapping.get(k, mapping.get(str(k)))
+def physical_size(settings, k, *, batch_size=None):
+    # An evaluation-wide override takes precedence over legacy per-K sizes.
+    if batch_size is None:
+        mapping = settings['batch_size_by_k']
+        size = mapping.get(k, mapping.get(str(k)))
+    else:
+        size = batch_size
     if type(size) is not int or size < 1:
         raise ValueError(f'missing or invalid test physical batch size for K={k}')
     return 1 if settings.get('execution') == 'serial' else size
 
 
-def schedule_batches(bundle, episodes, settings, *, cache=None, profiler=None):
+def schedule_batches(bundle, episodes, settings, *, cache=None, profiler=None, batch_size=None):
     """Bounded windows; exact native lengths; no episode drops or cross-K moves."""
     episodes = tuple(episodes)
     ids = [episode_id(e) for e in episodes]
@@ -27,7 +31,7 @@ def schedule_batches(bundle, episodes, settings, *, cache=None, profiler=None):
     seen = set()
     for k in dict.fromkeys(len(e.supports) for e in episodes):
         group = [e for e in episodes if len(e.supports) == k]
-        size = physical_size(settings, k)
+        size = physical_size(settings, k, batch_size=batch_size)
         window = max(size, settings.get('bucket_window', 64)) if settings.get('bucket_by_length') else size
         for start in range(0, len(group), window):
             with stage('test_collation'):

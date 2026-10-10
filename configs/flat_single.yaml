@@ -155,6 +155,7 @@ training:
 evaluation:
   strategy: steps # epoch | steps | no (smoke/benchmark only)
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
+  batch_size: 4 # shared physical size for all K, loss/prediction; null uses test.*.batch_size_by_k
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
@@ -166,7 +167,7 @@ evaluation:
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
-    semantic_max_new_tokens: 32
+    semantic_max_new_tokens: 512
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
   metrics:

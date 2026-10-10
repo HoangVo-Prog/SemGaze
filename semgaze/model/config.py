@@ -189,6 +189,7 @@ def validate_config(config):
         raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
     positive_int(evaluation['draw'], 'evaluation.draw')
     positive_int(evaluation['eval_epoch'], 'evaluation.eval_epoch')
+    positive_int(evaluation.get('batch_size'), 'evaluation.batch_size', allow_none=True)
     if type(evaluation.get('semantic_use_draws', True)) is not bool:
         raise ValueError('evaluation.semantic_use_draws must be boolean')
     if evaluation['strategy'] == 'steps':
@@ -261,7 +262,7 @@ def validate_config(config):
             raise ValueError('test execution must be serial or same_k_batched')
         from semgaze.evaluation.batching import physical_size
         for k in evaluation['k_values']:
-            physical_size(settings, k)
+            physical_size(settings, k, batch_size=evaluation.get('batch_size'))
         positive_int(settings['bucket_window'], 'test.bucket_window')
         if type(settings['bucket_by_length']) is not bool:
             raise ValueError('bucket_by_length must be boolean')
