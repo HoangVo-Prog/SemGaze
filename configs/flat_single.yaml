@@ -12,7 +12,7 @@ data:
   dataset: all # Joint AiR + COCO-Search18 run
   variant: all
   split_root: data/split/all
-  images_root: data/images
+  images_root: /data/shared/cvpr/hoang/dataset/images_recovered
   # Declare original_image only when these are the original annotation images,
   # or provide a verified {width: ..., height: ...} coordinate frame.
   annotation_frame: original_image
@@ -26,8 +26,8 @@ data:
     conversion_to_ms: identity
 
   fewshot:
-    k_values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    train_k_probabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    k_values: [1] # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    train_k_probabilities: [1.0] # [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     require_same_subject: true
     require_distinct_support_stimuli: true
     exclude_query_stimulus: true
@@ -158,7 +158,7 @@ evaluation:
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
-  k_values: [1]
+  k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:
     where: true # autoregressive WHERE predictions and their scanpath metrics
@@ -174,7 +174,7 @@ evaluation:
     split: test
     where:
       scanmatch: true
-      multimatch: false
+      multimatch: true
       sed: true
       isp_reference:
         width: 512
@@ -186,7 +186,7 @@ evaluation:
         sed_grid_n: 5
       coordinate_adapter: deepgaze_vl_predict_scanpath_round
     probability:
-      ll: true
+      ll: false
       ig: false
       outcome: B
       mode: deepgaze_fast
@@ -221,7 +221,7 @@ evaluation:
         enabled: true
       # Java METEOR 1.5, enable after downloading the authors' JAR (README).
       meteor:
-        enabled: false
+        enabled: true
         jar_path: null
         java_bin: java
 
