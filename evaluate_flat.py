@@ -15,6 +15,7 @@ python evaluate_flat.py \
 """
 import argparse
 import json
+import time
 from pathlib import Path
 
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
@@ -25,6 +26,7 @@ from semgaze.model.config import ROOT, load_config, resolve_config, resolve_outp
 from semgaze.model.visual_cache import InferenceVisualCache
 from semgaze.evaluation.test import evaluate_test_epoch, test_mode, test_queries
 from semgaze.evaluation.batching import schedule_batches
+from semgaze.evaluation.progress import RollingRate, format_eta, progress_interval, should_report
 from semgaze.evaluation.metrics_probability import (
     score_probability_batch, aggregate_probability_draw, aggregate_probability_k,
 )
@@ -104,6 +106,25 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
     k_values = bundle.config['evaluation']['k_values']
     counts = {}
     written = 0
+    # Match training ETA: measure full inference windows, NOT the much faster
+    # loop serializing previously generated rows. Distinct K/path workloads
+    # mean this whole-prediction ETA is an estimate, not a deadline.
+    total = sum(len(queries) * (draw_counts[str(k)] if enabled_where
+                                else semantic_counts[str(k)]) for k in k_values)
+    progress = RollingRate(min_observations=2)
+    ready = 0
+    started = time.perf_counter()
+
+    def window_ready(window_size):
+        nonlocal ready
+        ready += window_size
+        if ready > total:
+            raise RuntimeError('prediction windows exceed planned evaluation episodes')
+        progress.update(ready)
+
+    print(f'[EVAL][PRED] starting | queries={len(queries)} | K={list(k_values)} '
+          f'| planned_episodes={total} | WHERE={enabled_where} '
+          f'| semantic={enabled_semantic}', flush=True)
     try:
         with test_mode(bundle):
             cache.validate(bundle)
@@ -123,8 +144,10 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
                         if run_semantic:
                             rates['flat_format_valid'] = 0
                         observed = []
+                        interval = progress_interval(len(queries))
                         for episode, generated in prediction_batches(
-                                bundle, episodes, budget=budget, cache=cache, path=path):
+                                bundle, episodes, budget=budget, cache=cache, path=path,
+                                on_window_ready=window_ready):
                             row = _prediction_record(
                                 bundle, episode, epoch=None, step=None, split='test',
                                 index=written + 1, budget=budget,
@@ -140,6 +163,14 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
                                     bool(row['semantic_generation']['flat_format_valid']))
                             written += 1
                             rates['queries'] += 1
+                            if should_report(rates['queries'], len(queries), interval):
+                                eta = progress.eta(total - ready)
+                                print(f'[EVAL][PRED] {written}/{total} '
+                                      f'({100 * written / total:.1f}%) '
+                                      f'| K={k} draw={draw_id + 1}/{traversal_count} '
+                                      f'[{rates["queries"]}/{len(queries)}] '
+                                      f'| path={path} | ETA test predictions={format_eta(eta)}',
+                                      flush=True)
                         expected = [{'query_id': q.record_id, 'K': k, 'draw_id': draw_id}
                                     for q in queries]
                         assert_key_sets_equal(observed, expected)
@@ -153,9 +184,12 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
         expected_all = expected_episode_keys(
             [q.record_id for q in queries], k_values,
             draw_counts if enabled_where else semantic_counts)
-        if written != len(expected_all):
-            raise ValueError(f'prediction episode coverage mismatch: {written} != {len(expected_all)}')
+        if written != len(expected_all) or ready != written:
+            raise ValueError(f'prediction episode coverage mismatch: written={written}, '
+                             f'inferred={ready}, expected={len(expected_all)}')
         partial.replace(destination)
+        print(f'[EVAL][PRED] complete | episodes={written}/{total} '
+              f'| elapsed={time.perf_counter() - started:.1f}s', flush=True)
     finally:
         cache.close()
     (output_dir / 'validity_summary.json').write_text(
@@ -188,6 +222,14 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
     coco_queries = [q for q in queries
                     if getattr(q, 'dataset', 'COCO-Search18') == 'COCO-Search18']
     by_k = {}
+    total = sum(len(coco_queries) * draw_counts[str(k)]
+                for k in bundle.config['evaluation']['k_values'])
+    completed = 0
+    progress = RollingRate(min_observations=2)
+    started = time.perf_counter()
+    print(f'[EVAL][LL] starting | COCO queries={len(coco_queries)} '
+          f'| K={bundle.config["evaluation"]["k_values"]} '
+          f'| planned_episodes={total}', flush=True)
     try:
         with test_mode(bundle):
             cache.validate(bundle)
@@ -199,8 +241,27 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
                     episodes = [frozen_episode(q, train, manifest, k, draw_id=draw_id,
                                 unseen_subjects=manifest['unseen_subject_ids']) for q in coco_queries]
                     rows = []
+                    draw_completed = 0
+                    interval = progress_interval(len(coco_queries))
+                    next_report = interval
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache):
-                        rows.extend(score_probability_batch(bundle, batch.episodes, visual_cache=cache))
+                        scored = score_probability_batch(bundle, batch.episodes, visual_cache=cache)
+                        if len(scored) != len(batch.episodes):
+                            raise ValueError('LL scorer returned incomplete physical batch')
+                        rows.extend(scored)
+                        draw_completed += len(scored)
+                        completed += len(scored)
+                        # Unlike prediction generation, LL batches return only
+                        # after inference, so this is a true completed-work rate.
+                        progress.update(completed)
+                        if draw_completed >= next_report or draw_completed == len(coco_queries):
+                            print(f'[EVAL][LL] {completed}/{total} '
+                                  f'({100 * completed / total:.1f}%) '
+                                  f'| K={k} draw={draw_id + 1}/{draw_counts[str(k)]} '
+                                  f'[{draw_completed}/{len(coco_queries)}] '
+                                  f'| ETA LL={format_eta(progress.eta(total - completed))}',
+                                  flush=True)
+                            next_report = (draw_completed // interval + 1) * interval
                     expected = [{'query_id': q.record_id, 'K': k, 'draw_id': draw_id}
                                 for q in coco_queries]
                     assert_key_sets_equal(rows, expected)
@@ -211,6 +272,10 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
                 by_k[str(k)] = block
     finally:
         cache.close()
+    if completed != total:
+        raise ValueError(f'LL evaluation coverage mismatch: {completed} != {total}')
+    print(f'[EVAL][LL] complete | episodes={completed}/{total} '
+          f'| elapsed={time.perf_counter() - started:.1f}s', flush=True)
     artifact = {
         'metric': 'LL (Outcome B)',
         'dataset': 'COCO-Search18',
@@ -359,9 +424,13 @@ def main():
         budget=budget, draw_counts=draw_counts, semantic_counts=semantic_counts)
     metrics_artifact = None
     if prediction_path is not None and metrics['enabled']:
+        print('[EVAL][METRIC] scoring frozen predictions | starting', flush=True)
+        metric_started = time.perf_counter()
         metrics_artifact = score_prediction_artifact(
             prediction_path, queries=queries, config=config, output_dir=output_dir,
             checkpoint=checkpoint, split_manifest_identity=identity)
+        print(f'[EVAL][METRIC] complete '
+              f'| elapsed={time.perf_counter() - metric_started:.1f}s', flush=True)
     (output_dir / 'evaluation_summary.json').write_text(json.dumps({
         'checkpoint': str(checkpoint), 'output_dir': str(output_dir),
         'test_metrics': str(output_dir / 'test_metrics.json') if compute_loss else None,
