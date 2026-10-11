@@ -121,6 +121,8 @@ def validate_config(config):
             if (key.startswith('save_') and key != 'save_every') or key.startswith('require_'):
                 if type(value) is not bool:
                     raise ValueError(f'{section}.{key} must be boolean')
+    if config['where']['support_prompt_style'] not in ('full', 'concise'):
+        raise ValueError("where.support_prompt_style must be 'full' or 'concise'")
     if type(config['where']['supervision']['use_cache']) is not bool:
         raise ValueError('where.supervision.use_cache must be boolean')
     if type(config['where']['supervision']['output_hidden_states']) is not bool:

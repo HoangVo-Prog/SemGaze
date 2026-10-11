@@ -64,6 +64,8 @@ where:
   mode: xyd
   end_fix_token: "<END_FIX>"
   require_atomic_end_fix: true
+  # B2: concise support user messages; final query always keeps the full WHERE instruction.
+  support_prompt_style: concise # concise (default, B2) | full (original)
 
   coordinates:
     grid_size: 100

@@ -311,10 +311,14 @@ def main():
                         help='Optional override of evaluation.predictions.where/semantic')
     parser.add_argument('--semantic-max-new-tokens', type=int,
                         help='Override evaluation.predictions.semantic_max_new_tokens')
+    parser.add_argument('--where-support-prompt-style', choices=('full', 'concise'),
+                        help='Override WHERE support prompt style from checkpoint (default: concise/B2)')
     args = parser.parse_args()
     checkpoint = args.checkpoint.expanduser().resolve()
     try:
         config = _load_evaluation_config(checkpoint, args.config)
+        if args.where_support_prompt_style is not None:
+            config['where']['support_prompt_style'] = args.where_support_prompt_style
         if args.path is not None:
             config['evaluation']['predictions'].update(
                 where=args.path in ('where', 'both'),
@@ -397,6 +401,7 @@ def main():
         'evaluation_batch_size_by_k': config['evaluation'].get('batch_size_by_k', {}),
         'semantic_use_draws': config['evaluation']['semantic_use_draws'],
         'semantic_max_new_tokens': budget if enabled_semantic else None,
+        'where_support_prompt_style': config['where']['support_prompt_style'],
         'where_conditioning': 'oracle_length; no query GT trajectory' if enabled_where else None,
         'semantic_conditioning': 'teacher_forced_GT_XYD_states_and_gold_WHY_groups'
                                  if enabled_semantic else None,

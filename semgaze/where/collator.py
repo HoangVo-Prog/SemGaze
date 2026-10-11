@@ -121,7 +121,8 @@ def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher
         ctx = config['where']['context']
         if len(episode.supports) > ctx['max_k'] or len(episode.supports) + 1 > ctx['max_images_per_episode']:
             raise WhereContextOverflowError('episode exceeds configured support/image capacity')
-    messages, image_paths = build_where_conversation(episode, token)
+    style = config['where']['support_prompt_style'] if config else 'concise'
+    messages, image_paths = build_where_conversation(episode, token, support_prompt_style=style)
     batch = collate_native(processor, messages, image_paths,
                            serialize_xyd_record(episode.query, token) if teacher_forcing else None, image_cache=image_cache)
     if batch.inputs['input_ids'].shape[1] > context_limit:
