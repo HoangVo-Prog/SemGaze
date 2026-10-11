@@ -422,6 +422,8 @@ def main(argv=None):
     ap.add_argument('--config', type=Path)
     ap.add_argument('--predictions-jsonl', type=Path, required=True)
     ap.add_argument('--query-id', action='append', default=[])
+    ap.add_argument('--query-ids-file', type=Path, help='UTF-8 file with one frozen query_id per line')
+    ap.add_argument('--b2-only', action='store_true', help='When B is selected run B2 only, skip B3 (for paired testing)')
     ap.add_argument('--draw-id', type=int, default=0)
     ap.add_argument('--prefix-count', type=int, default=12)
     ap.add_argument('--valid-controls', type=int, default=4)
@@ -431,6 +433,16 @@ def main(argv=None):
     ap.add_argument('--output-dir', type=Path, required=True)
     ap.add_argument('--continue-on-oom', action='store_true')
     a = ap.parse_args(argv)
+    if a.query_ids_file:
+        if not a.query_ids_file.is_file():
+            ap.error('query-ids-file not found')
+        selected_ids = [s.strip() for s in a.query_ids_file.read_text(encoding='utf-8').splitlines()
+                        if s.strip() and not s.startswith('#')]
+        if len(selected_ids) != len(set(selected_ids)):
+            ap.error('duplicate query IDs in query-ids-file')
+        a.query_id.extend(selected_ids)
+    if len(a.query_id) != len(set(a.query_id)):
+        ap.error('duplicate query IDs across --query-id/--query-ids-file')
     if a.draw_id < 0 or a.prefix_count < 1 or a.valid_controls < 4:
         ap.error('draw nonnegative; prefix-count>=1 and valid-controls>=4')
     if a.stage == 'all':
@@ -445,7 +457,8 @@ def main(argv=None):
     meta = {'repo_commit':source_sha(),'checkpoint':str(a.checkpoint.resolve()),
         'checkpoint_config_hash':digest((a.checkpoint/'resolved_config.json').read_bytes()),
         'python':platform.python_version(),'draw_id':a.draw_id,'stage':a.stage,'experiments':selected,
-        'batch_size':1,'visual_cache':False,'decoding':'greedy','seed':a.seed}
+        'batch_size':1,'visual_cache':False,'decoding':'greedy','seed':a.seed,
+        'b2_only':a.b2_only,'query_ids_file':str(a.query_ids_file) if a.query_ids_file else None}
     observations, scores, skips = [], [], []
     try:
         import torch, transformers, peft
@@ -528,7 +541,8 @@ def main(argv=None):
                                           'reason':str(exc)})
                 if 'B' in selected:
                     run('B2_concise',ep,prompt_variant='B2_concise')
-                    run('B3_minimal',ep,prompt_variant='B3_minimal')
+                    if not a.b2_only:
+                        run('B3_minimal',ep,prompt_variant='B3_minimal')
                 if 'C' in selected:
                     for name in ('C_reverse','C_perm1','C_perm2'):
                         run(name,reordered_supports(ep,name,a.seed))
