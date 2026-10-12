@@ -1,221 +1,255 @@
-# Joint AiR + COCO-Search18 patch for SemGaze `no-attn`
+# SemGaze
 
-This patch kit targets the **existing** `no-attn` source reviewed on 2026-10-08.
-The current hosted GitHub connection does not have write access, so the patch
-is provided for application on the owner's checkout. The patch script **does
-not alter the repo** unless `--apply` is supplied.
+SemGaze trains a few-shot personalized scanpath model built on
+[InternVL3.5-8B-HF](https://huggingface.co/OpenGVLab/InternVL3_5-8B-HF).
+It predicts gaze fixations (WHERE: position and duration) and accompanying
+WHAT / WHY / HOW semantics. This guide applies to the `no-attn` branch.
 
-## Apply
+The Python dependencies are specified in [`pyproject.toml`](pyproject.toml).
+Detailed training/evaluation behavior is documented in
+[`README_FLAT.md`](README_FLAT.md). Historical joint-dataset patch instructions
+are preserved in [`documents/LEGACY_README_JOINT_PATCH.md`](documents/LEGACY_README_JOINT_PATCH.md).
 
-```bash
-# Work from a clean checkout of no-attn.
-cd ~/hoang/SemGaze
-git switch no-attn
-git status --short
+## Requirements
 
-# Unzip this kit, then dry run first:
-python /path/to/joint_air_coco/apply_joint_patch.py --repo .
-python /path/to/joint_air_coco/apply_joint_patch.py --repo . --apply
+- Linux + Bash, Git, and an NVIDIA GPU for full 8B model training/evaluation.
+  CPU-only contract tests can run without a GPU.
+- Python >= 3.11 (Python 3.12 recommended) and **either** `venv` **or** Conda.
+- A compatible NVIDIA driver for the PyTorch CUDA wheel installed by pip.
+- **Java 17** when running the Java-backed semantic metrics CIDEr-R and METEOR 1.5.
+  Java is **not** installed by `pip` or `pyproject.toml`.
+- `curl` for optional runtime downloads.
 
-# Review and validate.
-git diff --check
-python -m compileall -q semgaze train_flat.py evaluate_flat.py
-python -m pytest tests/test_joint_air_coco.py -q -rs
-```
+The current `configs/flat_single.yaml` **enables CIDEr-R and METEOR**.
+Install Java and the METEOR JAR before evaluating with this configuration.
 
-The patcher checks that all source anchors exist **before** writing and
-compiles patched Python modules. It will refuse a mismatched code revision.
-Do not apply to a dirty checkout without saving unrelated work. Bundled new files (`semgaze/data/joint.py` and `tests/test_joint_air_coco.py`)
-are accepted when they **already exist with identical bytes** (including when the
-patch kit was extracted into the repository root). If an existing file differs,
-the script aborts without overwriting. Existing source transformations still
-expect the unpatched target revision; this is not a fully idempotent migration.
-
-## Scope
-
-- Reads **all** persisted records in `data/split/all` instead of selecting only
-  the COCO portion; validates AiR against the dataset-specific source manifest
-  and 10 precomputed support draws per K.
-- Adds an AiR image/record adapter, with namespaced AiR subjects and stimuli.
-  AiR is a VQA task; the original `qid` is used for its frozen support groups.
-- Updates both train and test episode samplers so support and query share the
-  same dataset, subject and train-image membership.
-- Selects `dataset: all` for `configs/flat_single.yaml`, while the defaults
-  continue to permit older COCO-only experiments.
-- Keeps legacy aggregate loss for compatibility **and** adds
-  `test_by_dataset` and `test_by_dataset_k` outputs to evaluation summaries.
-- Dataset-splits semantic/scanpath metric artifacts into separate directories
-  under `predictions/<epoch-or-step>/AiR/` and `.../COCO_Search18/` and writes
-  a top-level `metrics_by_dataset.json`. Does not introduce a fictitious joint
-  metric. Probability LL/IG is COCO-only until AiR is independently validated.
-- Includes CPU-only regression fixtures for record typing, split combination,
-  same-subject K-shot sampling and qid-based AiR support selection.
-
-## Dataset layout assumed
-
-```text
-data/
-  split/
-    all/{train,test,test_seen,split_manifest}.json
-    AiR/split/all/split_manifest.json
-    COCO_Search18/split/all/split_manifest.json
-  images/
-    AiR/                     # unique AiR filenames inside this subtree
-    COCO_Search18/           # or existing COCO recognized aliases
-```
-
-The AiR image adapter assumes a unique image basename within the AiR subtree.
-If the actual image layout differs, adjust `AirAdapter.image_info` in
-`semgaze/data/joint.py` rather than disabling integrity checks.
-
-## Verify exact counts (including unseen support-only training rows)
+## 1. Clone the branch
 
 ```bash
-python - <<'PY'
-from collections import Counter
-from pathlib import Path
-from semgaze.model.config import load_config
-from semgaze.data.cocosearch18 import read_persisted_splits
-from semgaze.data.joint import JointAdapter, unseen_subject_ids
-c = load_config(Path('configs/flat_single.yaml'))
-d = c['data']
-raw, manifest, identity = read_persisted_splits(Path(d['split_root']), data_config=d)
-for split, rows in raw.items():
-    print(split, Counter(r['dataset'] for r in rows))
-adapter = JointAdapter(Path(d['images_root']), annotation_frame=d['annotation_frame'], duration_field=d['duration']['source_field'])
-records = [adapter(r) for r in raw['train']]
-unseen = unseen_subject_ids(d, manifest)
-print('eligible train queries:', Counter(r.dataset for r in records if r.subject not in unseen))
-PY
+git clone --branch no-attn --single-branch https://github.com/HoangVo-Prog/SemGaze.git
+cd SemGaze
 ```
 
-Expected loader counts from the user's current persisted files:
-`train: COCO-Search18=24766, AiR=9677` and
-`test: COCO-Search18=806, AiR=339`. These are *all persisted records*,
-including unseen-subject support-only rows in train; actual gradient queries
-are the **eligible seen-subject subset**.
+If continuing from the released DeepGaze adapter, install Git LFS and run
+`git lfs pull` after cloning. Otherwise the tracked adapter weights and tokenizer
+JSON may still be **LFS pointer files**. The checked-in `flat_single.yaml`
+uses a **fresh LoRA** (`initialization_adapter: null`), which does not require
+those adapter weights. The InternVL 8B base model still needs to be downloaded
+from Hugging Face or available in a local cache.
 
-## New run required
+## 2A. Set up using Python `venv`
 
-**Do not resume COCO-only checkpoints to claim joint training.** A model
-already trained only on COCO has not seen AiR. Use a fresh run directory and
-train from a new joint config. The run's split identity and query universe are
-different, so resume of a COCO-only training run is intentionally unsupported.
-
-Example:
+Run from the repository root. Use `python3.11` if 3.12 is not installed.
 
 ```bash
-python train_flat.py --config configs/flat_single.yaml --output-dir runs/joint-air-coco \
-  --semantic-max-new-tokens 128
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
 ```
 
-Be aware that the total train duration, train step count, evaluation workload
-and memory footprint can increase. Eval now includes 1,145 unseen test
-records per (K, draw), instead of 806. At K=1/draw=1 this is +42.1% test
-queries. K=1/5/10 and draw=10 are far more expensive; keep the chosen
-`evaluation.k_values` and `evaluation.draw` deliberate.
+This command reads **`pyproject.toml`** and installs the pinned versions of
+PyTorch, torchvision, Transformers, PEFT, Accelerate and other dependencies,
+plus pytest from the `test` extra. For a minimal runtime installation without
+test dependencies, use `python -m pip install -e .`.
 
-## Validation status / limitations
+On each new shell, reactivate with `source .venv/bin/activate`.
 
-- Source anchors were compared to the remote `no-attn` code.
-- The new joint reader passed an isolated test with mocked dependencies.
-- Python syntax was checked for all added patch-kit source files.
-- **Full repository unit tests, real manifest/image loading and GPU integration
-  tests cannot be run here** because the original repo and image datasets are
-  not mounted in the execution container. Run the commands above before
-  launching a long training job.
-- AiR scanpath scoring reuses the COCO/ISP coordinate transform but its
-  canonical AiR comparability requires a separate dataset-specific check;
-  do **not** present the metrics as a single cross-dataset benchmark score.
-- Evaluation with `ll=true` limits probability scoring to COCO. AiR
-  probability-metric implementation is not claimed in this patch.
+### Java 17 with `venv`
 
-## Patch kit v1.1 — duplicate subject-anchor fix
-
-The original script failed during dry-run on `semgaze/evaluation/predictions.py`
-with `prediction string subject 1: expected exactly one anchor, found 2`.
-The patcher now requires **exactly two** occurrences and updates both in one
-operation (WHERE and semantic consistency checks). The dry-run remains
-fail-closed and atomic: source files are written only when `--apply` is used.
-
-For a standalone sanity check before applying:
+**Option A: system Java (Ubuntu/Debian, sudo needed).**
 
 ```bash
-python /path/to/joint_air_coco/test_patcher_anchor.py
-python /path/to/joint_air_coco/apply_joint_patch.py --repo .
-```
-
-The regression checks that two exact anchors are replaced and any unexpected
-third anchor is rejected, and compiles the generated Python source.
-
-
-## Patch kit v1.2 — bundled files already present
-
-The patcher now accepts `semgaze/data/joint.py` and `tests/test_joint_air_coco.py`
-when their bytes exactly match the bundled files. It prints `EXISTS IDENTICAL`
-during dry-run and `UNCHANGED (identical)` during apply. Any differing file is
-rejected before writing; no force-overwrite is supported.
-
-## Java 17 Setup
-
-CIDEr-R requires Java 17 for Stanford PTBTokenizer. No Conda or sudo required.
-
-```bash
-# Activate Python environment
-source /data/shared/cvpr/hoang/envs/semgaze-flat/bin/activate
-
-# Install Java 17 if not already installed
-export JAVA_HOME=/data/shared/cvpr/hoang/tools/java17
-
-if [ ! -x "$JAVA_HOME/bin/java" ]; then
-    mkdir -p "$JAVA_HOME"
-
-    curl -fL \
-      "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jre/hotspot/normal/eclipse" \
-      -o /tmp/java17.tar.gz
-
-    tar -xzf /tmp/java17.tar.gz \
-      -C "$JAVA_HOME" --strip-components=1
-
-    rm /tmp/java17.tar.gz
-fi
-
-# Add Java to PATH
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jre-headless
+export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
 export PATH="$JAVA_HOME/bin:$PATH"
-
-# Verify
 java -version
 ```
 
-For SLURM or nohup, set `JAVA_HOME` and `PATH` in the job script before running training.
-
-## LLada BLEU-4 / ROUGE-L / METEOR 1.5 setup
-
-Both the **training evaluation** and **standalone** `evaluate_flat.py` use the
-same `score_prediction_artifact` semantic scorer. BLEU-4 is computed across
-all semantic units **per (dataset, K, draw, branch)**, not as a mean of sentence
-BLEU scores. ROUGE in LLada is **ROUGE-L**, so SemGaze writes
-`eval_sem_{what,why,how}_rouge_l` and the identical `..._rouge` alias.
-Missing predictions are retained in the denominator. Metrics are reported
-separately for WHAT, WHY and HOW, with the existing GT-WHERE conditioning.
-
-Enable each metric with `evaluation.metrics.semantic.{bleu4,rouge_l,meteor}.enabled`.
-BLEU-4 and ROUGE-L need no extra dependencies. METEOR must use LLada's Java
-METEOR 1.5 scorer; do **not** replace it with NLTK METEOR.
+**Option B: install a Java 17 JRE under your home directory (no sudo).**
+The example download targets Linux x86-64.
 
 ```bash
-# From the SemGaze repository root (download once on an Internet-connected node):
-mkdir -p third_party/llada_meteor
-curl -fL 'https://raw.githubusercontent.com/yuchen2199/Explainable-Driver-Attention-Prediction/a36db49ec56a1ea19534607ee4458552d011974e/utils/eval_utils/meteor/meteor-1.5.jar' \
-  -o third_party/llada_meteor/meteor-1.5.jar
-java -version  # Java 17 from the setup above works if your METEOR JAR supports it
+export JAVA_HOME="$HOME/.local/opt/java17"
+mkdir -p "$JAVA_HOME"
+curl -fL --retry 3 \
+  "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jre/hotspot/normal/eclipse" \
+  -o /tmp/semgaze-java17.tar.gz
+tar -xzf /tmp/semgaze-java17.tar.gz -C "$JAVA_HOME" --strip-components=1
+rm /tmp/semgaze-java17.tar.gz
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version
 ```
 
-Alternatively, copy that JAR from a networked workstation to the cluster.
-If storing elsewhere, set `evaluation.metrics.semantic.meteor.jar_path` to its
-absolute path. Set `evaluation.metrics.semantic.meteor.enabled: true` to run it.
-The process fails explicitly if Java or the JAR is unavailable; it never emits
-fabricated METEOR scores. Java processing is CPU-based, but requires roughly
-2 GB heap per evaluator process. `metrics.json` stores scorer provenance.
-Standalone example: `python evaluate_flat.py --checkpoint ... --config
-configs/flat_single.yaml --output-dir ... --skip-loss`.
+For ARM64 or other systems, download the matching Java 17 build from
+[Eclipse Temurin](https://adoptium.net/temurin/releases/).
+Re-export `JAVA_HOME` and `PATH` in later shells and within SLURM/nohup job
+scripts. A setting in one interactive shell does not propagate into a new job.
+
+## 2B. Set up using Conda (alternative to `venv`)
+
+```bash
+conda create -n semgaze python=3.12 -y
+conda activate semgaze
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+
+# Install Java inside the Conda environment (does not need sudo).
+conda install -c conda-forge openjdk=17 -y
+export JAVA_HOME="$CONDA_PREFIX"
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version
+```
+
+Both installation methods use the **same `pyproject.toml`** for Python
+packages. Do **not** activate `.venv` from inside the Conda environment.
+When returning to a Conda shell, run `conda activate semgaze`, then export
+`JAVA_HOME="$CONDA_PREFIX"` again for the Java-based metrics.
+
+## 3. Java assets: CIDEr-R and METEOR 1.5
+
+The Stanford CoreNLP 3.4.1 JAR required by the vendored CIDEr-R tokenizer
+is already tracked here:
+
+```text
+third_party/cider_r/pycocoevalcap/tokenizer/stanford-corenlp-3.4.1.jar
+```
+
+The **METEOR 1.5 JAR is not checked in**. Download it from the pinned LLada
+reference commit, once per checkout:
+
+```bash
+mkdir -p third_party/llada_meteor
+curl -fL --retry 3 \
+  "https://raw.githubusercontent.com/yuchen2199/Explainable-Driver-Attention-Prediction/a36db49ec56a1ea19534607ee4458552d011974e/utils/eval_utils/meteor/meteor-1.5.jar" \
+  -o third_party/llada_meteor/meteor-1.5.jar
+
+python - <<'PY'
+from pathlib import Path
+from zipfile import ZipFile, is_zipfile
+p = Path('third_party/llada_meteor/meteor-1.5.jar')
+assert is_zipfile(p), f'Invalid METEOR JAR (check download): {p}'
+with ZipFile(p) as z:
+    assert 'META-INF/MANIFEST.MF' in z.namelist()
+print(f'METEOR JAR OK: {p} ({p.stat().st_size:,} bytes)')
+PY
+```
+
+The runtime reads `evaluation.metrics.semantic.meteor.jar_path` from the
+config (null selects the default `third_party/llada_meteor/meteor-1.5.jar`).
+The `java_bin` config defaults to `java` on `PATH`. METEOR launches a Java
+process with `-Xmx2G` and can require roughly 2 GB of **host RAM per worker**.
+Java is CPU-side, not an extra GPU dependency. Missing Java/JAR is a hard
+error, not a reason to substitute a different metric implementation.
+
+If Java-backed metrics are not needed, set both
+`evaluation.metrics.semantic.cider_r.enabled: false` and
+`evaluation.metrics.semantic.meteor.enabled: false` in the evaluation config.
+BLEU-4 and ROUGE-L do not require Java.
+
+## 4. Configure datasets and pretrained weights
+
+The tracked split metadata lives under `data/split/`, but the raw image
+collection must be provided separately. For joint AiR + COCO-Search18 runs,
+edit **`configs/flat_single.yaml`**, particularly `data.images_root`:
+
+```yaml
+data:
+  dataset: all
+  split_root: data/split/all
+  images_root: /absolute/path/to/images
+  annotation_frame: original_image
+```
+
+The image root must contain the dataset-specific image trees expected by
+`semgaze/data/joint.py`. Only use `annotation_frame: original_image`
+when those images match the original annotation coordinate frame.
+Review `model.initialization_adapter`, few-shot K, physical batch size,
+gradient accumulation, evaluation scheduling, and metric flags before training.
+The current default example runs joint training with **fresh LoRA**.
+
+The base Hugging Face model is `OpenGVLab/InternVL3_5-8B-HF`;
+allow its download or point Hugging Face at a valid local cache.
+
+## 5. Verify installation
+
+```bash
+python -m pip check
+python - <<'PY'
+import sys, torch, transformers, peft
+print('Python:', sys.version.split()[0])
+print('Torch:', torch.__version__)
+print('Transformers:', transformers.__version__)
+print('PEFT:', peft.__version__)
+print('CUDA available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('GPU:', torch.cuda.get_device_name(0))
+    print('Torch CUDA runtime:', torch.version.cuda)
+PY
+java -version
+python -m pytest tests -q
+python scripts/smoke_flat.py --contract-only
+```
+
+`java -version` is only required when Java-backed metrics are enabled.
+The pure contract smoke test does not load the 8B model. To check the
+actual model/adapter on a GPU node:
+
+```bash
+python scripts/smoke_flat.py --with-model --config configs/flat_single.yaml
+```
+
+`--with-model` requires model assets and sufficient VRAM. It does not perform
+an optimizer step unless `--step` is explicitly provided.
+
+## 6. Train and evaluate
+
+Activate the selected environment and run from the repository root:
+
+```bash
+python -u train_flat.py \
+  --config configs/flat_single.yaml \
+  --output-dir runs/flat
+
+python -u evaluate_flat.py \
+  --checkpoint runs/flat/checkpoint-100 \
+  --config configs/flat_single.yaml \
+  --output-dir runs/eval \
+  --skip-loss
+```
+
+Replace the example checkpoint with an **existing** saved checkpoint
+directory. See `python train_flat.py --help` and
+`python evaluate_flat.py --help` for supported arguments. The `run.sh` and
+`eval.sh` wrappers use the active `JAVA_HOME` rather than overriding it with
+a path from another machine; edit the checkpoint placeholder in `eval.sh`.
+
+For SLURM or `nohup`, activate Python and export Java **inside the job**:
+
+```bash
+# Conda example (initialize Conda for non-interactive Bash beforehand):
+conda activate semgaze
+export JAVA_HOME="$CONDA_PREFIX"
+export PATH="$JAVA_HOME/bin:$PATH"
+python -u train_flat.py --config configs/flat_single.yaml --output-dir runs/flat
+```
+
+## Troubleshooting
+
+- `ModuleNotFoundError`: check `which python`; reactivate the selected
+  environment, then rerun `python -m pip install -e ".[test]"`.
+- CUDA unavailable: check `nvidia-smi`, the NVIDIA driver, and PyTorch CUDA
+  wheel compatibility. `pyproject.toml` pins Python versions, not the driver.
+- `java: command not found`: set `JAVA_HOME`/`PATH` in the **running process**
+  (including SLURM scripts) and verify `java -version`.
+- METEOR not found: check the JAR download and
+  `evaluation.metrics.semantic.meteor.jar_path`.
+- Git LFS pointer/model load error: run `git lfs pull` when using the
+  continued adapter; verify that a real tensor file was downloaded.
+- Dataset file/integrity error: verify `data.split_root`, `data.images_root`,
+  image directory layout and `annotation_frame`.
+
+More documentation: [`README_FLAT.md`](README_FLAT.md),
+[`METRICS_STATUS.md`](METRICS_STATUS.md),
+[`third_party/cider_r/README_PROVENANCE.md`](third_party/cider_r/README_PROVENANCE.md).
