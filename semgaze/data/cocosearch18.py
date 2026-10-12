@@ -194,7 +194,7 @@ class CocoSearch18Adapter:
                     self.index.setdefault(path.name, []).append(path)
 
     @lru_cache(maxsize=None)
-    def image_info(self, name, condition):
+    def image_info(self, name, condition, task):
         from PIL import Image
         matches = self.index.get(name, [])
         if len(matches) > 1:
@@ -203,8 +203,19 @@ class CocoSearch18Adapter:
                            (part.lower() for part in p.relative_to(self.root).parts[:-1])]
             if conditioned:
                 matches = conditioned
+            # COCO-Search18 can reuse the same image basename across task
+            # folders (e.g. TP/bowl and TP/bottle).  Resolve by task as well.
+            if len(matches) > 1:
+                task_name = str(task).strip().lower()
+                task_matches = [p for p in matches if p.parent.name.lower() == task_name]
+                if task_matches:
+                    matches = task_matches
         if len(matches) != 1:
-            raise FileNotFoundError(f'{name}: expected one image under {self.root}, found {len(matches)}')
+            raise FileNotFoundError(
+                f'{name} (condition={condition}, task={task}): '
+                f'expected one image under {self.root}, found {len(matches)}: '
+                f'{[str(path) for path in matches]}'
+            )
         with Image.open(matches[0]) as image:
             image_size = image.size
         frame = self.annotation_frame
@@ -218,7 +229,7 @@ class CocoSearch18Adapter:
 
     def __call__(self, raw):
         rid = raw['record_id']
-        image_path, width, height = self.image_info(raw['name'], raw['condition'])
+        image_path, width, height = self.image_info(raw['name'], raw['condition'], raw['task'])
         return NormalizedRecord(rid, raw['stimulus_id'], int(raw['subject']), image_path, width, height,
             raw['task'], raw['condition'], tuple(raw['X']), tuple(raw['Y']), tuple(raw[self.duration_field]),
             semantic_from_prediction(raw['prediction'], len(raw['X']), rid))
