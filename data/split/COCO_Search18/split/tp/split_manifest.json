@@ -14,7 +14,7 @@
             "record_ratio": 0.09941818181818182,
             "record_ratio_abs_error": 0.0005818181818181833,
             "subject_tv": 0.01336819844383854,
-            "task_tv": 0.03735803684245528
+            "task_tv": 0.03735803684245527
           },
           "seen": {
             "condition_tv": 0.00856325776847175,
@@ -28,10 +28,10 @@
             "record_ratio": 0.10044865403788635,
             "record_ratio_abs_error": 0.0004486540378863396,
             "subject_tv": 0.002669101875514862,
-            "task_tv": 0.04494426150827914
+            "task_tv": 0.044944261508279126
           }
         },
-        "score": 0.6059724419024854,
+        "score": 0.6059724419024852,
         "train_support_distinct_images": 794
       },
       "ta": {
@@ -86,7 +86,7 @@
             "record_ratio": 0.10141628730399595,
             "record_ratio_abs_error": 0.0014162873039959417,
             "subject_tv": 0.0061776514707161945,
-            "task_tv": 0.07727772122551485
+            "task_tv": 0.07727772122551488
           }
         },
         "score": 0.915238125359813,
@@ -115,11 +115,11 @@
     "6"
   ],
   "source_file": "data/split/COCO_Search18/COCOSearch-18.json",
-  "source_sha256": "bb80d858c390ee8ce03039fcc97da2d5430a5c8809c29551e99a0f4624f997d6",
+  "source_sha256": "38055781c3414fb1a7fc57d3bd4ec7b421adfd2fb00bf349f216263aec43c3b6",
   "split_file_sha256": {
-    "test": "d515c5e2e8ebd0c7095ef1dcef96bfa62c94a510f33983ee71d8d0fab7e2f342",
-    "test_seen": "90e06833ff9d9b5999ad3e953b6ea845428b9409fd937d17cb71092df4cbf7b4",
-    "train": "77fd2c8fb2992d3d48aa629c794a78c0ae55594e4377bd8498a309c1af12c254"
+    "test": "94d436b9969b6b132d3099d0c800156b26d2c93799810bc60c2e37459e2637e8",
+    "test_seen": "b46ae77905689a1d428f7e4cca8238108a0769e1bfcb88873c304953e05cbb33",
+    "train": "3189cc46742c16935ea6c76e040c05a6f93b60d81ca67b9650e43fee617823f5"
   },
   "split_files": {
     "test": "data/split/COCO_Search18/split/tp/test.json",

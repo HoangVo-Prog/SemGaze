@@ -39,9 +39,9 @@
     "COCO-Search18": "data/split/COCO_Search18/split/all/split_manifest.json"
   },
   "split_file_sha256": {
-    "test": "7927310813f6744ebb9716039e20f6a062e4d1150b45ed1cde03b090b0de6b61",
-    "test_seen": "2e1bb56b92461ee7278c100950d507f0e0ed8dfde77541d19fe5b23613506a45",
-    "train": "d5b1fe7e7388201097e65239a03ccf9e5a92ce6617e5572953f0093436bb0dff"
+    "test": "4bacd7463e34d37008e2bfff05496dcac7c6e6c3314b2b775cb7c7fb580f9c5d",
+    "test_seen": "ea0877b793b272efeb54d0c98d9da479553368044547dbe463758c1825a0e974",
+    "train": "13e3be7dc656858be90a764e40af8ef2ea944a73fbf81f10cdaeb611ca9b88e7"
   },
   "split_files": {
     "test": "data/split/all/test.json",

@@ -6,12 +6,12 @@
     10
   ],
   "master_attempt_id": 6591,
-  "master_selected_score": 0.49318830510013706,
+  "master_selected_score": 0.49318830510013717,
   "master_split_manifest": "data/split/AiR/split/master_split_manifest.json",
   "num_draws_per_k": 10,
   "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
   "source_file": "data/split/AiR/AiR.json",
-  "source_sha256": "777860320152bdfdf8ecdcb4566eee1852c2d85c51f0bfdaf02883f6c5a18eac",
+  "source_sha256": "51a51a2a19560db96cda9b41edc790916122e0d4fa4a6647b3b55c1969acdc3a",
   "unseen_subject_ids": [
     "JY",
     "SC",

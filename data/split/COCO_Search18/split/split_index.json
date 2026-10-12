@@ -11,7 +11,7 @@
   "num_draws_per_k": 10,
   "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
   "source_file": "data/split/COCO_Search18/COCOSearch-18.json",
-  "source_sha256": "bb80d858c390ee8ce03039fcc97da2d5430a5c8809c29551e99a0f4624f997d6",
+  "source_sha256": "38055781c3414fb1a7fc57d3bd4ec7b421adfd2fb00bf349f216263aec43c3b6",
   "unseen_subject_ids": [
     "7",
     "8",
