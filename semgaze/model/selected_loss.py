@@ -9,13 +9,14 @@ class SelectedCausalNLL:
     token_nll: torch.Tensor
     episode_losses: torch.Tensor
     token_counts: torch.Tensor
+    unweighted_episode_losses: torch.Tensor | None = None
 
     @property
     def loss(self):
         return self.episode_losses.mean()
 
 
-def compute_selected_causal_nll(final_hidden, labels, head):
+def compute_selected_causal_nll(final_hidden, labels, head, *, target_weights=None):
     """[B,L,D], [B,L] -> NLL[M], losses[B]; M excludes ignored/padded targets.
 
     Pass host labels when available to keep variable-size index discovery off CUDA.
@@ -37,7 +38,19 @@ def compute_selected_causal_nll(final_hidden, labels, head):
     token_nll = F.cross_entropy(head(selected).float(), targets[episode, position].to(device), reduction='none')
     sums = token_nll.new_zeros(labels.shape[0]).index_add(0, episode_device, token_nll)
     counts = counts.to(device)
-    return SelectedCausalNLL(token_nll, sums / counts, counts)
+    unweighted = sums / counts
+    if target_weights is None:
+        return SelectedCausalNLL(token_nll, unweighted, counts, unweighted)
+    if target_weights.shape != labels.shape:
+        raise ValueError("target weights/labels shapes do not align")
+    weights = target_weights[:, 1:][episode, position].to(device=device, dtype=token_nll.dtype)
+    if not bool(torch.isfinite(weights).all()) or bool((weights < 0).any()):
+        raise ValueError("fixation weights must be finite and nonnegative")
+    weighted_sums = sums.new_zeros(sums.shape).index_add(0, episode_device, token_nll * weights)
+    denominators = sums.new_zeros(sums.shape).index_add(0, episode_device, weights)
+    if bool((denominators <= 0).any()):
+        raise ValueError("each episode must contain positive supervised weight")
+    return SelectedCausalNLL(token_nll, weighted_sums / denominators, counts, unweighted)
 
 
 def forward_backbone(model, inputs, *, use_cache=False):

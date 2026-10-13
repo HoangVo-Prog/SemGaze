@@ -121,7 +121,28 @@ semantic:
   parser: strict_rule_based
   loss: response_token_mean_nll
 
+checkpoint_loading:
+  # Strict resume restores optimizer, scheduler, and sampler.
+  resume_from: null
+  # Start a fresh adaptation run from weights, with a new optimizer/sampler.
+  init_from: null
+
 training:
+  scheduled_sampling:
+    enabled: false
+    probability: 0.30
+    max_probability: 0.30
+    warmup_ratio: 0.10
+    sampling_strategy: greedy_single_fixation
+    target_tasks: [where]
+    loss_mix: 0.50
+    max_new_tokens: 48
+    seed: 2027
+  late_fixation_ce:
+    enabled: false
+    mode: late_only
+    alpha: 0.50
+    threshold: 5
   lambda_where: 1.0
   lambda_sem: 1.0
   optimizer: AdamW

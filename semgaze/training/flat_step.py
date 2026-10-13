@@ -66,7 +66,7 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
                            where_batch=None, profiler=None, semantic_cache=None,
                            audit_disable_where_attention_mask=False,
-                           audit_capture=None):
+                           audit_capture=None, global_step=0):
     """One vectorized WHERE and semantic forward, one backward per physical batch.
 
     A scalar episode keeps the public smoke/evaluation-facing result convention.
@@ -87,9 +87,13 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         bundle.model.zero_grad(set_to_none=True)
         bundle.projector.zero_grad(set_to_none=True)
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
+    training_config = bundle.config['training']
+    lwce_config = training_config['late_fixation_ce']
+    active_weighting = lwce_config if lwce_config['enabled'] else None
     with stage('where'):
         where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
-                                    audit_disable_where_attention_mask=audit_disable_where_attention_mask)
+                                    audit_disable_where_attention_mask=audit_disable_where_attention_mask,
+                                     fixation_weighting=active_weighting)
     if audit_capture is not None:
         for state in where.states:
             state.retain_grad()
@@ -97,6 +101,22 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         device = bundle.input_row.device
         if device.type == 'cuda':
             audit_capture['rng_state_after_where_cuda'] = torch.cuda.get_rng_state(device).clone()
+    where_episode_losses = where.episode_losses
+    ss_stats = {'ss_eligible': 0, 'ss_attempted': 0, 'ss_accepted': 0,
+                'ss_probability': 0.0, 'ss_changed': 0,
+                'ss_positions': {}, 'ss_failure_reasons': {}}
+    ss_loss_mixed_mean = None
+    if training_config['scheduled_sampling']['enabled']:
+        from semgaze.where.ss import scheduled_sampling_loss
+        with stage('scheduled_sampling'):
+            sampled = scheduled_sampling_loss(bundle, episodes, global_step=global_step,
+                weighting=active_weighting, image_cache=where.batch.image_cache)
+        ss_stats = sampled.diagnostics
+        ss_loss_mixed_mean = ss_stats.get('ss_loss_mixed_mean')
+        beta = float(training_config['scheduled_sampling']['loss_mix'])
+        where_episode_losses = torch.where(sampled.applied,
+            (1.0 - beta) * where.episode_losses + beta * sampled.episode_losses,
+            where.episode_losses)
     with stage('semantic'):
         # One shared projector on all valid states; no padding enters P_E.
         counts = [len(e.query.x_px) for e in episodes]
@@ -106,9 +126,11 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             raise RuntimeError('WHERE F / projected R were detached')
         flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
                                                                where=where, profiler=profiler,
-                                                                semantic_cache=semantic_cache)
+                                                                semantic_cache=semantic_cache, response_offsets=True)
+        from semgaze.semantic.flat.diagnostics import summarize_semantic_component_nll
+        component_values = summarize_semantic_component_nll(flat.token_nll, episodes, semantic_metadata)
         t = bundle.config['training']
-        episode_total = t['lambda_where'] * where.episode_losses + t['lambda_sem'] * flat.episode_losses
+        episode_total = t['lambda_where'] * where_episode_losses + t['lambda_sem'] * flat.episode_losses
         loss_total = episode_total.mean()
     if diagnostics and not bool(torch.isfinite(torch.stack((where.loss_where, flat.loss, loss_total))).all()):
         raise RuntimeError('non-finite joint loss')
@@ -135,9 +157,19 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             bundle.optimizer.step()
             if bundle.scheduler is not None:
                 bundle.scheduler.step()
-    metadata = [{k: v for k, v in m.items() if k != 'semantic_target'} | sm
+    metadata = [{k: v for k, v in m.items() if k != 'semantic_target'}
+                | {k: v for k, v in sm.items() if k != 'response_offsets'}
                 for m, sm in zip(where.batch.metadata, semantic_metadata)]
-    result = {'loss_where': where.loss_where.detach(), 'loss_flat': flat.loss.detach(),
+    result = {'loss_where': where_episode_losses.detach().mean(),
+              'loss_where_gt': where.loss_where.detach(),
+              'loss_where_gt_unweighted': where.unweighted_episode_losses.detach().mean(),
+              'loss_where_mixed': ss_loss_mixed_mean,
+              **ss_stats, 'lwce_enabled': bool(lwce_config['enabled']),
+              'loss_flat': flat.loss.detach(),
+              'loss_what': component_values['loss_what'],
+              'loss_why': component_values['loss_why'],
+              'loss_how': component_values['loss_how'],
+              'lwce_alpha': float(lwce_config['alpha']) if lwce_config['enabled'] else 0.0,
               'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
               'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
     for key, values in (

@@ -126,7 +126,13 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 profiler.sync()
             step_started = time.perf_counter()
             losses, rejected = [], 0
-            component_losses = {'loss_where': [], 'loss_flat': []}
+            component_losses = {'loss_where': [], 'loss_where_gt': [],
+                                'loss_where_gt_unweighted': [], 'loss_flat': []}
+            ss_counters = {'ss_eligible': 0, 'ss_attempted': 0, 'ss_accepted': 0, 'ss_changed': 0}
+            ss_failures = {}
+            ss_positions = {}
+            ss_prob = 0.0
+            ss_mixed_losses = []
             diagnostic_losses = {key: [] for key in ('loss_what', 'loss_why', 'loss_how')}
             sampling_started = time.perf_counter()
             batches, sampled_episodes, rejected = sample_optimizer_batches(bundle, sampler)
@@ -143,8 +149,17 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
                     loss_scale=weights[micro], where_batch=batch,
                     diagnostics=diagnose and micro == len(batches) - 1,
-                     profiler=profiler, semantic_cache=semantic_cache)
+                     profiler=profiler, semantic_cache=semantic_cache, global_step=step)
                 losses.append(result['loss_total'] * weights[micro])
+                for key in ss_counters:
+                    ss_counters[key] += int(result.get(key, 0))
+                ss_prob = max(ss_prob, float(result.get('ss_probability', 0.0)))
+                if result.get('loss_where_mixed') is not None:
+                    ss_mixed_losses.append(float(result['loss_where_mixed']))
+                for position, count in result.get('ss_positions', {}).items():
+                    ss_positions[position] = ss_positions.get(position, 0) + count
+                for reason, count in result.get('ss_failure_reasons', {}).items():
+                    ss_failures[reason] = ss_failures.get(reason, 0) + count
                 for key in component_losses:
                     if key in result and result[key] is not None:
                         component_losses[key].append(result[key] * weights[micro])
@@ -198,6 +213,19 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                     entry['preprocessing_cache_hit_rate'] = preprocessing_stats['hit_rate']
                 for key, values in component_losses.items():
                     entry[key] = float(sum(values)) if values else None
+                entry.update(ss_counters)
+                entry['ss_probability'] = ss_prob
+                entry['ss_failure_reasons'] = ss_failures
+                entry['ss_positions'] = ss_positions
+                entry['loss_where_mixed'] = (sum(ss_mixed_losses) / len(ss_mixed_losses)
+                                             if ss_mixed_losses else None)
+                entry['lwce_enabled'] = bool(t['late_fixation_ce']['enabled'])
+                entry['ss_enabled'] = bool(t['scheduled_sampling']['enabled'])
+                entry['lwce_alpha'] = (float(t['late_fixation_ce']['alpha'])
+                                       if t['late_fixation_ce']['enabled'] else 0.0)
+                entry['lwce_mode'] = t['late_fixation_ce']['mode']
+                entry['lwce_threshold'] = t['late_fixation_ce']['threshold']
+                entry['ss_loss_mix'] = t['scheduled_sampling']['loss_mix']
                 for key, values in diagnostic_losses.items():
                     if values:
                         entry[key] = float(sum(values))

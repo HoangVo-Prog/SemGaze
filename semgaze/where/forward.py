@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from contextlib import nullcontext
 from semgaze.state.extractor import extract_query_states
 from .collator import collate_where_batch, to_model_device
+from .weighting import build_fixation_target_weights
 from semgaze.model.selected_loss import forward_backbone, compute_selected_causal_nll
 
 
@@ -13,6 +14,7 @@ class WhereOutput:
     positions: object
     episode_losses: object = None
     query_image_features: object = None
+    unweighted_episode_losses: object = None
 
 
 def forward_where(bundle, episode):
@@ -21,7 +23,7 @@ def forward_where(bundle, episode):
 
 
 def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_cache=None, use_cache=None,
-                        audit_disable_where_attention_mask=False):
+                        audit_disable_where_attention_mask=False, fixation_weighting=None):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where_collation'):
         batch = batch if batch is not None else collate_where_batch(
@@ -40,7 +42,11 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
             inputs = {k: v for k, v in inputs.items() if k != 'attention_mask'}
         outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
                                   if use_cache is None else use_cache))
-        loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'], bundle.model.get_output_embeddings())
+        target_weights = build_fixation_target_weights(
+            batch, episodes, config=fixation_weighting,
+            end_fix_token=bundle.config['where']['end_fix_token'])
+        loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'],
+            bundle.model.get_output_embeddings(), target_weights=target_weights)
     counts = [len(e.query.x_px) for e in episodes]
     states, mask, positions = extract_query_states(outputs.last_hidden_state, batch.inputs['input_ids'],
         batch.inputs['labels'], bundle.end_fix_id, counts, return_unpadded=True)
@@ -48,4 +54,5 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
     if features.shape[:2] != (sum(m['image_count'] for m in batch.metadata), bundle.processor.image_seq_length):
         raise ValueError('native image feature groups differ from collated image ordering')
     return WhereOutput(loss.loss, states, batch, positions,
-                       loss.episode_losses, [features[m['query_image_index']] for m in batch.metadata])
+                        loss.episode_losses, [features[m['query_image_index']] for m in batch.metadata],
+                        loss.unweighted_episode_losses)

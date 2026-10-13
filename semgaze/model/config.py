@@ -139,6 +139,30 @@ def validate_config(config):
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']
+    loading = config['checkpoint_loading']
+    if any(loading[key] is not None and (not isinstance(loading[key], str) or not loading[key].strip())
+           for key in ('resume_from', 'init_from')):
+        raise ValueError('checkpoint_loading paths must be null or nonempty strings')
+    if loading['resume_from'] is not None and loading['init_from'] is not None:
+        raise ValueError('choose only checkpoint_loading.resume_from or init_from')
+    ss = t['scheduled_sampling']
+    lwce = t['late_fixation_ce']
+    if any(type(x.get('enabled')) is not bool for x in (ss, lwce)):
+        raise ValueError('SS/LWCE enabled must be bool')
+    for key in ('probability', 'warmup_ratio', 'max_probability', 'loss_mix'):
+        value = ss[key]
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f'scheduled_sampling.{key} must be in [0, 1]')
+    if ss['sampling_strategy'] != 'greedy_single_fixation' or ss['target_tasks'] != ['where']:
+        raise ValueError('only WHERE greedy_single_fixation SS is implemented')
+    if type(ss['seed']) is not int or ss['seed'] < 0:
+        raise ValueError('scheduled_sampling.seed must be a nonnegative integer')
+    positive_int(ss['max_new_tokens'], 'scheduled_sampling.max_new_tokens')
+    if lwce['mode'] not in ('late_only', 'linear'):
+        raise ValueError('late_fixation_ce.mode must be late_only or linear')
+    if type(lwce['alpha']) not in (int, float) or not math.isfinite(lwce['alpha']) or lwce['alpha'] < 0:
+        raise ValueError('late_fixation_ce.alpha must be finite and nonnegative')
+    positive_int(lwce['threshold'], 'late_fixation_ce.threshold', minimum=0)
     if 'validation' in config or 'validation_scope' in evaluation['predictions']:
         raise ValueError('obsolete validation configuration; use test/test_scope')
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
