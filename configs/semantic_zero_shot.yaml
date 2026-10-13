@@ -1,0 +1,14 @@
+# For data/images on another mount, use --images-root on the CLI.
+method: semantic_zero_shot
+prompt_style: origin
+semgaze_config: configs/flat_single.yaml
+precision: bf16
+device: cuda
+batch_size: 1
+max_new_tokens: 512
+metrics:
+  bleu4: true
+  rouge_l: true
+  cider_r: true
+  meteor: true    # Requires Java + third_party/llada_meteor/meteor-1.5.jar
+  bertscore: false # Enable after installing pinned bert-score 0.3.13
