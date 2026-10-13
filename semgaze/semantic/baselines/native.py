@@ -18,9 +18,21 @@ def make_native(processor, query, style, *, training):
         raise ValueError('expected exactly one native 448x448 tile')
     if training:
         labels = native.inputs['labels'][0]
-        if not ((labels[:native.response_start] == -100).all() and
-                (labels[native.response_start:] != -100).all()):
-            raise ValueError('assistant-only training labels are not a contiguous suffix')
+        # Only assistant response + native EOS is supervised. The HF chat
+        # template may append whitespace after EOS, which MUST remain -100.
+        # Thus the supervised region is a contiguous SPAN, not necessarily a
+        # suffix of the full token stream.
+        start = int(native.response_start)
+        end = start + int(native.response_length)
+        ids = native.inputs['input_ids'][0]
+        if not (0 <= start < end <= labels.numel()):
+            raise ValueError('invalid assistant-only response boundaries')
+        if (bool((labels[:start] != -100).any()) or
+                bool((labels[start:end] == -100).any()) or
+                bool((labels[end:] != -100).any())):
+            raise ValueError('assistant-only labels must supervise exactly the response span')
+        if not torch.equal(labels[start:end], ids[start:end]):
+            raise ValueError('supervised assistant labels differ from input token IDs')
         if int((labels != -100).sum()) != native.response_length:
             raise ValueError('assistant-only response length mismatch')
     return native
