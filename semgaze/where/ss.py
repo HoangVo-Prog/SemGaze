@@ -6,6 +6,9 @@ fixations using the mixed history. The existing GT WHERE path supplies semantic
 states; sampled-history tokens never receive CE supervision.
 """
 import hashlib
+import json
+import os
+from pathlib import Path
 import random
 import re
 from dataclasses import dataclass
@@ -59,8 +62,76 @@ def _parse_generated_fixation(text: str, end_fix_token: str):
     return result if (0 <= result[0] <= 99 and 0 <= result[1] <= 99 and 0 <= result[2] <= 999) else None
 
 
+def _write_ss_debug_trace(bundle, episode, *, step, replace_index, gt, prefix,
+                          prompt, input_ids, generated, end_fix_id, tokenizer,
+                          status, max_new_tokens, cache):
+    """Optional observational trace; NO impact on acceptance, loss, or decoding.
+
+    Set SEMGAZE_SS_TRACE_PATH=/path/to/ss_trace.jsonl to enable. Writes only
+    short text tails, token IDs, and local sample identity; never image tensors.
+    """
+    path = os.environ.get('SEMGAZE_SS_TRACE_PATH')
+    if not path:
+        return
+    end_pos = generated.index(end_fix_id) if end_fix_id in generated else None
+    eos_id = tokenizer.eos_token_id
+    trace = {
+        'event': 'ss_generation_trace', 'step': step,
+        'record_id': episode.query.record_id, 'K': len(episode.supports),
+        'replacement_index': replace_index, 'gt_replaced_fixation': gt[replace_index-1],
+        'prefix_tail_text': prefix[-200:], 'prefix_token_ids_tail': input_ids[0, -96:].tolist(),
+        'new_token_ids': generated,
+        'generated_text_with_special_tokens': tokenizer.decode(
+            generated, skip_special_tokens=False, clean_up_tokenization_spaces=False),
+        'generated_text_without_special_tokens': tokenizer.decode(
+            generated, skip_special_tokens=True, clean_up_tokenization_spaces=False),
+        'end_fix_token_id': end_fix_id, 'contains_end_fix_id': end_pos is not None,
+        'end_fix_position': end_pos,
+        'eos_position': generated.index(eos_id) if eos_id in generated else None,
+        'generation_length': len(generated), 'max_new_tokens': max_new_tokens,
+        'finish_reason_inferred': ('end_fix' if end_pos is not None else
+            'eos' if eos_id in generated else 'max_new_tokens_or_other'),
+        'status': status,
+    }
+    # Compare contexts at the exact boundary before the replacement tuple. This
+    # deliberately uses collate_where's canonical native teacher-forced encoding.
+    try:
+        canonical = collate_where(bundle.processor, episode, bundle.end_fix_id,
+            bundle.context_limit, teacher_forcing=True, config=bundle.config,
+            image_cache=cache)
+        canonical_text = serialize_xyd(gt, bundle.config['where']['end_fix_token'])
+        char_position = len(prefix)
+        positions = canonical.response_offsets
+        before = sum(hi <= char_position for lo, hi in positions)
+        straddling = [(i, lo, hi) for i, (lo, hi) in enumerate(positions)
+                      if lo < char_position < hi]
+        canonical_ids = canonical.inputs['input_ids'][0, :canonical.response_start + before].tolist()
+        actual_ids = input_ids[0].tolist()
+        first_difference = next((i for i in range(min(len(canonical_ids), len(actual_ids)))
+                                 if canonical_ids[i] != actual_ids[i]), None)
+        trace['gt_prefix_parity'] = {
+            'canonical_response_startswith_prefix': canonical_text.startswith(prefix),
+            'canonical_prefix_boundary_char': char_position,
+            'canonical_token_boundary_straddles': straddling[:4],
+            'token_ids_equal': canonical_ids == actual_ids,
+            'canonical_token_count': len(canonical_ids),
+            'ss_token_count': len(actual_ids),
+            'first_mismatch_index': first_difference,
+            'canonical_tail_ids': canonical_ids[-48:],
+            'ss_tail_ids': actual_ids[-48:],
+        }
+    except Exception as exc:
+        trace['gt_prefix_parity'] = {'error_type': type(exc).__name__,
+                                     'error_message': str(exc)[:500]}
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as file:
+        file.write(json.dumps(trace, ensure_ascii=False) + '\n')
+
+
 @torch.no_grad()
-def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new_tokens=48):
+def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new_tokens=48,
+                          debug_global_step=None):
     """Prefix contains GT fixation 1..j-1, but NO GT fixation j or later."""
     tokenizer = bundle.processor.tokenizer
     token = bundle.config['where']['end_fix_token']
@@ -93,11 +164,20 @@ def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new
         bundle.model.train(was_training)
     generated = output[0, length:].tolist()
     if bundle.end_fix_id not in generated:
-        return None, 'no_end_fix'
-    generated = generated[:generated.index(bundle.end_fix_id) + 1]
-    text = tokenizer.decode(generated, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-    fixation = _parse_generated_fixation(text, token)
-    return (fixation, 'valid') if fixation is not None else (None, 'invalid_format')
+        status = 'no_end_fix'
+        fixation = None
+    else:
+        truncated = generated[:generated.index(bundle.end_fix_id) + 1]
+        text = tokenizer.decode(truncated, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        fixation = _parse_generated_fixation(text, token)
+        status = 'valid' if fixation is not None else 'invalid_format'
+    if os.environ.get('SEMGAZE_SS_TRACE_PATH'):
+        _write_ss_debug_trace(bundle, episode, step=debug_global_step,
+            replace_index=replace_index, gt=gt, prefix=prefix, prompt=prompt,
+            input_ids=input_ids, generated=generated,
+            end_fix_id=bundle.end_fix_id, tokenizer=tokenizer, status=status,
+            max_new_tokens=max_new_tokens, cache=cache)
+    return fixation, status
 
 
 def _mixed_native(bundle, episode, gt, replace_index, prediction, cache=None):
@@ -146,7 +226,7 @@ def scheduled_sampling_loss(bundle, episodes, *, global_step, weighting=None, im
         j = rng.randint(2, T - 1)
         prediction, status = generate_one_fixation(
             bundle, episode, replace_index=j, cache=image_cache,
-            max_new_tokens=int(config['max_new_tokens']))
+            max_new_tokens=int(config['max_new_tokens']), debug_global_step=global_step)
         if prediction is None:
             failures[status] += 1
             continue
