@@ -136,7 +136,7 @@ def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new
     tokenizer = bundle.processor.tokenizer
     token = bundle.config['where']['end_fix_token']
     gt = _gt_fixations(episode.query)
-    prefix = serialize_xyd(gt[:replace_index - 1], token)[:-1] + ', '
+    prefix = serialize_xyd(gt[:replace_index - 1], token)[:-1] + ','
     # The native conversation has the full multimodal prompt, but no query GT response.
     prompt = collate_where(bundle.processor, episode, bundle.end_fix_id,
                            bundle.context_limit, teacher_forcing=False,
