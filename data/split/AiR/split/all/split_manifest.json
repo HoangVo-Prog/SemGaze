@@ -23,27 +23,27 @@
             "question_family_tv": 0.018324600048177257,
             "record_ratio": 0.09909177172292259,
             "record_ratio_abs_error": 0.0009082282770774136,
-            "subject_tv": 0.03644391829005263
+            "subject_tv": 0.036443918290052627
           },
           "unseen": {
             "qid_ratio": 0.1011070110701107,
             "qid_ratio_abs_error": 0.0011070110701107,
-            "question_family_tv": 0.042475250124734146,
+            "question_family_tv": 0.04247525012473414,
             "record_ratio": 0.10059347181008903,
             "record_ratio_abs_error": 0.0005934718100890218,
             "subject_tv": 0.0016815034619188929
           }
         },
-        "score": 0.49318830510013717,
+        "score": 0.49318830510013706,
         "train_support_distinct_images": 611
       }
     },
     "num_valid_candidates": 10000,
     "selected_attempt_id": 6591,
-    "selected_score": 0.49318830510013717,
+    "selected_score": 0.49318830510013706,
     "valid_attempts_seen": 6592
   },
-  "master_selected_score": 0.49318830510013717,
+  "master_selected_score": 0.49318830510013706,
   "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
   "runtime_subject_role": {
     "test": "unseen subjects on test images",
@@ -69,9 +69,9 @@
     "ZL"
   ],
   "source_file": "data/split/AiR/AiR.json",
-  "source_sha256": "51a51a2a19560db96cda9b41edc790916122e0d4fa4a6647b3b55c1969acdc3a",
+  "source_sha256": "50b6e7ea5daf5aaa95be54b9fd0d6bc5eafbfaac353378c990b77b5dff0f28ff",
   "split_file_sha256": {
-    "test": "12dc8abb5f5384aafdc29e58d37400016c94661e9a85e3ea551ee6210d4779d3",
+    "test": "b4d22b4cfd16ba93fd5132a045ecc9c5b03e6e0d2b8bcb3502bd8e58fdff5b16",
     "test_seen": "4d06c92abd013577b6a20e6dc2d6cf6607085e92ff5ef477ecd43c1f76723ad4",
     "train": "1c156f882070130e3f3eb10dc6c31f60a92ff791f5b929111491ba97811a9c2a"
   },

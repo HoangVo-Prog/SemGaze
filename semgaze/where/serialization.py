@@ -24,3 +24,8 @@ def parse_xyd_output(text, n, end_fix_token=END_FIX):
     return {"fixations": values[:n], "accepted_fixation_count": len(values), "requested_fixation_count": n,
             "under_generated": len(values) < n,
             "canonical_format_valid": bool(values) and text == serialize_xyd(values, end_fix_token)}
+
+
+def active_end_fix_token(config):
+    """Empty string removes the marker from ALL WHERE conversations and targets."""
+    return config['where']['end_fix_token'] if config['where'].get('use_end_fix_token', True) else ''

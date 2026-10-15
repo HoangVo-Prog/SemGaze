@@ -39,7 +39,7 @@
     "COCO-Search18": "data/split/COCO_Search18/split/all/split_manifest.json"
   },
   "split_file_sha256": {
-    "test": "4bacd7463e34d37008e2bfff05496dcac7c6e6c3314b2b775cb7c7fb580f9c5d",
+    "test": "e2d570ce9c535d500ac8b004ffec5a35f70d25a90513c63ad87f978dc11bc831",
     "test_seen": "ea0877b793b272efeb54d0c98d9da479553368044547dbe463758c1825a0e974",
     "train": "13e3be7dc656858be90a764e40af8ef2ea944a73fbf81f10cdaeb611ca9b88e7"
   },

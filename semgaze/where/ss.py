@@ -21,7 +21,7 @@ from semgaze.model.selected_loss import compute_selected_causal_nll, forward_bac
 from semgaze.where.collator import (collate_where, collate_native, pack_where_batch,
                                     to_model_device)
 from semgaze.where.conversation import build_where_conversation
-from semgaze.where.serialization import serialize_xyd, serialize_xyd_record
+from semgaze.where.serialization import serialize_xyd, serialize_xyd_record, active_end_fix_token
 from semgaze.where.coordinates import coordinate_bin
 from semgaze.where.duration import duration_bin
 from semgaze.where.weighting import mask_replaced_fixation, build_fixation_target_weights
@@ -35,6 +35,18 @@ class _StopAtEndFix(StoppingCriteria):
     def __call__(self, input_ids, scores, **kwargs):
         # Only one episode per sampling call.
         return bool((input_ids[0, self.prompt_length:] == self.end_fix_id).any())
+
+
+class _StopAtClosingTuple(StoppingCriteria):
+    def __init__(self, tokenizer, prompt_length):
+        self.tokenizer = tokenizer
+        self.prompt_length = prompt_length
+
+    def __call__(self, input_ids, scores, **kwargs):
+        generated = input_ids[0, self.prompt_length:].tolist()
+        text = self.tokenizer.decode(generated, skip_special_tokens=False,
+                                     clean_up_tokenization_spaces=False)
+        return ')' in text
 
 
 def _episode_rng(seed: int, global_step: int, record_id: str):
@@ -99,7 +111,7 @@ def _write_ss_debug_trace(bundle, episode, *, step, replace_index, gt, prefix,
         canonical = collate_where(bundle.processor, episode, bundle.end_fix_id,
             bundle.context_limit, teacher_forcing=True, config=bundle.config,
             image_cache=cache)
-        canonical_text = serialize_xyd(gt, bundle.config['where']['end_fix_token'])
+        canonical_text = serialize_xyd(gt, active_end_fix_token(bundle.config))
         char_position = len(prefix)
         positions = canonical.response_offsets
         before = sum(hi <= char_position for lo, hi in positions)
@@ -134,7 +146,7 @@ def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new
                           debug_global_step=None):
     """Prefix contains GT fixation 1..j-1, but NO GT fixation j or later."""
     tokenizer = bundle.processor.tokenizer
-    token = bundle.config['where']['end_fix_token']
+    token = active_end_fix_token(bundle.config)
     gt = _gt_fixations(episode.query)
     prefix = serialize_xyd(gt[:replace_index - 1], token)[:-1] + ','
     # The native conversation has the full multimodal prompt, but no query GT response.
@@ -158,19 +170,29 @@ def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new
             **inputs, max_new_tokens=max_new_tokens, do_sample=False,
             eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id,
             use_cache=True,
-            stopping_criteria=StoppingCriteriaList([_StopAtEndFix(bundle.end_fix_id, length)]),
+            stopping_criteria=StoppingCriteriaList([
+                _StopAtEndFix(bundle.end_fix_id, length) if token else
+                _StopAtClosingTuple(tokenizer, length)]),
         )
     finally:
         bundle.model.train(was_training)
     generated = output[0, length:].tolist()
-    if bundle.end_fix_id not in generated:
-        status = 'no_end_fix'
-        fixation = None
+    if token:
+        if bundle.end_fix_id not in generated:
+            fixation, status = None, 'no_end_fix'
+        else:
+            truncated = generated[:generated.index(bundle.end_fix_id) + 1]
+            text = tokenizer.decode(truncated, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            fixation = _parse_generated_fixation(text, token)
+            status = 'valid' if fixation is not None else 'invalid_format'
     else:
-        truncated = generated[:generated.index(bundle.end_fix_id) + 1]
-        text = tokenizer.decode(truncated, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-        fixation = _parse_generated_fixation(text, token)
-        status = 'valid' if fixation is not None else 'invalid_format'
+        text = tokenizer.decode(generated, skip_special_tokens=False,
+                                clean_up_tokenization_spaces=False)
+        if ')' not in text:
+            fixation, status = None, 'no_closing_tuple'
+        else:
+            fixation = _parse_generated_fixation(text[:text.index(')')+1], '')
+            status = 'valid' if fixation is not None else 'invalid_format'
     if os.environ.get('SEMGAZE_SS_TRACE_PATH'):
         _write_ss_debug_trace(bundle, episode, step=debug_global_step,
             replace_index=replace_index, gt=gt, prefix=prefix, prompt=prompt,
@@ -183,14 +205,14 @@ def generate_one_fixation(bundle, episode, *, replace_index, cache=None, max_new
 def _mixed_native(bundle, episode, gt, replace_index, prediction, cache=None):
     mixed = list(gt)
     mixed[replace_index - 1] = prediction
-    response = serialize_xyd(mixed, bundle.config['where']['end_fix_token'])
-    messages, images = build_where_conversation(episode, bundle.config['where']['end_fix_token'],
+    response = serialize_xyd(mixed, active_end_fix_token(bundle.config))
+    messages, images = build_where_conversation(episode, active_end_fix_token(bundle.config),
         support_prompt_style=bundle.config['where']['support_prompt_style'])
     native = collate_native(bundle.processor, messages, images, response, image_cache=cache)
     if native.inputs['input_ids'].shape[1] > bundle.context_limit:
         raise ValueError('mixed context overflow')
     mask_replaced_fixation(native, response, replace_index,
-                           end_fix_token=bundle.config['where']['end_fix_token'])
+                           end_fix_token=active_end_fix_token(bundle.config))
     if int((native.inputs['labels'][:, :native.response_start] != -100).sum()) != 0:
         raise ValueError('SS accidentally supervised support context')
     return native
@@ -249,7 +271,7 @@ def scheduled_sampling_loss(bundle, episodes, *, global_step, weighting=None, im
     inputs = to_model_device({k: v for k, v in mixed_batch.inputs.items() if k != 'labels'}, bundle.model)
     outputs = forward_backbone(bundle.model, inputs, use_cache=False)
     weights = (build_fixation_target_weights(mixed_batch, subepisodes,
-        config=weighting, end_fix_token=bundle.config['where']['end_fix_token'])
+        config=weighting, end_fix_token=active_end_fix_token(bundle.config))
         if weighting is not None else None)
     selected = compute_selected_causal_nll(outputs.last_hidden_state,
         mixed_batch.inputs['labels'], bundle.model.get_output_embeddings(),

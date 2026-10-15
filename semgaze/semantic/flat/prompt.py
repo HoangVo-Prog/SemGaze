@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from semgaze.data.semantic import validate_semantic
+from semgaze.where.coordinates import coordinate_bin
+from semgaze.where.duration import duration_bin
 
 INSTRUCTION = '''Describe the visual exploration represented by these states.
 
@@ -33,17 +35,28 @@ class FlatPrompt:
     boundaries: tuple[int, ...]  # character offsets; never serialized/tokenized markers
 
 
-def build_flat_prompt(query):
+def build_flat_prompt(query, *, conditioning="shared_states"):
     n, m = len(query.x_px), len(query.semantic.why_groups)
     validate_semantic(query.semantic, n, query.record_id)
-    text = f'Task:\n{query.task}\n\nExploration states:\n'
+    if conditioning not in ('shared_states', 'explicit_scanpath_text'):
+        raise ValueError('unknown semantic conditioning')
+    text = f'Task:\n{query.task}\n\n' + ('Exploration states:\n' if conditioning == 'shared_states' else 'Scanpath:\n')
     boundaries = []
     for t in range(1, n + 1):
         text += f'Fixation {t}:'
-        boundaries.append(len(text))
+        if conditioning == 'shared_states':
+            boundaries.append(len(text))
+        else:
+            i = t-1
+            x = coordinate_bin(query.x_px[i], query.image_width)
+            y = coordinate_bin(query.y_px[i], query.image_height)
+            d = duration_bin(query.duration_ms[i])
+            text += f' ({x:02d}, {y:02d}, {d:03d})'
         text += '\n'
     text += '\nGold WHY groups:\n'
     text += '\n'.join(f"Group {m}: fixations {', '.join(map(str, g.members))}"
                       for m, g in enumerate(query.semantic.why_groups, 1))
-    text += '\n\n' + INSTRUCTION.format(N=n, M=m)
+    instruction = INSTRUCTION if conditioning == 'shared_states' else INSTRUCTION.replace(
+        'represented by these states', 'described by this scanpath')
+    text += '\n\n' + instruction.format(N=n, M=m)
     return FlatPrompt(text, tuple(boundaries))

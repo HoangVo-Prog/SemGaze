@@ -17,18 +17,24 @@ class SemanticContextOverflowError(ValueError):
 
 
 def prepare_flat_inputs(bundle, query, states, *, generation_budget=None):
-    prompt = build_flat_prompt(query)
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    prompt = build_flat_prompt(query, conditioning=bundle.config['semantic']['conditioning'])
     target = build_flat_target(query.semantic) if generation_budget is None else None
     native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path], target, prompt=prompt)
     n, m = len(query.x_px), len(query.semantic.why_groups)
     native_length = native.inputs['input_ids'].shape[1]
-    budget = native_length + n + (generation_budget or 0)
+    budget = native_length + (0 if explicit else n) + (generation_budget or 0)
     if budget > bundle.context_limit:
         raise SemanticContextOverflowError(sample_id=query.record_id,
             native_prompt_length=native.response_start, number_of_inserted_states=n,
             number_of_gold_groups=m, final_prompt_length=native.response_start + n,
             target_length=native_length - native.response_start if target is not None else None,
             generation_budget=generation_budget, context_limit=bundle.context_limit)
+    if explicit:
+        inputs = to_model_device(native.inputs, bundle.model)
+        if generation_budget is not None:
+            inputs.pop('labels')
+        return inputs, (), native
     if states.shape != (n, bundle.projector[0].in_features):
         raise ValueError('full chronological R shape differs from [N,d_model]')
     inputs = to_model_device(native.inputs, bundle.model)
@@ -62,11 +68,47 @@ def frozen_vision_is_reusable(model):
     return True
 
 
+def _prepare_explicit_semantic_batch(bundle, queries, *, visual_cache=None, generation_budget=None):
+    from torch.nn.utils.rnn import pad_sequence
+    if not queries:
+        raise ValueError('empty semantic query batch')
+    natives = []
+    meta = []
+    for query in queries:
+        prompt = build_flat_prompt(query, conditioning='explicit_scanpath_text')
+        target = build_flat_target(query.semantic) if generation_budget is None else None
+        native = collate_native(bundle.processor, [image_user(prompt.text)], [query.image_path],
+                                target, prompt=prompt, image_cache=visual_cache)
+        length = native.inputs['input_ids'].shape[1]
+        if length + (generation_budget or 0) > bundle.context_limit:
+            raise SemanticContextOverflowError(sample_id=query.record_id,
+                native_prompt_length=native.response_start, number_of_inserted_states=0,
+                number_of_gold_groups=len(query.semantic.why_groups), final_prompt_length=native.response_start,
+                target_length=length-native.response_start, generation_budget=generation_budget,
+                context_limit=bundle.context_limit)
+        natives.append(native)
+        meta.append(dict(semantic_length=length,
+            supervised_semantic_tokens=int((native.inputs['labels'][:,1:] != -100).sum()),
+            reused_query_vision=False, response_offsets=native.response_offsets))
+    inputs = {
+        key: pad_sequence([s.inputs[key][0] for s in natives], batch_first=True, padding_value=pad)
+        for key,pad in (('input_ids', bundle.processor.tokenizer.pad_token_id),
+                        ('attention_mask', 0), ('labels', -100))
+    }
+    inputs['pixel_values'] = torch.cat([s.inputs['pixel_values'] for s in natives], dim=0)
+    if generation_budget is not None:
+        del inputs['labels']
+    return inputs, [() for _ in queries], meta
+
+
 def prepare_semantic_batch(bundle, queries, states, *, where=None, visual_cache=None,
                            generation_budget=None, reuse_query_vision=None, semantic_cache=None):
     """One native prompt per sample, followed by differentiable batched assembly."""
     if not queries or len(queries) != len(states):
         raise ValueError('query/state batch counts differ')
+    if bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text':
+        return _prepare_explicit_semantic_batch(bundle, queries, visual_cache=visual_cache,
+                                                 generation_budget=generation_budget)
     reuse = ((where is not None or (visual_cache is not None and visual_cache.features)) and (bundle.config['training'].get('reuse_query_vision', True)
              if reuse_query_vision is None else reuse_query_vision)
              and frozen_vision_is_reusable(bundle.model))

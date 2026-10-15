@@ -65,6 +65,7 @@ model:
 where:
   mode: xyd
   end_fix_token: "<END_FIX>"
+  use_end_fix_token: true
   require_atomic_end_fix: true
   # B2: concise support user messages; final query always keeps the full WHERE instruction.
   support_prompt_style: concise # concise (default, B2) | full (original)
@@ -112,6 +113,7 @@ state:
 
 semantic:
   mode: flat_single_output
+  conditioning: shared_states
   replay_support_context: false
   consume_full_chronological_states: true
   use_gold_why_groups: true

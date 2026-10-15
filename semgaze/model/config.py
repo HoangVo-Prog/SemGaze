@@ -73,10 +73,7 @@ def validate_config(config):
         'where.context.overflow_training': 'resample_supports_same_query_and_k',
         'where.supervision.support_assistant_labels': 'ignore',
         'where.supervision.query_assistant_labels': 'supervise',
-        'where.supervision.supervise_query_end_fix': True,
         'state.readout_layer': 'final_language_model_layer',
-        'state.readout_position': 'query_end_fix_token_position',
-        'state.projector.type': 'linear_layernorm',
         'state.projector.input_dim': 'model_hidden_size',
         'state.projector.output_dim': 'model_hidden_size',
         'state.direct_state_positions.attention_mask': 1,
@@ -121,6 +118,21 @@ def validate_config(config):
             if (key.startswith('save_') and key != 'save_every') or key.startswith('require_'):
                 if type(value) is not bool:
                     raise ValueError(f'{section}.{key} must be boolean')
+    use_end = config['where']['use_end_fix_token']
+    cond = config['semantic']['conditioning']
+    readout = config['state']['readout_position']
+    projector = config['state']['projector']['type']
+    if type(use_end) is not bool:
+        raise ValueError('where.use_end_fix_token must be boolean')
+    if cond not in ('shared_states', 'explicit_scanpath_text'):
+        raise ValueError('unsupported semantic.conditioning')
+    if (not use_end and (cond != 'shared_states' or readout != 'last_duration_numeric_token')) or (
+            use_end and readout != 'query_end_fix_token_position'):
+        raise ValueError('WHERE readout/serialization/conditioning combination is invalid')
+    if projector != ('linear_layernorm' if cond == 'shared_states' else 'none'):
+        raise ValueError('projector must be learned only for shared-state conditioning')
+    if config['where']['supervision']['supervise_query_end_fix'] is not use_end:
+        raise ValueError('supervise_query_end_fix must match where.use_end_fix_token')
     if config['where']['support_prompt_style'] not in ('full', 'concise'):
         raise ValueError("where.support_prompt_style must be 'full' or 'concise'")
     if type(config['where']['supervision']['use_cache']) is not bool:

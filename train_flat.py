@@ -87,13 +87,13 @@ def main():
                                         precision=config['training']['precision'])
         # Checkpoint initialization always retains source architecture/tokenizer.
         if resume_path is not None:
-            if bundle.config['model'] != config['model'] or bundle.config['where']['end_fix_token'] != config['where']['end_fix_token']:
+            if bundle.config['model'] != config['model'] or bundle.config['where']['end_fix_token'] != config['where']['end_fix_token'] or bundle.config['where']['use_end_fix_token'] != config['where']['use_end_fix_token'] or bundle.config['semantic']['conditioning'] != config['semantic']['conditioning']:
                 raise ValueError('strict resume model/token settings differ from checkpoint')
         else:
             old_config = bundle.config
             if old_config['model']['base_model'] != config['model']['base_model']:
                 raise ValueError('weight initialization cannot change base model')
-            for key in ('mode', 'end_fix_token', 'coordinates', 'duration'):
+            for key in ('mode', 'end_fix_token', 'use_end_fix_token', 'coordinates', 'duration'):
                 if old_config['where'][key] != config['where'][key]:
                     raise ValueError(f'weight initialization cannot change WHERE codec: {key}')
             for key in ('state', 'semantic'):

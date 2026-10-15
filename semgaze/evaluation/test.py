@@ -77,7 +77,8 @@ def component_metrics(nll, response_offsets, semantic):
 
 def serial_reference_losses(bundle, episode, *, batch=None):
     where = forward_where_batch(bundle, [episode], batch=batch, use_cache=False)
-    states = bundle.projector(where.states[0])
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    states = None if explicit else bundle.projector(where.states[0])
     inputs, _, native = prepare_flat_inputs(bundle, episode.query, states)
     output = bundle.model(**inputs, output_hidden_states=False, use_cache=False, return_dict=True)
     values = flat_component_nll(output.logits, inputs['labels'], native.response_offsets, episode.query.semantic)
@@ -88,7 +89,7 @@ def serial_reference_losses(bundle, episode, *, batch=None):
     t = bundle.config['training']
     values['test_total'] = t['lambda_where'] * values['test_where'] + t['lambda_sem'] * values['test_flat']
     values.update(episode_id=episode_id(episode), K=len(episode.supports),
-                  support_ids=[s.record_id for s in episode.supports], state_count=len(where.states[0]),
+                  support_ids=[s.record_id for s in episode.supports], state_count=0 if explicit else len(where.states[0]),
                   where_length=where.batch.metadata[0]['where_length'],
                   semantic_length=inputs['attention_mask'].shape[1])
     if not all(math.isfinite(values[key]) for key in EVAL_KEYS):
@@ -102,12 +103,14 @@ def batch_losses(bundle, episodes, *, batch=None, cache=None, profiler=None, pro
     where = forward_where_batch(bundle, episodes, batch=batch, visual_cache=cache,
                                 profiler=profiler, use_cache=False)
     counts = [len(e.query.x_px) for e in episodes]
-    states = bundle.projector(torch.cat(where.states)).split(counts)
-    if projected_r_cache is not None:
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    states = ([None] * len(episodes) if explicit else
+              list(bundle.projector(torch.cat(where.states)).split(counts)))
+    if projected_r_cache is not None and not explicit:
         for episode, projected in zip(episodes, states):
             projected_r_cache.put(episode, projected)
     flat, positions, metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-        where=where, profiler=profiler, response_offsets=True,
+        where=None if explicit else where, profiler=profiler, response_offsets=True,
         reuse_query_vision=bundle.config.get('test', {}).get('cache', {}).get('frozen_visual_features', True))
     # One transfer per batch. Diagnostic Python loops do no forward or CE work.
     nll = flat.token_nll.cpu()
@@ -117,12 +120,12 @@ def batch_losses(bundle, episodes, *, batch=None, cache=None, profiler=None, pro
         count = meta['supervised_semantic_tokens']
         row = component_metrics(nll[offset:offset+count], meta['response_offsets'], ep.query.semantic)
         offset += count
-        if len(where.states[b]) != counts[b] or len(positions[b]) != counts[b]:
+        if (not explicit and (len(where.states[b]) != counts[b] or len(positions[b]) != counts[b])) or (explicit and len(positions[b]) != 0):
             raise ValueError('query state-count mismatch')
         row.update(test_where=float(where_losses[b]), test_flat=float(flat_losses[b]),
                    dataset=getattr(ep.query, 'dataset', 'COCO-Search18'),
                    episode_id=episode_id(ep), K=len(ep.supports), query_id=ep.query.record_id,
-                   support_ids=[s.record_id for s in ep.supports], state_count=counts[b],
+                   support_ids=[s.record_id for s in ep.supports], state_count=0 if explicit else counts[b],
                    fixation_count=counts[b], where_length=where.batch.metadata[b]['where_length'],
                    semantic_length=meta['semantic_length'])
         t = bundle.config['training']

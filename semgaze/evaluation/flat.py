@@ -17,8 +17,12 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None, visu
     if not episodes or len({len(e.supports) for e in episodes}) != 1:
         raise ValueError('semantic prediction requires same-K episodes')
     visual_cache = cache if visual_cache is None else visual_cache
-    states, misses = [], []
-    for episode in episodes:
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    if explicit:
+        states, misses = [None] * len(episodes), []
+    else:
+        states, misses = [], []
+    for episode in ([] if explicit else episodes):
         value = projected_r_cache.get(episode) if projected_r_cache is not None else None
         if value is None:
             misses.append(episode)
@@ -38,19 +42,24 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None, visu
         iterator = iter(projected)
         states = [next(iterator) if state is None else state for state in states]
     inputs, positions, _ = prepare_semantic_batch(bundle, [e.query for e in episodes], states,
-        where=(where if len(misses) == len(episodes) else None), visual_cache=visual_cache,
+        where=(where if len(misses) == len(episodes) and not explicit else None), visual_cache=visual_cache,
         generation_budget=generation_budget,
         reuse_query_vision=bundle.config['test']['cache']['frozen_visual_features'])
     tokenizer = bundle.processor.tokenizer
     inputs = to_model_device(left_pad_generation(inputs, tokenizer.pad_token_id), bundle.model)
     output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
         eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
-    if output.shape[1] > generation_budget:
-        raise RuntimeError('installed HF inputs_embeds generation returned an unexpected token prefix')
+    prefix_length = inputs['input_ids'].shape[1] if explicit else 0
+    if explicit and (output.shape[1] <= prefix_length or
+                     not torch.equal(output[:, :prefix_length], inputs['input_ids'])):
+        raise RuntimeError('text-conditioned generation did not preserve its input-ID prefix')
+    if output.shape[1] - prefix_length > generation_budget:
+        raise RuntimeError('semantic generation exceeded expected new-token budget')
     results = []
     for b, episode in enumerate(episodes):
-        text = decode_response(tokenizer, output[b])
-        results.append({'text': text, 'state_source': 'teacher_forced_GT_XYD', 'gold_groups_supplied': True,
+        text = decode_response(tokenizer, output[b, prefix_length:])
+        source = 'explicit_GT_XYD_text' if explicit else 'teacher_forced_GT_XYD'
+        results.append({'text': text, 'state_source': source, 'gold_groups_supplied': True,
             'max_new_tokens': generation_budget, 'inserted_state_count': len(positions[b]),
             **parse_flat_output(text, len(episode.query.x_px), len(episode.query.semantic.why_groups))})
     return results
@@ -66,16 +75,24 @@ def evaluate_flat_episode(bundle, episode, *, generation_budget, visual_cache=No
                                    visual_cache=visual_cache, projected_r_cache=projected_r_cache)[0]
     bundle.model.eval()
     bundle.projector.eval()
-    where = forward_where(bundle, episode)
-    states = bundle.projector(where.states)
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    states = None
+    if not explicit:
+        where = forward_where(bundle, episode)
+        states = bundle.projector(where.states)
     inputs, positions, _ = prepare_flat_inputs(bundle, episode.query, states, generation_budget=generation_budget)
     tokenizer = bundle.processor.tokenizer
     output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
         eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
     # HF inputs_embeds-only generation returns newly generated assistant IDs.
-    if output.shape[1] > generation_budget:
-        raise RuntimeError('installed HF inputs_embeds generation returned an unexpected token prefix')
-    text = decode_response(tokenizer, output[0])
-    return {'text': text, 'state_source': 'teacher_forced_GT_XYD', 'gold_groups_supplied': True,
+    prefix_length = inputs['input_ids'].shape[1] if explicit else 0
+    if explicit and (output.shape[1] <= prefix_length or
+                     not torch.equal(output[:, :prefix_length], inputs['input_ids'])):
+        raise RuntimeError('text-conditioned generation did not preserve its input-ID prefix')
+    if output.shape[1] - prefix_length > generation_budget:
+        raise RuntimeError('semantic generation exceeded expected new-token budget')
+    text = decode_response(tokenizer, output[0, prefix_length:])
+    source = 'explicit_GT_XYD_text' if explicit else 'teacher_forced_GT_XYD'
+    return {'text': text, 'state_source': source, 'gold_groups_supplied': True,
             'max_new_tokens': generation_budget, 'inserted_state_count': len(positions),
             **parse_flat_output(text, len(episode.query.x_px), len(episode.query.semantic.why_groups))}

@@ -102,7 +102,7 @@ def verify_loaded_adapter(model, adapter_path):
                 raise ModelPreflightError(f'released adapter tensor not loaded exactly: {key}')
 
 
-def assert_trainable_set(model, projector, input_row, output_row):
+def assert_trainable_set(model, projector, input_row, output_row, *, require_end_fix=True):
     rows = {id(input_row), id(output_row)}
     lora = []
     for name, parameter in model.named_parameters():
@@ -112,8 +112,12 @@ def assert_trainable_set(model, projector, input_row, output_row):
             if 'lora_' not in name or '.language_model.' not in name:
                 raise ModelPreflightError(f'unexpected trainable parameter: {name}')
             lora.append(parameter)
-    if not lora or not input_row.requires_grad or not output_row.requires_grad:
-        raise ModelPreflightError('required released LoRA/END_FIX parameters are frozen or absent')
+    if not lora:
+        raise ModelPreflightError('LoRA parameters are frozen or absent')
+    if require_end_fix and (not input_row.requires_grad or not output_row.requires_grad):
+        raise ModelPreflightError('required END_FIX parameters are frozen or absent')
+    if not require_end_fix and (input_row.requires_grad or output_row.requires_grad):
+        raise ModelPreflightError('unused V1 END_FIX rows must be frozen')
     if not all(p.requires_grad for p in projector.parameters()):
         raise ModelPreflightError('P_E is not fully trainable')
     base = model.get_base_model()
@@ -187,11 +191,18 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
 
     model.to(device=config['runtime']['device'])
     input_row, output_row, tied = install_trainable_rows(model, token_ids[0])
-    projector = build_projector(base.config.text_config.hidden_size).to(device=input_row.device, dtype=input_row.dtype)
+    if not config['where']['use_end_fix_token']:
+        input_row.requires_grad_(False)
+        output_row.requires_grad_(False)
+    projector = build_projector(base.config.text_config.hidden_size,
+        enabled=config['semantic']['conditioning'] == 'shared_states').to(device=input_row.device, dtype=input_row.dtype)
     if config['training']['gradient_checkpointing']:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
-    diagnostics.update(assert_trainable_set(model, projector, input_row, output_row))
-    diagnostics.update(adapter_trainable=True, end_fix_token_count=1, end_fix_token_id=token_ids[0],
+    diagnostics.update(assert_trainable_set(model, projector, input_row, output_row,
+        require_end_fix=config['where']['use_end_fix_token']))
+    diagnostics.update(adapter_trainable=True, end_fix_token_count=int(config['where']['use_end_fix_token']),
+                       inactive_frozen_end_fix_rows=not config['where']['use_end_fix_token'],
+                       end_fix_token_id=token_ids[0],
                        embeddings_tied=tied, base_commit=getattr(base.config, '_commit_hash', None))
     (output_dir / 'preflight.json').write_text(json.dumps(diagnostics, indent=2), encoding='utf-8')
     bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,

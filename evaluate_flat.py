@@ -403,8 +403,8 @@ def main():
         'semantic_max_new_tokens': budget if enabled_semantic else None,
         'where_support_prompt_style': config['where']['support_prompt_style'],
         'where_conditioning': 'oracle_length; no query GT trajectory' if enabled_where else None,
-        'semantic_conditioning': 'teacher_forced_GT_XYD_states_and_gold_WHY_groups'
-                                 if enabled_semantic else None,
+        'semantic_conditioning': ('explicit_GT_XYD_text_and_gold_WHY_groups' if config['semantic']['conditioning'] == 'explicit_scanpath_text' else 'teacher_forced_GT_XYD_states_and_gold_WHY_groups')
+                                  if enabled_semantic else None,
         'standalone_strategy_note': 'strategy/eval_epoch/eval_steps control training schedules, not this standalone run',
         'probability_scope': 'COCO-Search18 only (not AiR)',
     }

@@ -1,6 +1,6 @@
 import torch
 from .collator import collate_where, to_model_device, WhereContextOverflowError
-from .serialization import serialize_xyd, parse_xyd_output
+from .serialization import serialize_xyd, parse_xyd_output, active_end_fix_token
 from .collator import pack_where_batch
 
 
@@ -31,7 +31,7 @@ def left_pad_generation(inputs, pad_token_id):
 def where_generation_budget(bundle, episode):
     n = len(episode.query.x_px)
     return max(64, len(bundle.processor.tokenizer.encode(serialize_xyd([(99, 99, 999)] * n,
-        bundle.config['where']['end_fix_token']), add_special_tokens=False)) + 16)
+        active_end_fix_token(bundle.config)), add_special_tokens=False)) + 16)
 
 
 @torch.inference_mode()
@@ -72,7 +72,7 @@ def generate_where_batch(bundle, episodes, *, cache=None, precomputed_samples=No
         for row, index in enumerate(indices):
             text = decode_response(tokenizer, output[row, length:])
             results[index] = {'text': text, 'max_new_tokens': budget,
-                **parse_xyd_output(text, len(episodes[index].query.x_px), bundle.config['where']['end_fix_token'])}
+                **parse_xyd_output(text, len(episodes[index].query.x_px), active_end_fix_token(bundle.config))}
     return results
 
 
@@ -84,7 +84,7 @@ def generate_where(bundle, episode, *, cache=None):
     bundle.model.eval()
     n = len(episode.query.x_px)
     tokenizer = bundle.processor.tokenizer
-    token = bundle.config['where']['end_fix_token']
+    token = active_end_fix_token(bundle.config)
     budget = max(64, len(tokenizer.encode(serialize_xyd([(99, 99, 999)] * n, token), add_special_tokens=False)) + 16)
     batch = collate_where(bundle.processor, episode, bundle.end_fix_id, bundle.context_limit, teacher_forcing=False, config=bundle.config)
     inputs = to_model_device(batch.inputs, bundle.model)

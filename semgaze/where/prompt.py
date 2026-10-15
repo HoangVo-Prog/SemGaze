@@ -11,6 +11,8 @@ def build_where_prompt(task, n, end_fix_token="<END_FIX>"):
     else:
         intro = f'while performing the following task: {task}.'
         consider = 'Consider the task, visual saliency, semantic importance, and how attention naturally flows while performing the task.'
+    marker_line = (f'- Append {end_fix_token} immediately after every fixation tuple.\n'
+                   if end_fix_token else '')
     return f'''Analyze this image and predict a human eye movement scanpath {intro}
 A scanpath is the temporal sequence of fixation points showing where a person looks over time.
 {consider}
@@ -20,7 +22,6 @@ Generate a scanpath of exactly {n} fixation points in temporal order, with fixat
 - y: vertical position (0-100, 0=top, 100=bottom)
 - t: fixation duration in milliseconds (0-999)
 - Points should be ordered from first fixation to last fixation.
-- Append {end_fix_token} immediately after every fixation tuple.
-
+{marker_line}
 Output ONLY the list-style scanpath sequence:
 [(51, 46, 221){end_fix_token}, (38, 28, 754){end_fix_token}, ...]'''

@@ -13,7 +13,7 @@ from semgaze.evaluation.where import evaluate_where_episode
 from semgaze.evaluation.test import test_mode, test_queries
 from semgaze.semantic.flat.target import build_flat_target
 from semgaze.where.serialization import serialize_xyd_record
-from semgaze.where.serialization import parse_xyd_output
+from semgaze.where.serialization import parse_xyd_output, active_end_fix_token
 from semgaze.evaluation.metrics_scanpath import (
     CoordinateProtocolError, DatasetIntegrityError, aggregate_scanpath_draw, score_scanpath_pair,
 )
@@ -69,7 +69,7 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
         where_diagnostics = dict(where)
         where_text = where_diagnostics.pop('text')
         record.update({
-            'WHERE': {'GT': serialize_xyd_record(query, bundle.config['where']['end_fix_token']), 'PRED': where_text},
+            'WHERE': {'GT': serialize_xyd_record(query, active_end_fix_token(bundle.config)), 'PRED': where_text},
             'where_generation': where_diagnostics,
         })
     # A WHERE record can outlive the single semantic traversal when semantic
@@ -357,7 +357,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'test_semantic_prediction_traversals': sum(value['semantic_query_traversals']
                                                         for value in prediction_by_k.values()),
             **({'where_conditioning': 'oracle_length; no query GT trajectory'} if where_enabled else {}),
-            **({'semantic_conditioning': 'teacher_forced_GT_XYD states; gold WHY groups'}
+            **({'semantic_conditioning': ('explicit GT XYD text; gold WHY groups' if bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text' else 'teacher_forced_GT_XYD states; gold WHY groups')}
                if semantic_enabled else {})}
 
 
@@ -533,7 +533,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
                         f'invalid GT dimensions for query {query.record_id!r}')
                 where = row.get('where_generation', {})
                 text = row.get('WHERE', {}).get('PRED', where.get('text', ''))
-                parsed = parse_xyd_output(text, len(gt_x), config.get('where', {}).get('end_fix_token', '<END_FIX>'))
+                parsed = parse_xyd_output(text, len(gt_x), active_end_fix_token(config))
                 # Preserve parser recovery: malformed format with recovered
                 # fixations is a scored query and remains a format failure.
                 prediction = parsed.get('fixations', [])

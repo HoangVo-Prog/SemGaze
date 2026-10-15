@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+import torch
 from contextlib import nullcontext
-from semgaze.state.extractor import extract_query_states
+from semgaze.state.extractor import extract_query_states, extract_duration_numeric_states
 from .collator import collate_where_batch, to_model_device
 from .weighting import build_fixation_target_weights
+from .serialization import active_end_fix_token
 from semgaze.model.selected_loss import forward_backbone, compute_selected_causal_nll
 
 
@@ -44,12 +46,20 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
                                   if use_cache is None else use_cache))
         target_weights = build_fixation_target_weights(
             batch, episodes, config=fixation_weighting,
-            end_fix_token=bundle.config['where']['end_fix_token'])
+            end_fix_token=active_end_fix_token(bundle.config))
         loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'],
             bundle.model.get_output_embeddings(), target_weights=target_weights)
     counts = [len(e.query.x_px) for e in episodes]
-    states, mask, positions = extract_query_states(outputs.last_hidden_state, batch.inputs['input_ids'],
-        batch.inputs['labels'], bundle.end_fix_id, counts, return_unpadded=True)
+    if bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text':
+        # No WHERE hidden-state extraction or semantic hand-off in V2.
+        states = [outputs.last_hidden_state.new_empty((0, outputs.last_hidden_state.shape[-1])) for _ in episodes]
+        positions = [torch.empty(0, dtype=torch.long) for _ in episodes]
+    elif bundle.config['where']['use_end_fix_token']:
+        states, _, positions = extract_query_states(outputs.last_hidden_state, batch.inputs['input_ids'],
+            batch.inputs['labels'], bundle.end_fix_id, counts, return_unpadded=True)
+    else:
+        states, _, positions = extract_duration_numeric_states(outputs.last_hidden_state,
+            batch.samples, counts, return_unpadded=True)
     features = outputs.image_hidden_states if features is None else features
     if features.shape[:2] != (sum(m['image_count'] for m in batch.metadata), bundle.processor.image_seq_length):
         raise ValueError('native image feature groups differ from collated image ordering')

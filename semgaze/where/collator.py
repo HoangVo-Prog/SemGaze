@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import torch
 from .conversation import build_where_conversation
-from .serialization import serialize_xyd_record
+from .serialization import serialize_xyd_record, active_end_fix_token
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -116,7 +116,7 @@ def collate_native(processor, messages, image_paths, target=None, *, prompt=None
 
 
 def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher_forcing=True, config=None, image_cache=None):
-    token = config['where']['end_fix_token'] if config else '<END_FIX>'
+    token = active_end_fix_token(config) if config else '<END_FIX>'
     if config:
         ctx = config['where']['context']
         if len(episode.supports) > ctx['max_k'] or len(episode.supports) + 1 > ctx['max_images_per_episode']:
@@ -127,10 +127,16 @@ def collate_where(processor, episode, end_fix_id, context_limit=8192, *, teacher
                            serialize_xyd_record(episode.query, token) if teacher_forcing else None, image_cache=image_cache)
     if batch.inputs['input_ids'].shape[1] > context_limit:
         raise WhereContextOverflowError(f'{episode.query.record_id}: complete WHERE episode exceeds {context_limit}; reject/resample, never truncate')
+    if teacher_forcing and not token:
+        batch.ablation_query_text = serialize_xyd_record(episode.query, '')
     if teacher_forcing:
-        count = int((batch.inputs['labels'] == end_fix_id).sum())
-        if count != len(episode.query.x_px):
-            raise ValueError('supervised query END_FIX count differs from N')
+        if token:
+            count = int((batch.inputs['labels'] == end_fix_id).sum())
+            if count != len(episode.query.x_px):
+                raise ValueError('supervised query END_FIX count differs from N')
+        elif token in ('',) and end_fix_id is not None:
+            if bool((batch.inputs['input_ids'] == end_fix_id).any()):
+                raise ValueError('END_FIX leaked into V1 WHERE context or target')
         if torch.any(batch.inputs['labels'][:, :batch.response_start] != -100):
             raise ValueError('support/query context labels must be ignored')
     return batch

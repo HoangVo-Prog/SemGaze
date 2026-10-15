@@ -96,7 +96,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                                      fixation_weighting=active_weighting)
     if audit_capture is not None:
         for state in where.states:
-            state.retain_grad()
+            if state.requires_grad:
+                state.retain_grad()
         audit_capture['rng_state_after_where_cpu'] = torch.get_rng_state().clone()
         device = bundle.input_row.device
         if device.type == 'cuda':
@@ -120,13 +121,18 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     with stage('semantic'):
         # One shared projector on all valid states; no padding enters P_E.
         counts = [len(e.query.x_px) for e in episodes]
-        projected = bundle.projector(torch.cat(where.states, dim=0))
-        states = list(projected.split(counts))
-        if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
-            raise RuntimeError('WHERE F / projected R were detached')
+        explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+        if explicit:
+            states = [None] * len(episodes)
+        else:
+            projected = bundle.projector(torch.cat(where.states, dim=0))
+            states = list(projected.split(counts))
+            if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
+                raise RuntimeError('WHERE F / projected R were detached')
         flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-                                                               where=where, profiler=profiler,
-                                                                semantic_cache=semantic_cache, response_offsets=True)
+                                                               where=None if explicit else where, profiler=profiler,
+                                                               semantic_cache=None if explicit else semantic_cache,
+                                                               response_offsets=True)
         from semgaze.semantic.flat.diagnostics import summarize_semantic_component_nll
         component_values = summarize_semantic_component_nll(flat.token_nll, episodes, semantic_metadata)
         t = bundle.config['training']
@@ -173,11 +179,11 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
               'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
               'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
     for key, values in (
-        ('query_fixation_count', counts), ('query_end_fix_state_count', [len(f) for f in where.states]),
-        ('supervised_query_end_fix_count', [len(p) for p in where.positions]),
+        ('query_fixation_count', counts), ('query_end_fix_state_count', [len(f) if bundle.config['where']['use_end_fix_token'] and not explicit else 0 for f in where.states]),
+        ('supervised_query_end_fix_count', [int((s.inputs['labels'] == bundle.end_fix_id).sum()) for s in where.batch.samples]),
         ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum())
                                              for s in where.batch.samples]),
-        ('projector_output_shape', [tuple(r.shape) for r in states]),
+        ('projector_output_shape', [tuple(r.shape) if r is not None else None for r in states]),
         ('inserted_state_count', [len(p) for p in positions])):
         result[key] = values[0] if single else values
     return result

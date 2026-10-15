@@ -143,7 +143,7 @@ def score_probability_batch(bundle, episodes, *, visual_cache=None, centerbias_b
     """
     from semgaze.where.collator import collate_where_batch, to_model_device
     from semgaze.model.selected_loss import forward_backbone
-    from semgaze.where.serialization import serialize_xyd_record
+    from semgaze.where.serialization import serialize_xyd_record, active_end_fix_token
 
     if not episodes:
         return []
@@ -167,7 +167,7 @@ def score_probability_batch(bundle, episodes, *, visual_cache=None, centerbias_b
     if any(bundle.processor.tokenizer.convert_ids_to_tokens(i) != str(d) for d, i in enumerate(digit_ids)):
         raise ProbabilityProtocolError("checkpoint tokenizer digit IDs are not exact atomic digits")
     rows = []
-    token = bundle.config["where"]["end_fix_token"]
+    token = active_end_fix_token(bundle.config)
     for b, (episode, sample) in enumerate(zip(episodes, samples.samples)):
         target = serialize_xyd_record(episode.query, token)
         matches = list(re.finditer(
