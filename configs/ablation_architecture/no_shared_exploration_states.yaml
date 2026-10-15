@@ -127,7 +127,7 @@ checkpoint_loading:
 
 training:
   scheduled_sampling:
-    enabled: true
+    enabled: false
     probability: 0.30
     max_probability: 0.30
     warmup_ratio: 0.10
@@ -137,7 +137,7 @@ training:
     max_new_tokens: 48
     seed: 2027
   late_fixation_ce:
-    enabled: true
+    enabled: false
     mode: late_only
     alpha: 0.50
     threshold: 5
@@ -176,14 +176,14 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: steps # epoch | steps | no (smoke/benchmark only)
+  strategy: epoch # epoch | steps | no (smoke/benchmark only)
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
   batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
-  k_values: [1, 5, 10]
+  k_values: [1]
   loss_aggregation: episode_mean
   predictions:
     where: true # autoregressive WHERE predictions and their scanpath metrics
@@ -195,12 +195,12 @@ evaluation:
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
   metrics:
-    enabled: true
+    enabled: false
     split: test
     where:
-      scanmatch: true
-      multimatch: true
-      sed: true
+      scanmatch: false
+      multimatch: false
+      sed: false  
       isp_reference:
         width: 512
         height: 320
@@ -223,7 +223,7 @@ evaluation:
         allow_synthetic_fallback: false
     semantic:
       bertscore:
-        enabled: true
+        enabled: false
         package_version: "0.3.13"
         lang: en
         model_type: roberta-large
@@ -233,20 +233,20 @@ evaluation:
         use_fast_tokenizer: false
         batch_size: 64
       cider_r:
-        enabled: true
+        enabled: false
         implementation: vendored_authors
         n: 4
         k_r: 0.8
         tokenizer: stanford_ptb_reference
       # LLada-style COCO corpus BLEU-4; references are per WHAT/WHY/HOW unit.
       bleu4:
-        enabled: true
+        enabled: false
       # LLada calls ROUGE-L simply "ROUGE"; both output labels alias one score.
       rouge_l:
-        enabled: true
+        enabled: false
       # Java METEOR 1.5, enable after downloading the authors' JAR (README).
       meteor:
-        enabled: true
+        enabled: false
         jar_path: null
         java_bin: java
 
