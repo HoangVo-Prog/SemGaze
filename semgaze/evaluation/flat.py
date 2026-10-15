@@ -34,7 +34,8 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None, visu
         miss_samples = [collate_where(bundle.processor, e, bundle.end_fix_id, bundle.context_limit,
                        config=bundle.config, image_cache=visual_cache) for e in misses]
         miss_batch = pack_where_batch(bundle.processor, misses, miss_samples, visual_cache)
-        where = forward_where_batch(bundle, misses, batch=miss_batch, visual_cache=visual_cache, use_cache=False)
+        where = forward_where_batch(bundle, misses, batch=miss_batch, visual_cache=visual_cache, use_cache=False,
+            compute_loss=bundle.config['training']['lambda_where'] > 0)
         projected = bundle.projector(torch.cat(where.states)).split([len(e.query.x_px) for e in misses])
         if projected_r_cache is not None:
             for episode, value in zip(misses, projected):
@@ -78,7 +79,8 @@ def evaluate_flat_episode(bundle, episode, *, generation_budget, visual_cache=No
     explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
     states = None
     if not explicit:
-        where = forward_where(bundle, episode)
+        where = forward_where(bundle, episode,
+            compute_loss=bundle.config['training']['lambda_where'] > 0)
         states = bundle.projector(where.states)
     inputs, positions, _ = prepare_flat_inputs(bundle, episode.query, states, generation_budget=generation_budget)
     tokenizer = bundle.processor.tokenizer

@@ -36,7 +36,12 @@ class FlatModelBundle:
             self.context_limit = self.config['where']['context']['max_total_sequence_length']
 
     def trainable_parameters(self):
-        return [p for p in self.model.parameters() if p.requires_grad] + list(self.projector.parameters())
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        # WHERE-only: retain the checkpoint-compatible projector but exclude it
+        # from the optimizer (and trainable optimizer-parameter accounting).
+        if self.config['training']['lambda_sem'] > 0:
+            params.extend(self.projector.parameters())
+        return params
 
 
 def inspect_adapter(path):
@@ -208,6 +213,8 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
     bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
                              config, diagnostics, output_dir)
     from semgaze.training.profiling import runtime_metadata
+    diagnostics.update(optimizer_trainable_parameter_count=sum(p.numel() for p in bundle.trainable_parameters()),
+                       optimizer_projector_active=config['training']['lambda_sem'] > 0)
     diagnostics.update(runtime_metadata(bundle))
     (output_dir / 'preflight.json').write_text(json.dumps(diagnostics, indent=2), encoding='utf-8')
     return bundle

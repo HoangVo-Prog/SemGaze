@@ -67,10 +67,11 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            where_batch=None, profiler=None, semantic_cache=None,
                            audit_disable_where_attention_mask=False,
                            audit_capture=None, global_step=0):
-    """One vectorized WHERE and semantic forward, one backward per physical batch.
+    """One differentiable WHERE forward; semantic/CE work only when supervised.
 
-    A scalar episode keeps the public smoke/evaluation-facing result convention.
-    Lists/tuples are physical batches, never sequential model execution.
+    Both loss weights > 0 preserves the original full-model operation.
+    lambda_sem=0: WHERE-only (no projector/semantic forward/loss).
+    lambda_where=0: teacher-forced WHERE states -> projector -> semantic loss.
     """
     bundle = model_bundle
     single = not isinstance(episode, (list, tuple))
@@ -88,12 +89,21 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         bundle.projector.zero_grad(set_to_none=True)
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     training_config = bundle.config['training']
+    where_enabled = training_config['lambda_where'] > 0
+    semantic_enabled = training_config['lambda_sem'] > 0
+    if not (where_enabled or semantic_enabled):
+        raise ValueError('training must supervise WHERE and/or semantic')
+    if not where_enabled and training_config['scheduled_sampling']['enabled']:
+        raise ValueError('scheduled sampling is WHERE supervision and cannot run in V4')
     lwce_config = training_config['late_fixation_ce']
-    active_weighting = lwce_config if lwce_config['enabled'] else None
+    active_weighting = lwce_config if where_enabled and lwce_config['enabled'] else None
+    counts = [len(e.query.x_px) for e in episodes]
     with stage('where'):
         where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
                                     audit_disable_where_attention_mask=audit_disable_where_attention_mask,
-                                     fixation_weighting=active_weighting)
+                                    fixation_weighting=active_weighting,
+                                    compute_loss=where_enabled,
+                                    return_fixation_states=semantic_enabled)
     if audit_capture is not None:
         for state in where.states:
             if state.requires_grad:
@@ -107,7 +117,7 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                 'ss_probability': 0.0, 'ss_changed': 0,
                 'ss_positions': {}, 'ss_failure_reasons': {}}
     ss_loss_mixed_mean = None
-    if training_config['scheduled_sampling']['enabled']:
+    if where_enabled and training_config['scheduled_sampling']['enabled']:
         from semgaze.where.ss import scheduled_sampling_loss
         with stage('scheduled_sampling'):
             sampled = scheduled_sampling_loss(bundle, episodes, global_step=global_step,
@@ -118,36 +128,46 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         where_episode_losses = torch.where(sampled.applied,
             (1.0 - beta) * where.episode_losses + beta * sampled.episode_losses,
             where.episode_losses)
-    with stage('semantic'):
-        # One shared projector on all valid states; no padding enters P_E.
-        counts = [len(e.query.x_px) for e in episodes]
-        explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
-        if explicit:
-            states = [None] * len(episodes)
-        else:
-            projected = bundle.projector(torch.cat(where.states, dim=0))
-            states = list(projected.split(counts))
-            if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
-                raise RuntimeError('WHERE F / projected R were detached')
-        flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-                                                               where=None if explicit else where, profiler=profiler,
-                                                               semantic_cache=None if explicit else semantic_cache,
-                                                               response_offsets=True)
-        from semgaze.semantic.flat.diagnostics import summarize_semantic_component_nll
-        component_values = summarize_semantic_component_nll(flat.token_nll, episodes, semantic_metadata)
-        t = bundle.config['training']
-        episode_total = t['lambda_where'] * where_episode_losses + t['lambda_sem'] * flat.episode_losses
-        loss_total = episode_total.mean()
-    if diagnostics and not bool(torch.isfinite(torch.stack((where.loss_where, flat.loss, loss_total))).all()):
-        raise RuntimeError('non-finite joint loss')
+    flat, positions, semantic_metadata = None, [], [{} for _ in episodes]
+    states = [None] * len(episodes)
+    component_values = {'loss_what': None, 'loss_why': None, 'loss_how': None}
+    if semantic_enabled:
+        with stage('semantic'):
+            explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+            if not explicit:
+                projected = bundle.projector(torch.cat(where.states, dim=0))
+                states = list(projected.split(counts))
+                if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
+                    raise RuntimeError('WHERE F / projected R were detached')
+            flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
+                where=None if explicit else where, profiler=profiler,
+                semantic_cache=None if explicit else semantic_cache, response_offsets=True)
+            from semgaze.semantic.flat.diagnostics import summarize_semantic_component_nll
+            component_values = summarize_semantic_component_nll(flat.token_nll, episodes, semantic_metadata)
+    if where_enabled and semantic_enabled:
+        # Preserve Full-model arithmetic, loss order, and per-episode reduction.
+        episode_total = training_config['lambda_where'] * where_episode_losses + training_config['lambda_sem'] * flat.episode_losses
+    elif where_enabled:
+        episode_total = training_config['lambda_where'] * where_episode_losses
+    else:
+        episode_total = training_config['lambda_sem'] * flat.episode_losses
+    loss_total = episode_total.mean()
+    if diagnostics:
+        objective_losses = [loss_total]
+        if where_enabled:
+            objective_losses.append(where.loss_where)
+        if semantic_enabled:
+            objective_losses.append(flat.loss)
+        if not bool(torch.isfinite(torch.stack(objective_losses)).all()):
+            raise RuntimeError('non-finite active supervision loss')
     with stage('backward'):
         (loss_total * loss_scale).backward()
     if audit_capture is not None:
         audit_capture.update({
-            'where_episode_losses': where.episode_losses.detach().clone(),
+            'where_episode_losses': where.episode_losses.detach().clone() if where_enabled else None,
             'where_states': [state.detach().clone() for state in where.states],
-            'loss_where': where.loss_where.detach().clone(),
-            'loss_flat': flat.loss.detach().clone(),
+            'loss_where': where.loss_where.detach().clone() if where_enabled else None,
+            'loss_flat': flat.loss.detach().clone() if semantic_enabled else None,
             'loss_total': loss_total.detach().clone(),
         })
         audit_capture['state_gradients'] = [
@@ -166,24 +186,28 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     metadata = [{k: v for k, v in m.items() if k != 'semantic_target'}
                 | {k: v for k, v in sm.items() if k != 'response_offsets'}
                 for m, sm in zip(where.batch.metadata, semantic_metadata)]
-    result = {'loss_where': where_episode_losses.detach().mean(),
-              'loss_where_gt': where.loss_where.detach(),
-              'loss_where_gt_unweighted': where.unweighted_episode_losses.detach().mean(),
+    result = {'loss_where': where_episode_losses.detach().mean() if where_enabled else None,
+              'loss_where_gt': where.loss_where.detach() if where_enabled else None,
+              'loss_where_gt_unweighted': where.unweighted_episode_losses.detach().mean() if where_enabled else None,
               'loss_where_mixed': ss_loss_mixed_mean,
-              **ss_stats, 'lwce_enabled': bool(lwce_config['enabled']),
-              'loss_flat': flat.loss.detach(),
+              **ss_stats, 'lwce_enabled': bool(lwce_config['enabled'] and where_enabled),
+              'loss_flat': flat.loss.detach() if semantic_enabled else None,
               'loss_what': component_values['loss_what'],
               'loss_why': component_values['loss_why'],
               'loss_how': component_values['loss_how'],
-              'lwce_alpha': float(lwce_config['alpha']) if lwce_config['enabled'] else 0.0,
+              'lwce_alpha': float(lwce_config['alpha']) if lwce_config['enabled'] and where_enabled else 0.0,
               'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
               'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
     for key, values in (
-        ('query_fixation_count', counts), ('query_end_fix_state_count', [len(f) if bundle.config['where']['use_end_fix_token'] and not explicit else 0 for f in where.states]),
-        ('supervised_query_end_fix_count', [int((s.inputs['labels'] == bundle.end_fix_id).sum()) for s in where.batch.samples]),
-        ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum())
-                                             for s in where.batch.samples]),
+        ('query_fixation_count', counts),
+        ('query_end_fix_state_count', [len(f) if semantic_enabled and bundle.config['where']['use_end_fix_token']
+                                      and bundle.config['semantic']['conditioning'] != 'explicit_scanpath_text' else 0
+                                      for f in where.states]),
+        ('supervised_query_end_fix_count', [int((s.inputs['labels'] == bundle.end_fix_id).sum()) if where_enabled else 0
+                                            for s in where.batch.samples]),
+        ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum()) if where_enabled else 0
+                                              for s in where.batch.samples]),
         ('projector_output_shape', [tuple(r.shape) if r is not None else None for r in states]),
-        ('inserted_state_count', [len(p) for p in positions])):
+        ('inserted_state_count', [len(p) for p in positions] if semantic_enabled else [0] * len(episodes))):
         result[key] = values[0] if single else values
     return result

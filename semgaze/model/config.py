@@ -217,6 +217,10 @@ def validate_config(config):
         value = t[key]
         if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
             raise ValueError(f'training.{key} must be an explicit finite nonnegative number')
+    if t['lambda_where'] == 0 and t['lambda_sem'] == 0:
+        raise ValueError('at least one of training.lambda_where and training.lambda_sem must be positive')
+    if t['lambda_where'] == 0 and t['scheduled_sampling']['enabled']:
+        raise ValueError('scheduled sampling is WHERE supervision; disable it when lambda_where=0')
     if t['learning_rate'] == 0 or t['adam_epsilon'] == 0 or not 0 <= t['warmup_ratio'] <= 1 or any(not 0 <= t[b] < 1 for b in ('adam_beta1','adam_beta2')):
         raise ValueError('invalid learning rate, epsilon, warmup ratio or Adam betas')
     if t['max_grad_norm'] is not None and (not math.isfinite(t['max_grad_norm']) or t['max_grad_norm'] <= 0):

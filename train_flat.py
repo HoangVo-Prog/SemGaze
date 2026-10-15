@@ -105,6 +105,10 @@ def main():
             for key in ('scheduled_sampling', 'late_fixation_ce'):
                 if bundle.config['training'][key] != config['training'][key]:
                     raise ValueError(f'strict resume cannot change training.{key}; use init_from')
+        if resume_path is not None:
+            for key in ('lambda_where', 'lambda_sem'):
+                if bundle.config['training'][key] != config['training'][key]:
+                    raise ValueError(f'strict resume cannot change training.{key}; start a new run')
         if resume_path is not None and bundle.config['training']['optimizer'] != config['training']['optimizer']:
             raise ValueError('cannot restore optimizer moments into a different optimizer implementation')
         if resume_path is not None:
