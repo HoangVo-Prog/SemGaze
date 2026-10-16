@@ -236,7 +236,13 @@ def validate_config(config):
         raise ValueError('evaluation.semantic_use_draws must be boolean')
     if evaluation['strategy'] == 'steps':
         positive_int(evaluation.get('eval_steps'), 'evaluation.eval_steps')
-    for name, values in [('data.fewshot.k_values',config['data']['fewshot']['k_values']), ('evaluation.k_values',evaluation['k_values'])]:
+    prediction_ks = [(f'evaluation.predictions.{name}', evaluation['predictions'].get(name))
+                     for name in ('where_k_values', 'semantic_k_values')]
+    for name, values in [
+            ('data.fewshot.k_values', config['data']['fewshot']['k_values']),
+            ('evaluation.k_values', evaluation['k_values']), *prediction_ks]:
+        if values is None and name.startswith('evaluation.predictions.'):
+            continue # backward-compatible inheritance from evaluation.k_values
         if not isinstance(values, list) or not values or len(set(values)) != len(values):
             raise ValueError(f'{name} must be a nonempty list of unique positive integers')
         for k in values:
@@ -254,7 +260,8 @@ def validate_config(config):
         raise ValueError('COCO requires max_k=10 and max_images_per_episode=11')
     for key in ('max_k', 'max_images_per_episode', 'max_total_sequence_length'):
         positive_int(ctx[key], 'where.context.' + key)
-    if max(config['data']['fewshot']['k_values'] + evaluation['k_values']) > min(ctx['max_k'], ctx['max_images_per_episode'] - 1):
+    extra_ks = sum((values or [] for _, values in prediction_ks), [])
+    if max(config['data']['fewshot']['k_values'] + evaluation['k_values'] + extra_ks) > min(ctx['max_k'], ctx['max_images_per_episode'] - 1):
         raise ValueError('configured K exceeds episode support/image capacity')
     per_k_batch_size = evaluation.get('batch_size_by_k', {})
     if not isinstance(per_k_batch_size, dict):
@@ -311,7 +318,8 @@ def validate_config(config):
         if settings['execution'] not in ('serial', 'same_k_batched'):
             raise ValueError('test execution must be serial or same_k_batched')
         from semgaze.evaluation.batching import physical_size
-        for k in evaluation['k_values']:
+        ks_to_check = set(evaluation['k_values'] + extra_ks)
+        for k in sorted(ks_to_check):
             physical_size(settings, k, batch_size=evaluation.get('batch_size'),
                           batch_size_by_k=evaluation.get('batch_size_by_k', {}))
         positive_int(settings['bucket_window'], 'test.bucket_window')

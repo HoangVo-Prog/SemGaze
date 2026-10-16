@@ -23,7 +23,8 @@ from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r
 from semgaze.evaluation.metrics_text_overlap import build_meteor_scorer
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
                                          resolve_evaluation_draw_counts,
-                                         resolve_semantic_draw_counts, write_metrics_artifact)
+                                         resolve_semantic_draw_counts, resolve_prediction_draw_plan,
+                                         evaluation_group, write_metrics_artifact)
 
 
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
@@ -60,6 +61,7 @@ def _prediction_record(bundle, episode, *, epoch, step, split, index, budget, sp
             'split_manifest_identity': split_manifest_identity,
             'query_id': query.record_id, 'subject': query.subject,
             'dataset': getattr(query, 'dataset', 'COCO-Search18'),
+            'condition': getattr(query, 'condition', None),
             'stimulus_id': query.stimulus_id, 'task': query.task, 'k': len(episode.supports),
             'K': len(episode.supports), 'support_ids': [s.record_id for s in episode.supports],
             'annotation_width': query.image_width, 'annotation_height': query.image_height,
@@ -167,15 +169,14 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     if any(ep.query.subject in set(manifest['unseen_subject_ids']) for ep in train_batch):
         raise ValueError('unseen query in train prediction batch')
     queries = test_queries(train_by_id, test_records, manifest) if settings['test_scope'] == 'all_unseen' else ()
-    k_values = bundle.config['evaluation']['k_values']
     where_enabled, semantic_enabled = settings['where'], settings['semantic']
     if not (where_enabled or semantic_enabled):
         raise ValueError('predict_epoch called with both prediction branches disabled')
-    where_draw_counts = resolve_evaluation_draw_counts(bundle.config['evaluation']['draw'], manifest, k_values)
+    where_k_values, semantic_k_values, where_draw_counts, semantic_draw_counts, active_draw_counts = (
+        resolve_prediction_draw_plan(bundle.config, manifest,
+                                     enabled_where=where_enabled, enabled_semantic=semantic_enabled))
+    k_values = [int(k) for k in active_draw_counts]
     semantic_use_draws = bundle.config.get('evaluation', {}).get('semantic_use_draws', True)
-    semantic_draw_counts = (resolve_semantic_draw_counts(where_draw_counts, semantic_use_draws)
-                            if semantic_enabled else {str(k): 0 for k in k_values})
-    active_draw_counts = (where_draw_counts if where_enabled else semantic_draw_counts)
     train_path = 'both' if where_enabled and semantic_enabled else ('where' if where_enabled else 'semantic')
     tag = f'epoch-{epoch:04d}' if bundle.config['evaluation']['strategy'] == 'epoch' else f'step-{step:08d}'
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
@@ -278,9 +279,11 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                       f"starting | queries={len(queries)}", flush=True)
                                 episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
                                     unseen_subjects=manifest['unseen_subject_ids']) for query in queries]
+                                run_where = where_enabled and draw < where_draw_count
+                                run_semantic = semantic_enabled and draw < semantic_draw_count
                                 prediction_path = (
-                                    'both' if where_enabled and draw < semantic_draw_count else
-                                    'where' if where_enabled else 'semantic')
+                                    'both' if run_where and run_semantic else
+                                    'where' if run_where else 'semantic')
                                 for query_index, (episode, generated) in enumerate(prediction_batches(bundle, episodes,
                                         budget=settings['semantic_max_new_tokens'], cache=cache, path=prediction_path,
                                         projected_r_cache=projected_r_cache,
@@ -341,6 +344,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
             'train_prediction_source': 'final_training_batches_before_evaluation',
             'test_prediction_queries': len(queries),
             'test_prediction_episodes': counts['test'], 'k_values': list(k_values),
+            'where_k_values': where_k_values, 'semantic_k_values': semantic_k_values,
             'test_queries_by_dataset': {
                 ds: sum(getattr(q, 'dataset', 'COCO-Search18') == ds for q in queries)
                 for ds in sorted({getattr(q, 'dataset', 'COCO-Search18') for q in queries})},
@@ -379,7 +383,7 @@ def format_prediction_summary(entry):
 
 
 def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='integrated',
-                              split_manifest_identity=''):
+                              split_manifest_identity='', _subset=False):
     """Rescore frozen predictions without loading or generating with the VLM.
 
     WHERE metrics consume the exact records emitted by ``predict_epoch``.  The
@@ -396,37 +400,69 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     score_sem = active_opts.get('semantic', True) and semantic_metrics_enabled(sem_opts)
     if not metric_opts.get('enabled') or not (score_where or score_sem):
         return None
-    if config.get('data', {}).get('dataset') == 'all':
-        import copy
+    # Partition at the *query* level; never infer TA/TP from image filename.
+    # The private _subset switch prevents recursive re-partitioning while each
+    # subset reuses the unchanged canonical scorer and corpus-level aggregators.
+    dataset_name = config.get('data', {}).get('dataset')
+    if not _subset and dataset_name in ('all', 'COCO-Search18'):
         from collections import Counter
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
         with Path(path).open('r', encoding='utf-8') as stream:
             rows = [json.loads(line) for line in stream if line.strip()]
-        counts = Counter(getattr(q, 'dataset', 'COCO-Search18') for q in queries)
-        artifacts = {}
-        for dataset in ('AiR', 'COCO-Search18'):
-            selected_queries = [q for q in queries if getattr(q, 'dataset', 'COCO-Search18') == dataset]
+        query_groups = {group: [q for q in queries if evaluation_group(q) == group]
+                        for group in ('TA', 'TP', 'VQA')}
+        active_groups = ('TA', 'TP', 'VQA') if dataset_name == 'all' else ('TA', 'TP')
+
+        def score_subset(label, selected_queries):
             if not selected_queries:
-                raise ValueError(f'joint metrics missing test queries: {dataset}')
-            subdir = output / dataset.replace('-', '_')
-            subdir.mkdir(parents=True, exist_ok=True)
-            selected_rows = [r for r in rows if r.get('split') == 'test' and
-                             r.get('dataset', 'COCO-Search18') == dataset]
-            subset_path = subdir / 'test_predictions.jsonl'
+                return None
+            out = output / label
+            out.mkdir(parents=True, exist_ok=True)
+            selected_ids = {q.record_id for q in selected_queries}
+            subset_path = out / 'test_predictions.jsonl'
             with subset_path.open('w', encoding='utf-8') as stream:
-                for row in selected_rows:
-                    stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
-            scoped_config = copy.deepcopy(config)
-            scoped_config['data']['dataset'] = dataset
-            artifact = score_prediction_artifact(subset_path, queries=selected_queries,
-                config=scoped_config, output_dir=subdir, checkpoint=checkpoint,
-                split_manifest_identity=split_manifest_identity)
-            artifacts[dataset] = artifact
-        result = {'metrics_path': str(output / 'metrics_by_dataset.json'),
-                  'by_dataset': artifacts, 'test_queries_by_dataset': dict(counts),
-                  'aggregation': 'separate_dataset_metrics_no_joint_scalar'}
-        (output / 'metrics_by_dataset.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+                for row in rows:
+                    if (row.get('split') == 'test' and
+                            row.get('query_id', row.get('record_id')) in selected_ids):
+                        stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
+            return score_prediction_artifact(
+                subset_path, queries=selected_queries, config=config, output_dir=out,
+                checkpoint=checkpoint, split_manifest_identity=split_manifest_identity,
+                _subset=True)
+
+        by_group = {group: score_subset(group, query_groups[group])
+                    for group in active_groups}
+        # Recompute the corpus aggregate from all query-level predictions.
+        # Corpus BLEU/CIDEr and scanpath query counts cannot be obtained from
+        # a naive arithmetic mean of TA, TP and VQA scores.
+        overall = score_prediction_artifact(
+            path, queries=queries, config=config, output_dir=output,
+            checkpoint=checkpoint, split_manifest_identity=split_manifest_identity,
+            _subset=True)
+        by_dataset = {'COCO-Search18': overall}
+        if dataset_name == 'all':
+            by_dataset = {
+                'AiR': by_group['VQA'],
+                'COCO-Search18': score_subset(
+                    'COCO_Search18', query_groups['TA'] + query_groups['TP']),
+            }
+        result = {
+            'metrics_path': str(output / 'metrics_by_group.json'),
+            'by_group': by_group,
+            'overall': overall,
+            'test_queries_by_group': {group: len(query_groups[group]) for group in active_groups},
+            'by_dataset': by_dataset,
+            'test_queries_by_dataset': dict(Counter(
+                getattr(q, 'dataset', 'COCO-Search18') for q in queries)),
+            'aggregation': 'recompute_per_group_and_pooled_overall_from_raw_predictions',
+        }
+        (output / 'metrics_by_group.json').write_text(
+            json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
+        # Keep the pre-existing joint output filename as a compatibility alias.
+        if dataset_name == 'all':
+            (output / 'metrics_by_dataset.json').write_text(
+                json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
         return result
     metrics_config = config.get('evaluation', {}).get('metrics', {})
     if not metrics_config.get('enabled'):
@@ -476,7 +512,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
             raise ValueError(f'missing query reference for frozen prediction {key}')
         if str(row.get('subject', query.subject)) != str(query.subject):
             raise ValueError(f'subject mismatch for frozen prediction {key}')
-        if scanpath_enabled:
+        if scanpath_enabled and 'where_generation' in row:
             where_grouped.setdefault((key[1], key[2]), []).append(row)
     for row in semantic_rows:
         key = (row.get('query_id', row.get('record_id')), int(row.get('K', row.get('k'))), int(row['draw_id']))
@@ -515,7 +551,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         semantic_group = semantic_grouped.get((k, draw), [])
         block = by_k.setdefault(str(k), {'draws': {}})
         draw_metrics = {}
-        if scanpath_enabled:
+        if scanpath_enabled and where_group:
             scores = []
             for row in where_group:
                 query = by_id[row.get('query_id', row.get('record_id'))]
@@ -581,7 +617,7 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     for block in by_k.values():
         draws = list(block['draws'].values())
         semantic_draws = [draw for draw in draws if any(name.startswith('eval_sem_') for name in draw)]
-        if semantic_enabled:
+        if semantic_enabled and semantic_draws:
             block['semantic_draw_count'] = len(semantic_draws)
             block['semantic_metric_aggregation'] = 'draw_mean' if semantic_use_draws else 'single_traversal'
             block['draw_mean'] = aggregate_semantic_metrics(semantic_draws, use_draws=semantic_use_draws)

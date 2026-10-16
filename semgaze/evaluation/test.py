@@ -18,7 +18,7 @@ from semgaze.semantic.flat.forward import prepare_flat_inputs
 from semgaze.semantic.flat.target import flatten_text
 from semgaze.evaluation.progress import RollingRate, format_eta, progress_interval, should_report
 from semgaze.evaluation.metrics_probability import score_probability_batch, aggregate_probability_draw, aggregate_probability_k
-from semgaze.evaluation.records import resolve_evaluation_draw_counts
+from semgaze.evaluation.records import resolve_evaluation_draw_counts, evaluation_group
 
 EVAL_KEYS = ('test_where', 'test_what', 'test_why', 'test_how', 'test_flat', 'test_total')
 
@@ -200,6 +200,8 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     overall, by_k, k_times, batch_stats = EpisodeAccumulator(), {}, {}, {}
     dataset_accumulators = {}
     dataset_k_accumulators = {}
+    group_accumulators = {}
+    group_k_accumulators = {}
     probability_config = bundle.config.get('evaluation', {}).get('metrics', {}).get('probability', {})
     # LL/IG are WHERE prediction metrics, not required for teacher-forced loss.
     probability_enabled = bool(bundle.config['evaluation']['predictions']['where']) and \
@@ -267,6 +269,9 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                             dataset = getattr(ep.query, 'dataset', 'COCO-Search18')
                             dataset_accumulators.setdefault(dataset, EpisodeAccumulator()).add(key, row)
                             dataset_k_accumulators.setdefault(dataset, {}).setdefault(str(k), EpisodeAccumulator()).add(key, row)
+                            group = evaluation_group(ep.query)
+                            group_accumulators.setdefault(group, EpisodeAccumulator()).add(key, row)
+                            group_k_accumulators.setdefault(group, {}).setdefault(str(k), EpisodeAccumulator()).add(key, row)
                             keys.append(key)
                             if episode_callback is not None:
                                 episode_callback(row)
@@ -311,11 +316,17 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
     by_dataset_k = {ds: {k: acc.finish(list(acc.rows)) | {'episodes': len(acc.rows)}
                          for k, acc in blocks.items()}
                     for ds, blocks in dataset_k_accumulators.items()}
+    by_group = {group: acc.finish(list(acc.rows)) | {'episodes': len(acc.rows)}
+                for group, acc in group_accumulators.items()}
+    by_group_k = {group: {k: acc.finish(list(acc.rows)) | {'episodes': len(acc.rows)}
+                          for k, acc in blocks.items()}
+                  for group, blocks in group_k_accumulators.items()}
     print('[EVAL][LOSS] by_dataset=' + ', '.join(
         f'{ds}: queries={sum(q.dataset == ds for q in queries)} loss={v["test_total"]:.4f}'
         for ds, v in sorted(by_dataset.items())), flush=True)
     return {**overall.finish(expected), 'test_by_k': by_k,
             'test_by_dataset': by_dataset, 'test_by_dataset_k': by_dataset_k,
+            'test_by_group': by_group, 'test_by_group_k': by_group_k,
             'probability_by_k': probability_by_k,
             'probability_supported_datasets': ['COCO-Search18'] if probability_enabled else [],
             'k_values': list(k_values),

@@ -36,7 +36,7 @@ from semgaze.evaluation.predictions import (
 )
 from semgaze.evaluation.records import (
     assert_key_sets_equal, expected_episode_keys, resolve_evaluation_draw_counts,
-    resolve_semantic_draw_counts,
+    resolve_semantic_draw_counts, resolve_prediction_draw_plan,
 )
 
 
@@ -70,15 +70,11 @@ def _load_evaluation_config(checkpoint, path):
 
 
 def _prediction_plan(config, manifest, *, enabled_where, enabled_semantic):
-    ks = config['evaluation']['k_values']
-    if any(k not in (1, 5, 10) for k in ks):
-        raise ValueError('frozen_episode currently supports evaluation K in {1, 5, 10}')
-    # Validate persisted draws before allocating the backbone, including
-    # loss-free/semantic-only runs.
-    where_counts = resolve_evaluation_draw_counts(config['evaluation']['draw'], manifest, ks)
-    semantic_counts = (resolve_semantic_draw_counts(where_counts, config['evaluation']['semantic_use_draws'])
-                       if enabled_semantic else {str(k): 0 for k in ks})
-    return where_counts, semantic_counts
+    # Validate requested K/draw combinations against persisted support sets
+    # before loading the backbone. Disabled branches consume zero traversals.
+    return resolve_prediction_draw_plan(
+        config, manifest, enabled_where=enabled_where,
+        enabled_semantic=enabled_semantic)
 
 
 def _validate_frozen_supports(train, queries, manifest, counts):
@@ -91,7 +87,7 @@ def _validate_frozen_supports(train, queries, manifest, counts):
 
 
 def _generate_predictions(bundle, train, queries, manifest, identity, output_dir, *,
-                          enabled_where, enabled_semantic, budget, draw_counts, semantic_counts):
+                          enabled_where, enabled_semantic, budget, draw_counts, semantic_counts, active_counts):
     """Canonical prediction records and complete (query_id, K, draw_id) coverage."""
     if not (enabled_where or enabled_semantic):
         return None
@@ -103,14 +99,13 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
     )
     destination = output_dir / 'predictions.jsonl'
     partial = destination.with_suffix('.jsonl.partial')
-    k_values = bundle.config['evaluation']['k_values']
+    k_values = [int(k) for k in active_counts]
     counts = {}
     written = 0
     # Match training ETA: measure full inference windows, NOT the much faster
     # loop serializing previously generated rows. Distinct K/path workloads
     # mean this whole-prediction ETA is an estimate, not a deadline.
-    total = sum(len(queries) * (draw_counts[str(k)] if enabled_where
-                                else semantic_counts[str(k)]) for k in k_values)
+    total = sum(len(queries) * active_counts[str(k)] for k in k_values)
     progress = RollingRate(min_observations=2)
     ready = 0
     started = time.perf_counter()
@@ -130,16 +125,17 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
             cache.validate(bundle)
             with partial.open('w', encoding='utf-8') as stream:
                 for k in k_values:
-                    traversal_count = draw_counts[str(k)] if enabled_where else semantic_counts[str(k)]
+                    traversal_count = active_counts[str(k)]
                     for draw_id in range(traversal_count):
+                        run_where = enabled_where and draw_id < draw_counts[str(k)]
                         run_semantic = enabled_semantic and draw_id < semantic_counts[str(k)]
-                        path = 'both' if enabled_where and run_semantic else (
-                            'where' if enabled_where else 'semantic')
+                        path = 'both' if run_where and run_semantic else (
+                            'where' if run_where else 'semantic')
                         episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
                                     unseen_subjects=manifest['unseen_subject_ids']) for query in queries]
                         key = f'K={k},draw={draw_id}'
                         rates = {'queries': 0}
-                        if enabled_where:
+                        if run_where:
                             rates['where_under_generated'] = 0
                         if run_semantic:
                             rates['flat_format_valid'] = 0
@@ -155,7 +151,7 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
                             row['draw_id'] = draw_id
                             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
                             observed.append(row)
-                            if enabled_where:
+                            if run_where:
                                 rates['where_under_generated'] += int(
                                     bool(row['where_generation']['under_generated']))
                             if run_semantic:
@@ -182,8 +178,7 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
                         print(f'[EVAL][PRED] {key} | {rates["queries"]}/{len(queries)} complete',
                               flush=True)
         expected_all = expected_episode_keys(
-            [q.record_id for q in queries], k_values,
-            draw_counts if enabled_where else semantic_counts)
+            [q.record_id for q in queries], k_values, active_counts)
         if written != len(expected_all) or ready != written:
             raise ValueError(f'prediction episode coverage mismatch: written={written}, '
                              f'inferred={ready}, expected={len(expected_all)}')
@@ -222,18 +217,18 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
     coco_queries = [q for q in queries
                     if getattr(q, 'dataset', 'COCO-Search18') == 'COCO-Search18']
     by_k = {}
-    total = sum(len(coco_queries) * draw_counts[str(k)]
-                for k in bundle.config['evaluation']['k_values'])
+    where_k_values = [int(k) for k, count in draw_counts.items() if count]
+    total = sum(len(coco_queries) * draw_counts[str(k)] for k in where_k_values)
     completed = 0
     progress = RollingRate(min_observations=2)
     started = time.perf_counter()
     print(f'[EVAL][LL] starting | COCO queries={len(coco_queries)} '
-          f'| K={bundle.config["evaluation"]["k_values"]} '
+          f'| K={where_k_values} '
           f'| planned_episodes={total}', flush=True)
     try:
         with test_mode(bundle):
             cache.validate(bundle)
-            for k in bundle.config['evaluation']['k_values']:
+            for k in where_k_values:
                 block = {'draws': {}}
                 for draw_id in range(draw_counts[str(k)]):
                     print(f'[EVAL][LL] K={k} draw={draw_id + 1}/{draw_counts[str(k)]} '
@@ -370,15 +365,15 @@ def main():
     tests = [adapter(r) for r in raw['test']]
     queries = test_queries(train, tests, manifest)
     try:
-        draw_counts, semantic_counts = _prediction_plan(
+        where_k_values, semantic_k_values, draw_counts, semantic_counts, active_counts = _prediction_plan(
             config, manifest, enabled_where=enabled_where,
             enabled_semantic=enabled_semantic)
     except ValueError as exc:
         parser.error(str(exc))
-    _validate_frozen_supports(train, queries, manifest, draw_counts)
+    _validate_frozen_supports(train, queries, manifest, active_counts)
 
     print(f'[EVAL] checkpoint={checkpoint} | queries={len(queries)} | '
-          f'K={config["evaluation"]["k_values"]} | draws={config["evaluation"]["draw"]} | '
+          f'loss K={config["evaluation"]["k_values"]} | WHERE K={where_k_values} | semantic K={semantic_k_values} | draws={config["evaluation"]["draw"]} | '
           f'WHERE={enabled_where} | semantic={enabled_semantic} | '
           f'compute_loss={compute_loss}', flush=True)
     if args.dry_run:
@@ -395,7 +390,9 @@ def main():
         'split_manifest_identity': identity,
         'prediction_branches': {'where': enabled_where, 'semantic': enabled_semantic},
         'compute_loss': compute_loss,
-        'k_values': config['evaluation']['k_values'],
+        'k_values': config['evaluation']['k_values'], # teacher-forced losses
+        'where_k_values': where_k_values,
+        'semantic_k_values': semantic_k_values,
         'draw': config['evaluation']['draw'],
         'evaluation_batch_size': config['evaluation'].get('batch_size'),
         'evaluation_batch_size_by_k': config['evaluation'].get('batch_size_by_k', {}),
@@ -430,7 +427,8 @@ def main():
     prediction_path = _generate_predictions(
         bundle, train, queries, manifest, identity, output_dir,
         enabled_where=enabled_where, enabled_semantic=enabled_semantic,
-        budget=budget, draw_counts=draw_counts, semantic_counts=semantic_counts)
+        budget=budget, draw_counts=draw_counts, semantic_counts=semantic_counts,
+        active_counts=active_counts)
     metrics_artifact = None
     if prediction_path is not None and metrics['enabled']:
         print('[EVAL][METRIC] scoring frozen predictions | starting', flush=True)

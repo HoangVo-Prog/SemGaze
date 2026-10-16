@@ -195,6 +195,8 @@ evaluation:
   predictions:
     where: true # autoregressive WHERE predictions and their scanpath metrics
     semantic: true # autoregressive semantic predictions and their metrics
+    where_k_values: null # null => evaluation.k_values; WHERE/scanpath prediction only
+    semantic_k_values: null # null => evaluation.k_values; semantic prediction only
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.

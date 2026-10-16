@@ -111,6 +111,50 @@ def resolve_semantic_draw_counts(where_draw_counts, semantic_use_draws=True):
     return {str(k): 1 for k in where_draw_counts}
 
 
+def evaluation_group(query):
+    """Canonical dataset subtask: COCO target absent/present or AiR VQA."""
+    dataset = getattr(query, 'dataset', 'COCO-Search18')
+    if dataset == 'AiR':
+        return 'VQA'
+    if dataset == 'COCO-Search18':
+        condition = str(getattr(query, 'condition', '')).lower()
+        if condition == 'present':
+            return 'TP'
+        if condition == 'absent':
+            return 'TA'
+        raise ValueError(f'unknown COCO-Search18 condition {condition!r} for {query.record_id}')
+    raise ValueError(f'unknown evaluation dataset {dataset!r}')
+
+
+def resolve_prediction_draw_plan(config, manifest, *, enabled_where, enabled_semantic):
+    """Separate prediction-K schedules, with legacy evaluation.k_values fallback.
+
+    Returns (WHERE_K, semantic_K, where_draws, semantic_draws, active_draws).
+    A K in only one branch executes only that branch; shared K+draws can run
+    both branches in the same episode without duplicate records.
+    """
+    evaluation = config['evaluation']
+    opts = evaluation['predictions']
+    def selected(branch, enabled):
+        if not enabled:
+            return []
+        chosen = opts.get(f'{branch}_k_values')
+        return list(evaluation['k_values'] if chosen is None else chosen)
+
+    where_ks = selected('where', enabled_where)
+    semantic_ks = selected('semantic', enabled_semantic)
+    active_ks = sorted(set(where_ks) | set(semantic_ks))
+    persisted = resolve_evaluation_draw_counts(evaluation['draw'], manifest, active_ks)
+    semantic_draws_all = resolve_semantic_draw_counts(
+        persisted, evaluation.get('semantic_use_draws', True))
+    where_draws = {str(k): persisted[str(k)] if k in where_ks else 0 for k in active_ks}
+    semantic_draws = {str(k): semantic_draws_all[str(k)] if k in semantic_ks else 0
+                      for k in active_ks}
+    active_draws = {str(k): max(where_draws[str(k)], semantic_draws[str(k)])
+                    for k in active_ks}
+    return where_ks, semantic_ks, where_draws, semantic_draws, active_draws
+
+
 def write_metrics_artifact(path, *, checkpoint, config, split_manifest_identity, by_k,
                            provenance, implementation_head, split="test", evaluation_draw=None):
     if split != "test":

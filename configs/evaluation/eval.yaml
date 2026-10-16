@@ -162,11 +162,13 @@ evaluation:
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
-  k_values: [1, 5, 10]
+  k_values: [1, 5, 10] # teacher-forced loss K (legacy fallback for prediction K)
   loss_aggregation: episode_mean
   predictions:
     where: true # autoregressive WHERE predictions and their scanpath metrics
     semantic: true # autoregressive semantic predictions and their metrics
+    where_k_values: [1, 5, 10] # WHERE/scanpath K; independent of semantic K
+    semantic_k_values: [1] # semantic K; uses GT WHERE states, not generated WHERE
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
