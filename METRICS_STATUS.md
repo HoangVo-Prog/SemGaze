@@ -1,7 +1,7 @@
 # Evaluation metrics status
 
-Gate B1 and Gate B2 are resolved from the checked-in reference trees and
-executable fixtures under `tests/fixtures/isp_coordinate_pairs.json`.
+Gate B1 and Gate B2 were resolved against the checked-in ISP reference trees.
+The one-off parity fixture was retired with the legacy test harness.
 
 * **SM — PRODUCTION_READY.** The runtime uses the vendored ISP ScanMatch
   reference with 512x320, 16x12, zero offset, 50 ms duration bins, and 3.5

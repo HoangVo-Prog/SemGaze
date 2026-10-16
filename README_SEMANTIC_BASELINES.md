@@ -167,10 +167,9 @@ For InternVL-3.5-8B, CPU is suitable only for contract tests, not practical gene
 
 ```
 python -m compileall -q semgaze/semantic/baselines train_semantic_sft.py evaluate_semantic_baseline.py compare_semantic_baselines.py
-pytest -q tests/test_semantic_baselines.py
 python train_semantic_sft.py --help
 python evaluate_semantic_baseline.py --help
 python compare_semantic_baselines.py --help
 ```
 
-GPU smoke should run a small test fixture or a short evaluation on the target machine, then confirm a real generated `predictions.jsonl` and corpus artifacts. Never claim zero-shot or SFT numeric results without actually executing the 8B model. SFT interrupted-run *optimizer resume* and full GPU parity with existing evaluator need additional machine-side verification.
+End-to-end validation should run a short evaluation on the target machine, then confirm a real generated `predictions.jsonl` and corpus artifacts. Never claim zero-shot or SFT numeric results without actually executing the 8B model. SFT interrupted-run *optimizer resume* and full GPU parity with existing evaluator need additional machine-side verification.

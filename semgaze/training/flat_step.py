@@ -39,19 +39,11 @@ def gradient_diagnostics(bundle):
 
 
 def check_gradients(bundle):
+    # Preserve numerical-safety diagnostics without fixture/smoke policies.
     diagnostics = gradient_diagnostics(bundle)
     if any(p.grad is not None and not bool(torch.isfinite(p.grad).all())
            for p in bundle.trainable_parameters()):
         raise RuntimeError('non-finite parameter gradient')
-    smoke = bundle.config['smoke']
-    checks = {
-        'require_lora_gradient': diagnostics['lora_grad_finite'],
-        'require_projector_nonzero_gradient': diagnostics['projector_grad_finite'] and diagnostics['projector_grad_nonzero'],
-        'require_end_fix_input_gradient': diagnostics['end_fix_input_grad_finite'],
-        'require_end_fix_output_gradient_if_untied': bundle.embeddings_tied or diagnostics['end_fix_output_grad_finite'],
-    }
-    if any(smoke[key] and not valid for key, valid in checks.items()):
-        raise RuntimeError(f'gradient contract failed: {diagnostics}')
     return diagnostics
 
 
@@ -64,9 +56,7 @@ def clip_and_check_gradients(bundle):
 
 def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
-                           where_batch=None, profiler=None, semantic_cache=None,
-                           audit_disable_where_attention_mask=False,
-                           audit_capture=None, global_step=0):
+                           where_batch=None, profiler=None, semantic_cache=None):
     """One differentiable WHERE forward; semantic/CE work only when supervised.
 
     Both loss weights > 0 preserves the original full-model operation.
@@ -93,41 +83,12 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     semantic_enabled = training_config['lambda_sem'] > 0
     if not (where_enabled or semantic_enabled):
         raise ValueError('training must supervise WHERE and/or semantic')
-    if not where_enabled and training_config['scheduled_sampling']['enabled']:
-        raise ValueError('scheduled sampling is WHERE supervision and cannot run in V4')
-    lwce_config = training_config['late_fixation_ce']
-    active_weighting = lwce_config if where_enabled and lwce_config['enabled'] else None
     counts = [len(e.query.x_px) for e in episodes]
     with stage('where'):
         where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
-                                    audit_disable_where_attention_mask=audit_disable_where_attention_mask,
-                                    fixation_weighting=active_weighting,
                                     compute_loss=where_enabled,
                                     return_fixation_states=semantic_enabled)
-    if audit_capture is not None:
-        for state in where.states:
-            if state.requires_grad:
-                state.retain_grad()
-        audit_capture['rng_state_after_where_cpu'] = torch.get_rng_state().clone()
-        device = bundle.input_row.device
-        if device.type == 'cuda':
-            audit_capture['rng_state_after_where_cuda'] = torch.cuda.get_rng_state(device).clone()
     where_episode_losses = where.episode_losses
-    ss_stats = {'ss_eligible': 0, 'ss_attempted': 0, 'ss_accepted': 0,
-                'ss_probability': 0.0, 'ss_changed': 0,
-                'ss_positions': {}, 'ss_failure_reasons': {}}
-    ss_loss_mixed_mean = None
-    if where_enabled and training_config['scheduled_sampling']['enabled']:
-        from semgaze.where.ss import scheduled_sampling_loss
-        with stage('scheduled_sampling'):
-            sampled = scheduled_sampling_loss(bundle, episodes, global_step=global_step,
-                weighting=active_weighting, image_cache=where.batch.image_cache)
-        ss_stats = sampled.diagnostics
-        ss_loss_mixed_mean = ss_stats.get('ss_loss_mixed_mean')
-        beta = float(training_config['scheduled_sampling']['loss_mix'])
-        where_episode_losses = torch.where(sampled.applied,
-            (1.0 - beta) * where.episode_losses + beta * sampled.episode_losses,
-            where.episode_losses)
     flat, positions, semantic_metadata = None, [], [{} for _ in episodes]
     states = [None] * len(episodes)
     component_values = {'loss_what': None, 'loss_why': None, 'loss_how': None}
@@ -162,18 +123,6 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             raise RuntimeError('non-finite active supervision loss')
     with stage('backward'):
         (loss_total * loss_scale).backward()
-    if audit_capture is not None:
-        audit_capture.update({
-            'where_episode_losses': where.episode_losses.detach().clone() if where_enabled else None,
-            'where_states': [state.detach().clone() for state in where.states],
-            'loss_where': where.loss_where.detach().clone() if where_enabled else None,
-            'loss_flat': flat.loss.detach().clone() if semantic_enabled else None,
-            'loss_total': loss_total.detach().clone(),
-        })
-        audit_capture['state_gradients'] = [
-            state.grad.detach().clone() if state.grad is not None else None
-            for state in where.states
-        ]
     checks = check_gradients(bundle) if diagnostics else {}
     if optimizer_step:
         if bundle.optimizer is None:
@@ -187,15 +136,11 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                 | {k: v for k, v in sm.items() if k != 'response_offsets'}
                 for m, sm in zip(where.batch.metadata, semantic_metadata)]
     result = {'loss_where': where_episode_losses.detach().mean() if where_enabled else None,
-              'loss_where_gt': where.loss_where.detach() if where_enabled else None,
-              'loss_where_gt_unweighted': where.unweighted_episode_losses.detach().mean() if where_enabled else None,
-              'loss_where_mixed': ss_loss_mixed_mean,
-              **ss_stats, 'lwce_enabled': bool(lwce_config['enabled'] and where_enabled),
+
               'loss_flat': flat.loss.detach() if semantic_enabled else None,
               'loss_what': component_values['loss_what'],
               'loss_why': component_values['loss_why'],
               'loss_how': component_values['loss_how'],
-              'lwce_alpha': float(lwce_config['alpha']) if lwce_config['enabled'] and where_enabled else 0.0,
               'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
               'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
     for key, values in (

@@ -311,8 +311,7 @@ MultiMatch uses the audited `multimatch_gaze.docomparison` call with
 `screensize=[512,320]`, pads each path to three fixations with `(1,1,1e-3)`
 when needed, and converts source millisecond durations to seconds. These
 settings are recorded in the YAML `evaluation.metrics.where` block and are
-proven against the local ISP-SENet and Gazeformer-ISP trees; the executable
-coordinate fixture is `tests/fixtures/isp_coordinate_pairs.json`. The
+checked against the local ISP-SENet and Gazeformer-ISP trees. The
 top-level SM value is the harmonic mean of the duration-free and
 duration-aware ScanMatch scores, while the five MultiMatch components are
 averaged for the top-level MM value; both component sets remain in the

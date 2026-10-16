@@ -1,4 +1,4 @@
-# Derived from configs/flat_ss_lwce.yaml at commit c7e6d75458c46d60bd5f09fa7939741c7d6b5d27
+# Supervision ablation configuration.
 # Uses configs/defaults.yaml missing-field merge; all experiment fields explicit below.
 experiment:
   name: intergaze_v3_where_only
@@ -96,21 +96,6 @@ checkpoint_loading:
   resume_from: null
   init_from: null
 training:
-  scheduled_sampling:
-    enabled: false
-    probability: 0.3
-    max_probability: 0.3
-    warmup_ratio: 0.1
-    sampling_strategy: greedy_single_fixation
-    target_tasks: [where]
-    loss_mix: 0.5
-    max_new_tokens: 48
-    seed: 2027
-  late_fixation_ce:
-    enabled: false
-    mode: late_only
-    alpha: 0.5
-    threshold: 5
   lambda_where: 1.0
   lambda_sem: 0.0
   optimizer: AdamW
@@ -228,12 +213,3 @@ checkpoint:
   save_split_manifest_identity: true
   save_optimizer: true
   save_scheduler: true
-smoke:
-  fixture: tests/fixtures/flat_episode.json
-  expected_where: tests/fixtures/expected_where.txt
-  expected_flat_target: tests/fixtures/expected_flat_target.txt
-  require_finite_losses: true
-  require_lora_gradient: true
-  require_projector_nonzero_gradient: false
-  require_end_fix_input_gradient: true
-  require_end_fix_output_gradient_if_untied: true

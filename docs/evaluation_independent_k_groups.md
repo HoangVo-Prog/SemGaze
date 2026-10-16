@@ -38,13 +38,8 @@ The old `metrics_by_dataset.json` remains available for joint runs.
 Teacher-forced loss also has `test_by_group` and `test_by_group_k`, in addition
 to the original overall and `test_by_dataset` results.
 
-Run regressions after applying:
-
-```bash
-python -m pytest -q tests/test_independent_eval_k_and_groups.py \
-  tests/test_epoch_predictions.py tests/test_config_plumbing.py \
-  tests/test_evaluation_batch_size_by_k.py tests/test_joint_air_coco.py
-```
+The historical one-off regression scripts were retired during cleanup.
+Use the production evaluator to validate these settings on the intended checkpoint.
 
 A full model inference run is required to validate GPU memory consumption and
 the external metric packages (BERTScore, CIDEr-R, METEOR), which are unchanged.

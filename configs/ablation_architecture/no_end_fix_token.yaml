@@ -2,7 +2,7 @@
 # Values are user-controlled; each run saves its resolved configuration.
 
 experiment:
-  name: semgaze_no_end_fix_ss_lwce
+  name: semgaze_no_end_fix
   semantic_mode: flat_single_output
   protocol_version: flat-v1
   seed: 42
@@ -126,21 +126,6 @@ checkpoint_loading:
   init_from: null    # SET to SFT checkpoint directory for adaptation
 
 training:
-  scheduled_sampling:
-    enabled: false
-    probability: 0.30
-    max_probability: 0.30
-    warmup_ratio: 0.10
-    sampling_strategy: greedy_single_fixation
-    target_tasks: [where]
-    loss_mix: 0.50
-    max_new_tokens: 48
-    seed: 2027
-  late_fixation_ce:
-    enabled: false
-    mode: late_only
-    alpha: 0.50
-    threshold: 5
   lambda_where: 1.0
   lambda_sem: 1.0
   optimizer: AdamW
@@ -176,7 +161,7 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: epoch # epoch | steps | no (smoke/benchmark only)
+  strategy: epoch # epoch | steps | no
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
   batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
@@ -271,13 +256,3 @@ checkpoint:
   save_split_manifest_identity: true
   save_optimizer: true
   save_scheduler: true
-
-smoke:
-  fixture: tests/fixtures/flat_episode.json
-  expected_where: tests/fixtures/expected_where.txt
-  expected_flat_target: tests/fixtures/expected_flat_target.txt
-  require_finite_losses: true
-  require_lora_gradient: true
-  require_projector_nonzero_gradient: true
-  require_end_fix_input_gradient: false
-  require_end_fix_output_gradient_if_untied: false

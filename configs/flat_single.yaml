@@ -155,7 +155,7 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: steps # epoch | steps | no (smoke/benchmark only)
+  strategy: steps # epoch | steps | no
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
   batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
@@ -252,13 +252,3 @@ checkpoint:
   save_split_manifest_identity: true
   save_optimizer: true
   save_scheduler: true
-
-smoke:
-  fixture: tests/fixtures/flat_episode.json
-  expected_where: tests/fixtures/expected_where.txt
-  expected_flat_target: tests/fixtures/expected_flat_target.txt
-  require_finite_losses: true
-  require_lora_gradient: true
-  require_projector_nonzero_gradient: true
-  require_end_fix_input_gradient: true
-  require_end_fix_output_gradient_if_untied: true

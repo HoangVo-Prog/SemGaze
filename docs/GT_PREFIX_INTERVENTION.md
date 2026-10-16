@@ -4,19 +4,10 @@
 
 **Scope:** Evaluation-only. No SFT retraining, no changes to the model, frozen subject split, support selection, images, tokenization, greedy decoding, or oracle-length WHERE instruction. No WHAT/WHY/HOW generation during this experiment.
 
-## Install
+## Running the intervention
 
-From the SemGaze root on the GPU machine:
-
-```bash
-# After copying the patch file to this machine:
-git apply --check /path/to/semgaze_gt_prefix.patch
-git apply /path/to/semgaze_gt_prefix.patch
-python -m unittest discover -s tests -p test_gt_prefix_core.py -v
-```
-
-The same three source files can alternatively be copied from the included ZIP:
-`evaluate_gt_prefix.py`, `gt_prefix_core.py`, `tests/test_gt_prefix_core.py`.
+Use the checked-in `evaluate_gt_prefix.py` and `gt_prefix_core.py` scripts.
+The historical patch installer and its test harness were retired.
 
 ## Exact test-set run
 

@@ -3,8 +3,6 @@ import torch
 from contextlib import nullcontext
 from semgaze.state.extractor import extract_query_states, extract_duration_numeric_states
 from .collator import collate_where_batch, to_model_device
-from .weighting import build_fixation_target_weights
-from .serialization import active_end_fix_token
 from semgaze.model.selected_loss import forward_backbone, compute_selected_causal_nll
 
 
@@ -16,7 +14,6 @@ class WhereOutput:
     positions: object
     episode_losses: object = None
     query_image_features: object = None
-    unweighted_episode_losses: object = None
 
 
 def forward_where(bundle, episode, *, compute_loss=True):
@@ -25,8 +22,7 @@ def forward_where(bundle, episode, *, compute_loss=True):
 
 
 def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_cache=None, use_cache=None,
-                        audit_disable_where_attention_mask=False, fixation_weighting=None,
-                         compute_loss=True, return_fixation_states=True):
+                        compute_loss=True, return_fixation_states=True):
     stage = profiler.stage if profiler is not None else lambda name: nullcontext()
     with stage('where_collation'):
         batch = batch if batch is not None else collate_where_batch(
@@ -41,17 +37,12 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
         if visual_cache is not None:
             inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths],
                                                   host_pixel_values=batch.inputs['pixel_values'])
-        if audit_disable_where_attention_mask:
-            inputs = {k: v for k, v in inputs.items() if k != 'attention_mask'}
         outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
                                   if use_cache is None else use_cache))
         loss = None
         if compute_loss:
-            target_weights = build_fixation_target_weights(
-                batch, episodes, config=fixation_weighting,
-                end_fix_token=active_end_fix_token(bundle.config))
             loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'],
-                bundle.model.get_output_embeddings(), target_weights=target_weights)
+                bundle.model.get_output_embeddings())
     counts = [len(e.query.x_px) for e in episodes]
     if not return_fixation_states or bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text':
         # No WHERE hidden-state extraction or semantic hand-off in V2.
@@ -68,5 +59,4 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
         raise ValueError('native image feature groups differ from collated image ordering')
     return WhereOutput(loss.loss if loss is not None else None, states, batch, positions,
                         loss.episode_losses if loss is not None else None,
-                        [features[m['query_image_index']] for m in batch.metadata],
-                        loss.unweighted_episode_losses if loss is not None else None)
+                        [features[m['query_image_index']] for m in batch.metadata])

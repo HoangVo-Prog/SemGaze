@@ -173,9 +173,8 @@ semantic-to-WHERE gradients, sampling and RNG resume, B=1/2/4 orchestration,
 padding calculations and failure persistence. The first attempt hit Windows
 temporary-directory permissions; the run below used a workspace-local directory:
 
-```powershell
-.venv/Scripts/python.exe -m pytest tests/test_same_k_batching.py tests/test_benchmark_a100.py tests/test_training_throughput.py tests/test_epoch_validation.py tests/test_epoch_predictions.py -q --basetemp=D:/Programming/Python/SemGaze/runs/pytest-same-k-20261005 --tb=short
-```
+The historical regression harness was retired in the 2026-10-16 code cleanup;
+these are archival measurements rather than runnable regression commands.
 
 The B=1/2/4 `--plan-only` command also passed. No A100 measurements are available
 locally; throughput and VRAM remain unmeasured until the server run.

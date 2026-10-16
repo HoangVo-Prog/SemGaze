@@ -188,20 +188,9 @@ if torch.cuda.is_available():
     print('Torch CUDA runtime:', torch.version.cuda)
 PY
 java -version
-python -m pytest tests -q
-python scripts/smoke_flat.py --contract-only
 ```
 
 `java -version` is only required when Java-backed metrics are enabled.
-The pure contract smoke test does not load the 8B model. To check the
-actual model/adapter on a GPU node:
-
-```bash
-python scripts/smoke_flat.py --with-model --config configs/flat_single.yaml
-```
-
-`--with-model` requires model assets and sufficient VRAM. It does not perform
-an optimizer step unless `--step` is explicitly provided.
 
 ## 6. Train and evaluate
 

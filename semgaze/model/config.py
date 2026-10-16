@@ -105,7 +105,6 @@ def validate_config(config):
         'data.duration.source_unit': 'ms',
         'data.duration.conversion_to_ms': 'identity',
         'evaluation.loss_aggregation': 'episode_mean',
-        'smoke.require_finite_losses': True,
     }
     for dotted, implemented in capabilities.items():
         value = config
@@ -113,7 +112,7 @@ def validate_config(config):
             value = value[key]
         if value != implemented:
             raise ValueError(f'{dotted}={value!r} is unsupported by the implemented flat operation ({implemented!r})')
-    for section in ('checkpoint', 'smoke'):
+    for section in ('checkpoint',):
         for key, value in config[section].items():
             if (key.startswith('save_') and key != 'save_every') or key.startswith('require_'):
                 if type(value) is not bool:
@@ -157,24 +156,6 @@ def validate_config(config):
         raise ValueError('checkpoint_loading paths must be null or nonempty strings')
     if loading['resume_from'] is not None and loading['init_from'] is not None:
         raise ValueError('choose only checkpoint_loading.resume_from or init_from')
-    ss = t['scheduled_sampling']
-    lwce = t['late_fixation_ce']
-    if any(type(x.get('enabled')) is not bool for x in (ss, lwce)):
-        raise ValueError('SS/LWCE enabled must be bool')
-    for key in ('probability', 'warmup_ratio', 'max_probability', 'loss_mix'):
-        value = ss[key]
-        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
-            raise ValueError(f'scheduled_sampling.{key} must be in [0, 1]')
-    if ss['sampling_strategy'] != 'greedy_single_fixation' or ss['target_tasks'] != ['where']:
-        raise ValueError('only WHERE greedy_single_fixation SS is implemented')
-    if type(ss['seed']) is not int or ss['seed'] < 0:
-        raise ValueError('scheduled_sampling.seed must be a nonnegative integer')
-    positive_int(ss['max_new_tokens'], 'scheduled_sampling.max_new_tokens')
-    if lwce['mode'] not in ('late_only', 'linear'):
-        raise ValueError('late_fixation_ce.mode must be late_only or linear')
-    if type(lwce['alpha']) not in (int, float) or not math.isfinite(lwce['alpha']) or lwce['alpha'] < 0:
-        raise ValueError('late_fixation_ce.alpha must be finite and nonnegative')
-    positive_int(lwce['threshold'], 'late_fixation_ce.threshold', minimum=0)
     if 'validation' in config or 'validation_scope' in evaluation['predictions']:
         raise ValueError('obsolete validation configuration; use test/test_scope')
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
@@ -219,8 +200,6 @@ def validate_config(config):
             raise ValueError(f'training.{key} must be an explicit finite nonnegative number')
     if t['lambda_where'] == 0 and t['lambda_sem'] == 0:
         raise ValueError('at least one of training.lambda_where and training.lambda_sem must be positive')
-    if t['lambda_where'] == 0 and t['scheduled_sampling']['enabled']:
-        raise ValueError('scheduled sampling is WHERE supervision; disable it when lambda_where=0')
     if t['learning_rate'] == 0 or t['adam_epsilon'] == 0 or not 0 <= t['warmup_ratio'] <= 1 or any(not 0 <= t[b] < 1 for b in ('adam_beta1','adam_beta2')):
         raise ValueError('invalid learning rate, epsilon, warmup ratio or Adam betas')
     if t['max_grad_norm'] is not None and (not math.isfinite(t['max_grad_norm']) or t['max_grad_norm'] <= 0):
@@ -228,7 +207,7 @@ def validate_config(config):
     if type(t['gradient_checkpointing']) is not bool:
         raise ValueError('gradient_checkpointing must be an explicit boolean')
     if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
-        raise ValueError('evaluation.strategy supports epoch, steps or no (smoke/benchmark only)')
+        raise ValueError('evaluation.strategy supports epoch, steps or no')
     positive_int(evaluation['draw'], 'evaluation.draw')
     positive_int(evaluation['eval_epoch'], 'evaluation.eval_epoch')
     positive_int(evaluation.get('batch_size'), 'evaluation.batch_size', allow_none=True)

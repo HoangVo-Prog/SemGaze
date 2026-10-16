@@ -1,4 +1,4 @@
-"""Train the configured flat model after its fixture gradient smoke."""
+"""Train the configured flat model using standard teacher-forced objectives."""
 import argparse
 import json
 from pathlib import Path
@@ -6,11 +6,10 @@ import torch
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
 from semgaze.data.joint import JointAdapter
 from semgaze.data.fewshot import TrainingEpisodeSampler
-from semgaze.data.schema import normalized_episode_from_dict
 from semgaze.model.build import build_flat_model_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.model.checkpoint import load_checkpoint_bundle, restore_checkpoint_state
-from semgaze.training.flat_step import run_flat_training_step, make_optimizer, make_scheduler
+from semgaze.training.flat_step import make_optimizer, make_scheduler
 from semgaze.training.loop import resolve_epoch_schedule, run_training_loop, require_single_process
 from semgaze.evaluation.predictions import resolve_prediction_settings
 
@@ -19,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=ROOT / 'configs/flat_single.yaml')
     parser.add_argument('--output-dir', type=Path)
-    parser.add_argument('--max-steps', type=int, help='Debug/smoke optimizer-update cap; may stop mid-epoch')
+    parser.add_argument('--max-steps', type=int, help='Optional optimizer-update cap; may stop mid-epoch')
     parser.add_argument('--semantic-max-new-tokens', type=int, help='Explicit epoch semantic generation budget')
     parser.add_argument('--num-train-epochs', '--epochs', dest='num_train_epochs', type=int)
     parser.add_argument('--save-every', type=int, help='Save every N optimizer steps; 0 disables interval saves')
@@ -101,10 +100,12 @@ def main():
                     raise ValueError(f'weight initialization cannot change {key} architecture')
             # Preserve the loaded checkpoint's actual LoRA initialization provenance.
             config['model'] = old_config['model']
-        if resume_path is not None:
-            for key in ('scheduled_sampling', 'late_fixation_ce'):
-                if bundle.config['training'][key] != config['training'][key]:
-                    raise ValueError(f'strict resume cannot change training.{key}; use init_from')
+        if resume_path is not None and any(
+            bundle.config['training'].get(name, {}).get('enabled', False)
+            for name in ('scheduled_sampling', 'late_fixation_ce')
+        ):
+            raise ValueError('Cannot strictly resume a checkpoint trained with removed loss objectives; '
+                             'use the original code or initialize weights with --init-from-checkpoint')
         if resume_path is not None:
             for key in ('lambda_where', 'lambda_sem'):
                 if bundle.config['training'][key] != config['training'][key]:
@@ -136,10 +137,6 @@ def main():
     bundle.config['runtime'].update(split_manifest_identity=identity, world_size=1)
     output_dir = bundle.output_dir
     write_run_config(bundle.config, output_dir)
-    fixture = normalized_episode_from_dict(json.loads((ROOT / config['smoke']['fixture']).read_text()))
-    smoke = run_flat_training_step(bundle, fixture)  # never updates parameters
-    (output_dir / 'gradient_smoke.json').write_text(json.dumps(
-        {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in smoke.items()}, indent=2))
     bundle.optimizer = make_optimizer(bundle)
     bundle.scheduler = make_scheduler(bundle, max_steps)
     start = 0
