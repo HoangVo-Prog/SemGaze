@@ -206,8 +206,8 @@ def validate_config(config):
         raise ValueError('max_grad_norm must be positive or null (disabled)')
     if type(t['gradient_checkpointing']) is not bool:
         raise ValueError('gradient_checkpointing must be an explicit boolean')
-    if evaluation['strategy'] not in ('epoch', 'steps', 'no'):
-        raise ValueError('evaluation.strategy supports epoch, steps or no')
+    if evaluation['strategy'] not in ('epoch', 'steps', 'last', 'no'):
+        raise ValueError('evaluation.strategy supports epoch, steps, last or no')
     positive_int(evaluation['draw'], 'evaluation.draw')
     positive_int(evaluation['eval_epoch'], 'evaluation.eval_epoch')
     positive_int(evaluation.get('batch_size'), 'evaluation.batch_size', allow_none=True)

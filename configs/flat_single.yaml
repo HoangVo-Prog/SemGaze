@@ -155,7 +155,7 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: steps # epoch | steps | no
+  strategy: steps # epoch | steps | no | last 
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
   batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides

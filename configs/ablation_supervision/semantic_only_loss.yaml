@@ -124,7 +124,7 @@ training:
     detach_f: false
     detach_r: false
 evaluation:
-  strategy: 'no'
+  strategy: last
   eval_epoch: 1
   batch_size: 1
   batch_size_by_k:

@@ -219,7 +219,9 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 stream.flush()
                 print(format_train_step(entry, max_steps), flush=True)
             epoch_end = epoch_complete
-            should_evaluate = ((evaluation['strategy'] == 'epoch' and epoch_end and
+            should_evaluate = ((evaluation['strategy'] == 'last' and epoch_end and
+                                global_step == max_steps) or
+                               (evaluation['strategy'] == 'epoch' and epoch_end and
                                 sampler.epoch % evaluation['eval_epoch'] == 0) or
                                (evaluation['strategy'] == 'steps' and
                                 global_step % evaluation['eval_steps'] == 0))

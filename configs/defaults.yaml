@@ -168,7 +168,9 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: epoch # epoch | steps | no
+  strategy: epoch # epoch | steps | last | no
+  # last: evaluate only when the final training update completes an epoch.
+  # If --max-steps stops mid-epoch, no last evaluation runs.
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: null # common physical size fallback; null uses test.*.batch_size_by_k
   batch_size_by_k: {} # optional per-K overrides for both evaluation loss and prediction
