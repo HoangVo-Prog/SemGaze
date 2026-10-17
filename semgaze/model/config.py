@@ -125,9 +125,8 @@ def validate_config(config):
         raise ValueError('where.use_end_fix_token must be boolean')
     if cond not in ('shared_states', 'explicit_scanpath_text'):
         raise ValueError('unsupported semantic.conditioning')
-    if (not use_end and (cond != 'shared_states' or readout != 'last_duration_numeric_token')) or (
-            use_end and readout != 'query_end_fix_token_position'):
-        raise ValueError('WHERE readout/serialization/conditioning combination is invalid')
+    if readout != ('query_end_fix_token_position' if use_end else 'last_duration_numeric_token'):
+        raise ValueError('WHERE readout/serialization combination is invalid')
     if projector != ('linear_layernorm' if cond == 'shared_states' else 'none'):
         raise ValueError('projector must be learned only for shared-state conditioning')
     if config['where']['supervision']['supervise_query_end_fix'] is not use_end:

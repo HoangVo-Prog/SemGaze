@@ -101,7 +101,7 @@ state:
   readout_layer: final_language_model_layer
   readout_position: last_duration_numeric_token
   projector:
-    type: linear_layernorm
+    type: none
     input_dim: model_hidden_size
     output_dim: model_hidden_size
   detach_where_states: false
@@ -111,7 +111,7 @@ state:
 
 semantic:
   mode: flat_single_output
-  conditioning: shared_states
+  conditioning: explicit_scanpath_text
   replay_support_context: false
   consume_full_chronological_states: true
   use_gold_why_groups: true
@@ -161,18 +161,20 @@ training:
     detach_r: false
 
 evaluation:
-  strategy: last # epoch | steps | no
+  strategy: steps # epoch | steps | last | no
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k
   batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
   eval_steps: 1000 # required when strategy is steps; counts global optimizer steps
   draw: 1 # complete persisted support-set evaluation traversals per K, need 10 for comparison
   semantic_use_draws: true # preserve draw-aware semantic prediction by default
-  k_values: [1]
+  k_values: [1, 5, 10]
   loss_aggregation: episode_mean
   predictions:
     where: true # autoregressive WHERE predictions and their scanpath metrics
     semantic: true # autoregressive semantic predictions and their metrics
+    where_k_values: [1, 5, 10] # WHERE/scanpath K
+    semantic_k_values: [1] # GT-WHERE semantic K
     train_batches: 1
     test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
@@ -180,12 +182,12 @@ evaluation:
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
   # No unfrozen generation-quality metric or checkpoint-selection scalar is added.
   metrics:
-    enabled: false
+    enabled: true
     split: test
     where:
-      scanmatch: false
-      multimatch: false
-      sed: false
+      scanmatch: true
+      multimatch: true
+      sed: true
       isp_reference:
         width: 512
         height: 320
@@ -208,7 +210,7 @@ evaluation:
         allow_synthetic_fallback: false
     semantic:
       bertscore:
-        enabled: false
+        enabled: true
         package_version: "0.3.13"
         lang: en
         model_type: roberta-large
@@ -218,20 +220,20 @@ evaluation:
         use_fast_tokenizer: false
         batch_size: 64
       cider_r:
-        enabled: false
+        enabled: true
         implementation: vendored_authors
         n: 4
         k_r: 0.8
         tokenizer: stanford_ptb_reference
       # LLada-style COCO corpus BLEU-4; references are per WHAT/WHY/HOW unit.
       bleu4:
-        enabled: false
+        enabled: true
       # LLada calls ROUGE-L simply "ROUGE"; both output labels alias one score.
       rouge_l:
-        enabled: false
+        enabled: true
       # Java METEOR 1.5, enable after downloading the authors' JAR (README).
       meteor:
-        enabled: false
+        enabled: true
         jar_path: null
         java_bin: java
 
@@ -251,7 +253,7 @@ checkpoint:
   save_end_fix_token_id: true
   save_peft_adapter: true
   save_trainable_end_fix_rows: true
-  save_projector: true
+  save_projector: false
   save_resolved_config: true
   save_split_manifest_identity: true
   save_optimizer: true

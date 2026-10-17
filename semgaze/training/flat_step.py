@@ -57,11 +57,12 @@ def clip_and_check_gradients(bundle):
 def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
                            where_batch=None, profiler=None, semantic_cache=None):
-    """One differentiable WHERE forward; semantic/CE work only when supervised.
+    """Run active objectives; explicit-text Semantic needs no WHERE forward.
 
-    Both loss weights > 0 preserves the original full-model operation.
+    Both losses positive: joint WHERE + Semantic objectives.
     lambda_sem=0: WHERE-only (no projector/semantic forward/loss).
-    lambda_where=0: teacher-forced WHERE states -> projector -> semantic loss.
+    lambda_where=0 with explicit text: Semantic-only (GT XYD, no WHERE forward).
+    Shared-state Semantic still requires WHERE forward even if its loss is zero.
     """
     bundle = model_bundle
     single = not isinstance(episode, (list, tuple))
@@ -84,17 +85,20 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     if not (where_enabled or semantic_enabled):
         raise ValueError('training must supervise WHERE and/or semantic')
     counts = [len(e.query.x_px) for e in episodes]
-    with stage('where'):
-        where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
-                                    compute_loss=where_enabled,
-                                    return_fixation_states=semantic_enabled)
-    where_episode_losses = where.episode_losses
+    explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
+    need_where_forward = where_enabled or (semantic_enabled and not explicit)
+    where = None
+    if need_where_forward:
+        with stage('where'):
+            where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
+                                        compute_loss=where_enabled,
+                                        return_fixation_states=semantic_enabled and not explicit)
+    where_episode_losses = where.episode_losses if where is not None else None
     flat, positions, semantic_metadata = None, [], [{} for _ in episodes]
     states = [None] * len(episodes)
     component_values = {'loss_what': None, 'loss_why': None, 'loss_how': None}
     if semantic_enabled:
         with stage('semantic'):
-            explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
             if not explicit:
                 projected = bundle.projector(torch.cat(where.states, dim=0))
                 states = list(projected.split(counts))
@@ -132,9 +136,13 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             bundle.optimizer.step()
             if bundle.scheduler is not None:
                 bundle.scheduler.step()
+    where_metadata = (where.batch.metadata if where is not None else
+                      where_batch.metadata if where_batch is not None else
+                      [dict(record_id=e.query.record_id, K=len(e.supports),
+                            fixation_count=len(e.query.x_px)) for e in episodes])
     metadata = [{k: v for k, v in m.items() if k != 'semantic_target'}
                 | {k: v for k, v in sm.items() if k != 'response_offsets'}
-                for m, sm in zip(where.batch.metadata, semantic_metadata)]
+                for m, sm in zip(where_metadata, semantic_metadata)]
     result = {'loss_where': where_episode_losses.detach().mean() if where_enabled else None,
 
               'loss_flat': flat.loss.detach() if semantic_enabled else None,
@@ -146,8 +154,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
     for key, values in (
         ('query_fixation_count', counts),
         ('query_end_fix_state_count', [len(f) if semantic_enabled and bundle.config['where']['use_end_fix_token']
-                                      and bundle.config['semantic']['conditioning'] != 'explicit_scanpath_text' else 0
-                                      for f in where.states]),
+                                      and not explicit else 0
+                                      for f in (where.states if where is not None else [None] * len(episodes))]),
         ('supervised_query_end_fix_count', [int((s.inputs['labels'] == bundle.end_fix_id).sum()) if where_enabled else 0
                                             for s in where.batch.samples]),
         ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum()) if where_enabled else 0

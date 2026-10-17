@@ -63,6 +63,7 @@ model:
 where:
   mode: xyd
   end_fix_token: "<END_FIX>"
+  use_end_fix_token: true
   require_atomic_end_fix: true
   # B2: concise support user messages; final query always keeps the full WHERE instruction.
   support_prompt_style: concise # concise (default, B2) | full (original)
@@ -100,7 +101,7 @@ state:
   readout_layer: final_language_model_layer
   readout_position: query_end_fix_token_position
   projector:
-    type: linear_layernorm
+    type: none
     input_dim: model_hidden_size
     output_dim: model_hidden_size
   detach_where_states: false
@@ -110,6 +111,7 @@ state:
 
 semantic:
   mode: flat_single_output
+  conditioning: explicit_scanpath_text
   replay_support_context: false
   consume_full_chronological_states: true
   use_gold_why_groups: true
@@ -247,7 +249,7 @@ checkpoint:
   save_end_fix_token_id: true
   save_peft_adapter: true
   save_trainable_end_fix_rows: true
-  save_projector: true
+  save_projector: false
   save_resolved_config: true
   save_split_manifest_identity: true
   save_optimizer: true
