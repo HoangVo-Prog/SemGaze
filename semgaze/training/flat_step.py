@@ -151,15 +151,17 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
               'loss_how': component_values['loss_how'],
               'loss_total': loss_total.detach(), 'physical_batch_size': len(episodes),
               'episodes': metadata, 'embeddings_untied': not bundle.embeddings_tied, **checks}
+    where_samples_for_logging = (where.batch.samples if where_enabled
+                                 else [None] * len(episodes))
     for key, values in (
         ('query_fixation_count', counts),
         ('query_end_fix_state_count', [len(f) if semantic_enabled and bundle.config['where']['use_end_fix_token']
                                       and not explicit else 0
                                       for f in (where.states if where is not None else [None] * len(episodes))]),
         ('supervised_query_end_fix_count', [int((s.inputs['labels'] == bundle.end_fix_id).sum()) if where_enabled else 0
-                                            for s in where.batch.samples]),
+                                            for s in where_samples_for_logging]),
         ('supervised_support_end_fix_count', [int((s.inputs['labels'][:, :s.response_start] == bundle.end_fix_id).sum()) if where_enabled else 0
-                                              for s in where.batch.samples]),
+                                              for s in where_samples_for_logging]),
         ('projector_output_shape', [tuple(r.shape) if r is not None else None for r in states]),
         ('inserted_state_count', [len(p) for p in positions] if semantic_enabled else [0] * len(episodes))):
         result[key] = values[0] if single else values
