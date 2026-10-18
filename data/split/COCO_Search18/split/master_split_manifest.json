@@ -51,7 +51,7 @@
             "record_ratio": 0.09792592592592593,
             "record_ratio_abs_error": 0.0020740740740740754,
             "subject_tv": 0.01815375133075587,
-            "task_tv": 0.0725691712892923
+            "task_tv": 0.07256917128929231
           },
           "seen": {
             "condition_tv": 0.0,
@@ -87,7 +87,7 @@
             "record_ratio": 0.10063706948039021,
             "record_ratio_abs_error": 0.0006370694803902038,
             "subject_tv": 0.01714822006701911,
-            "task_tv": 0.06342791507236839
+            "task_tv": 0.06342791507236838
           },
           "unseen": {
             "condition_tv": 0.0,
@@ -97,17 +97,17 @@
             "task_tv": 0.07727772122551486
           }
         },
-        "score": 0.915238125359813,
+        "score": 0.9152381253598127,
         "train_support_distinct_images": 411
       }
     },
     "num_valid_candidates": 9968,
     "selected_attempt_id": 7480,
-    "selected_score": 2.598123313760408,
+    "selected_score": 2.5981233137604076,
     "valid_attempts_seen": 7459
   },
   "selected_attempt_id": 7480,
-  "selected_score": 2.598123313760408,
+  "selected_score": 2.5981233137604076,
   "source_file": "data/split/COCO_Search18/COCOSearch-18.json",
   "source_sha256": "38055781c3414fb1a7fc57d3bd4ec7b421adfd2fb00bf349f216263aec43c3b6",
   "split_unit": "name (image)",

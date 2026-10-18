@@ -126,13 +126,10 @@ training:
     detach_f: false
     detach_r: false
 evaluation:
-  strategy: steps
+  strategy: last
   eval_epoch: 1
   batch_size: 1
-  batch_size_by_k:
-    '1': 1
-    '5': 1
-    '10': 1
+  batch_size_by_k: {'1': 64, '5': 32, '10': 16} # e.g. {'1': 4, '5': 2, '10': 1} for per-K overrides
   eval_steps: 1000
   draw: 1
   semantic_use_draws: true

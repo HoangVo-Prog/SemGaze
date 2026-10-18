@@ -6,7 +6,7 @@
     10
   ],
   "master_attempt_id": 7480,
-  "master_selected_score": 2.598123313760408,
+  "master_selected_score": 2.5981233137604076,
   "master_split_manifest": "data/split/COCO_Search18/split/master_split_manifest.json",
   "num_draws_per_k": 10,
   "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",

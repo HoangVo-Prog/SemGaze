@@ -216,5 +216,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-runs/*
-!runs/validation_throughput_audit.md
+reports/*

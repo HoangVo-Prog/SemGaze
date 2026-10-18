@@ -11,7 +11,7 @@
   "num_draws_per_k": 10,
   "protocol_version": "semgaze_air_coco_master_9010_subject_eval_v1",
   "source_file": "data/split/AiR/AiR.json",
-  "source_sha256": "50b6e7ea5daf5aaa95be54b9fd0d6bc5eafbfaac353378c990b77b5dff0f28ff",
+  "source_sha256": "354e1beca485a13831617f78b92b8c535c86c07259aad86de2038334fd172b86",
   "unseen_subject_ids": [
     "JY",
     "SC",
