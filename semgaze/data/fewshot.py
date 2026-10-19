@@ -189,3 +189,62 @@ def frozen_episode(query, train_by_id, manifest, k, *, draw_id=None, unseen_subj
             if entry.get('dataset') != 'AiR':
                 raise ValueError('AiR frozen trial dataset mismatch')
     return FlatEpisode(supports, query, draw_id=draw_id)
+
+
+_SEEN_TRAIN_CACHE = {}
+
+def evaluation_episode(query, train_by_id, manifest, k, *, draw_id, unseen_subjects=None):
+    """Frozen unseen protocol; deterministic subject-local seen evaluation protocol.
+
+    For seen subjects the source manifests do not persist resolved frozen support
+    record IDs. Use a SHA-256-seeded permutation of TRAIN images for each
+    (dataset,subject,K), taking disjoint K-sized blocks by draw_id. This is
+    deterministic and independent of query, training RNG, and hash randomization.
+    """
+    import hashlib
+    from collections import defaultdict
+    dataset = getattr(query, 'dataset', 'COCO-Search18')
+    unseen = set(manifest.get('unseen_subject_ids', UNSEEN_SUBJECTS))
+    if query.subject in unseen:
+        return frozen_episode(query, train_by_id, manifest, k, draw_id=draw_id,
+                              unseen_subjects=unseen_subjects)
+    seen = set(manifest.get('seen_subject_ids', ()))
+    if query.subject not in seen:
+        raise ValueError(f'evaluation query subject {query.subject!r} is neither seen nor unseen')
+    if type(k) is not int or k not in (1, 5, 10) or type(draw_id) is not int:
+        raise ValueError('seen evaluation requires K=1/5/10 and integer draw_id')
+    scoped = manifest.get('datasets', {}).get(dataset, manifest)
+    blocks = scoped['support_draws'].get(str(k), ())
+    if not 0 <= draw_id < len(blocks):
+        raise ValueError('seen evaluation draw is outside persisted draw count')
+    raw_image = (query.stimulus_id.removeprefix('AiR::') if dataset == 'AiR'
+                 else query.stimulus_id)
+    if raw_image not in scoped['test_stimulus_ids']:
+        raise ValueError('seen query must belong to held-out test images')
+    key = (id(train_by_id), dataset, query.subject, k)
+    cached = _SEEN_TRAIN_CACHE.get(key)
+    if cached is None or cached[0] is not train_by_id:
+        image_to_record = defaultdict(list)
+        for rec in train_by_id.values():
+            if rec.dataset == dataset and rec.subject == query.subject:
+                if rec.stimulus_id not in manifest['train_stimulus_ids']:
+                    raise ValueError('seen support is not in the training image pool')
+                image_to_record[rec.stimulus_id].append(rec)
+        image_keys = sorted(image_to_record)
+        seed_bytes = hashlib.sha256(
+            f'semgaze-seen-support-v1|{dataset}|{query.subject}|K={k}'.encode('utf-8')
+        ).digest()
+        rng = random.Random(int.from_bytes(seed_bytes, 'big'))
+        rng.shuffle(image_keys)
+        ordered = tuple(sorted(image_to_record[name], key=lambda r: r.record_id)[0]
+                        for name in image_keys)
+        cached = (train_by_id, ordered)
+        _SEEN_TRAIN_CACHE[key] = cached
+    ordered = cached[1]
+    if len(ordered) < (draw_id + 1) * k:
+        raise ValueError(f'not enough distinct seen-subject train images for K={k} draw={draw_id}')
+    supports = ordered[draw_id * k:(draw_id + 1) * k]
+    if len({r.stimulus_id for r in supports}) != k or any(
+            r.stimulus_id == query.stimulus_id for r in supports):
+        raise ValueError('seen support image leakage or duplicate')
+    return FlatEpisode(supports, query, draw_id=draw_id)

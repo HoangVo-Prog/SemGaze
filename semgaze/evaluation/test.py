@@ -8,7 +8,7 @@ import math
 import time
 import torch
 from torch.nn import functional as F
-from semgaze.data.fewshot import frozen_episode
+from semgaze.data.fewshot import evaluation_episode
 from semgaze.data.schema import UNSEEN_SUBJECTS
 from semgaze.where.forward import forward_where_batch
 from semgaze.semantic.flat.forward import forward_flat_batch
@@ -167,12 +167,17 @@ def evaluate_test_episode(bundle, episode):
         return _episode_losses(bundle, episode)
 
 
-def test_queries(train_by_id, test_records, manifest, unseen_subjects=None):
-    """Shared eligibility checks for final test queries."""
-    unseen_subjects = set(manifest.get('unseen_subject_ids', UNSEEN_SUBJECTS) if unseen_subjects is None else unseen_subjects)
-    queries = tuple(r for r in test_records if r.subject in unseen_subjects)
+def test_queries(train_by_id, test_records, manifest, unseen_subjects=None, *, scope="unseen"):
+    """Validate heldout queries for a single subject role without train-image leakage."""
+    if scope not in ("unseen", "seen"):
+        raise ValueError("test_queries requires seen or unseen; both runs separately")
+    if scope == "unseen":
+        allowed = set(manifest.get("unseen_subject_ids", UNSEEN_SUBJECTS) if unseen_subjects is None else unseen_subjects)
+    else:
+        allowed = set(manifest.get("seen_subject_ids", ()))
+    queries = tuple(r for r in test_records if r.subject in allowed)
     if not queries:
-        raise ValueError('test split has no unseen-subject queries')
+        raise ValueError(f"test split has no {scope}-subject queries")
     if len({r.record_id for r in queries}) != len(queries):
         raise ValueError('duplicate test query record')
     if any(r.record_id in train_by_id for r in queries) or (
@@ -188,7 +193,8 @@ def test_queries(train_by_id, test_records, manifest, unseen_subjects=None):
 def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_callback=None, profiler=None,
                         visual_cache=None, projected_r_cache=None, cycle_id=None):
     """Full unseen-subject test queries at each configured persisted draw for K."""
-    queries = test_queries(train_by_id, test_records, manifest)
+    queries = test_queries(train_by_id, test_records, manifest,
+                           scope=bundle.config['evaluation'].get('subject_scope', 'unseen'))
     k_values = bundle.config['evaluation']['k_values']
     settings = bundle.config['test']['loss']
     common_batch_size = bundle.config['evaluation'].get('batch_size')
@@ -243,7 +249,7 @@ def evaluate_test_epoch(bundle, train_by_id, test_records, manifest, *, episode_
                     interval = progress_interval(len(queries))
                     print(f'[EVAL][LOSS] K={k} ({k_position}/{len(k_values)}) | '
                           f'draw={draw + 1}/{draw_count} | starting | queries={len(queries)}', flush=True)
-                    episodes = [frozen_episode(q, train_by_id, manifest, k, draw_id=draw,
+                    episodes = [evaluation_episode(q, train_by_id, manifest, k, draw_id=draw,
                         unseen_subjects=manifest['unseen_subject_ids']) for q in queries]
                     probability_rows = []
                     for batch in schedule_batches(bundle, episodes, settings, cache=cache, profiler=profiler,

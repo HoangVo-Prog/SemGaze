@@ -8,7 +8,7 @@ from semgaze.evaluation.test import test_queries
 from semgaze.model.config import ROOT, load_config, resolve_config
 
 
-def load_queries(semgaze_config, *, data_overrides=None):
+def load_queries(semgaze_config, *, data_overrides=None, subject_scope="unseen"):
     """Return (eligible train queries, held-out queries, manifest identity, data config).
 
     Loads persisted records, not fabricated supportless FlatEpisode instances.
@@ -23,7 +23,10 @@ def load_queries(semgaze_config, *, data_overrides=None):
         ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
         duration_field=data['duration']['source_field'])
     train = [adapter(row) for row in raw['train']]
-    test = [adapter(row) for row in raw['test']]
+    if subject_scope not in ('seen', 'unseen'):
+        raise ValueError('baseline query scope must be seen or unseen')
+    source_split = 'test_seen' if subject_scope == 'seen' else 'test'
+    test = [adapter(row) for row in raw[source_split]]
     if len({r.record_id for r in train + test}) != len(train) + len(test):
         raise ValueError('duplicate query identity across persisted splits')
     if data['dataset'] == 'all':
@@ -33,7 +36,7 @@ def load_queries(semgaze_config, *, data_overrides=None):
     unseen = unseen_subject_ids(data, manifest)
     eligible = [r for r in train if r.subject not in unseen]
     heldout = list(test_queries({r.record_id: r for r in train}, test, manifest,
-                                unseen_subjects=unseen))
+                                unseen_subjects=unseen, scope=subject_scope))
     if not eligible:
         raise ValueError('empty seen-subject training population')
     return eligible, heldout, identity, data

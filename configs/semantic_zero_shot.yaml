@@ -6,6 +6,8 @@ precision: bf16
 device: cuda
 batch_size: 1
 max_new_tokens: 512
+evaluation:
+  subject_scope: unseen # unseen | seen | both
 metrics:
   bleu4: true
   rouge_l: true

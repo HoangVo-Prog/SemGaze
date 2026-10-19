@@ -4,7 +4,7 @@ from pathlib import Path
 import random
 import time
 import torch
-from semgaze.data.fewshot import frozen_episode
+from semgaze.data.fewshot import evaluation_episode
 from semgaze.evaluation.flat import evaluate_flat_episode, evaluate_flat_batch
 from semgaze.where.generation import generate_where_batch
 from semgaze.evaluation.batching import physical_size
@@ -168,7 +168,9 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
         raise ValueError('train predictions require the configured number of complete batches')
     if any(ep.query.subject in set(manifest['unseen_subject_ids']) for ep in train_batch):
         raise ValueError('unseen query in train prediction batch')
-    queries = test_queries(train_by_id, test_records, manifest) if settings['test_scope'] == 'all_unseen' else ()
+    queries = (test_queries(train_by_id, test_records, manifest,
+                            scope=bundle.config['evaluation'].get('subject_scope', 'unseen'))
+               if settings['test_scope'] == 'all_unseen' else ())
     where_enabled, semantic_enabled = settings['where'], settings['semantic']
     if not (where_enabled or semantic_enabled):
         raise ValueError('predict_epoch called with both prediction branches disabled')
@@ -180,6 +182,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
     train_path = 'both' if where_enabled and semantic_enabled else ('where' if where_enabled else 'semantic')
     tag = f'epoch-{epoch:04d}' if bundle.config['evaluation']['strategy'] == 'epoch' else f'step-{step:08d}'
     directory = Path(bundle.output_dir).resolve() / 'predictions' / tag
+    if bundle.config['evaluation'].get('_scope_subdir', False):
+        directory = directory / bundle.config['evaluation']['subject_scope']
     directory.mkdir(parents=True, exist_ok=True)
     paths, counts = {}, {}
     prediction_by_k = {}
@@ -277,7 +281,7 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                                 print(f"[EVAL][PRED] K={k} ({k_position}/{len(k_values)}) | "
                                       f"draw={draw + 1}/{draw_count} | "
                                       f"starting | queries={len(queries)}", flush=True)
-                                episodes = [frozen_episode(query, train_by_id, manifest, k, draw_id=draw,
+                                episodes = [evaluation_episode(query, train_by_id, manifest, k, draw_id=draw,
                                     unseen_subjects=manifest['unseen_subject_ids']) for query in queries]
                                 run_where = where_enabled and draw < where_draw_count
                                 run_semantic = semantic_enabled and draw < semantic_draw_count
@@ -375,7 +379,7 @@ def format_prediction_summary(entry):
     return (f"[EVAL][PRED] epoch {entry['epoch']} | step {entry['step']} | "
             f"autoregressive predictions complete: {enabled}\n"
             f"  train: {batches} {batch_word} ({entry['train_prediction_episodes']} queries) -> {paths['train']}\n"
-            f"  test: {entry['test_prediction_queries']} unseen queries x K={k_text} "
+            f"  test: {entry['test_prediction_queries']} {entry.get('subject_scope', 'unseen')} queries x K={k_text} "
             f"({entry['test_prediction_episodes']} episodes) -> {paths['test']}\n"
             f"  semantic test predictions: {entry.get('test_semantic_prediction_episodes', 0)} episodes\n"
             '  Records contain only the enabled prediction branches. '

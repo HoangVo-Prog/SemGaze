@@ -141,16 +141,19 @@ def read_joint_splits(root, manifest, config):
     coco_config = dict(config, dataset=COCO)
     coco_rows, coco_manifest, coco_identity = read_current_json_splits(root, manifest, coco_config)
     air_rows, air_manifest, air_path = _verify_air(root, manifest, config)
-    for split in ('train', 'test'):
+    for split in ('train', 'test', 'test_seen'):
         expected = manifest['record_counts'][split]
         if len(coco_rows[split]) + len(air_rows[split]) != expected:
             raise ValueError(f'{split}: joint loader dropped persisted records')
     raw = {
         split: sorted(coco_rows[split] + air_rows[split], key=lambda row: (row['dataset'], row['record_id']))
-        for split in ('train', 'test')
+        for split in ('train', 'test', 'test_seen')
     }
     subjects = set(coco_manifest['unseen_subject_ids']) | {
         qualified_subject(AIR, s) for s in air_manifest['unseen_subject_ids']
+    }
+    seen_subjects = set(coco_manifest['seen_subject_ids']) | {
+        qualified_subject(AIR, s) for s in air_manifest['seen_subject_ids']
     }
     train_images = set(coco_manifest['train_stimulus_ids']) | {
         qualified_stimulus(AIR, s) for s in air_manifest['train_stimulus_ids']
@@ -164,6 +167,7 @@ def read_joint_splits(root, manifest, config):
         'dataset': 'all', 'variant': 'all',
         'datasets': {AIR: air_manifest, COCO: coco_manifest},
         'unseen_subject_ids': sorted(subjects, key=str),
+        'seen_subject_ids': sorted(seen_subjects, key=str),
         'train_stimulus_ids': sorted(train_images),
         'test_stimulus_ids': sorted(test_images),
         'support_draws': coco_manifest['support_draws'],

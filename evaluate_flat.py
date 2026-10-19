@@ -20,7 +20,7 @@ from pathlib import Path
 
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
 from semgaze.data.joint import JointAdapter
-from semgaze.data.fewshot import frozen_episode
+from semgaze.data.fewshot import evaluation_episode
 from semgaze.model.checkpoint import load_checkpoint_bundle
 from semgaze.model.config import ROOT, load_config, resolve_config, resolve_output_dir, write_run_config
 from semgaze.model.visual_cache import InferenceVisualCache
@@ -82,7 +82,7 @@ def _validate_frozen_supports(train, queries, manifest, counts):
     for k, count in counts.items():
         for draw_id in range(count):
             for query in queries:
-                frozen_episode(query, train, manifest, int(k), draw_id=draw_id,
+                evaluation_episode(query, train, manifest, int(k), draw_id=draw_id,
                                unseen_subjects=manifest['unseen_subject_ids'])
 
 
@@ -131,7 +131,7 @@ def _generate_predictions(bundle, train, queries, manifest, identity, output_dir
                         run_semantic = enabled_semantic and draw_id < semantic_counts[str(k)]
                         path = 'both' if run_where and run_semantic else (
                             'where' if run_where else 'semantic')
-                        episodes = [frozen_episode(query, train, manifest, k, draw_id=draw_id,
+                        episodes = [evaluation_episode(query, train, manifest, k, draw_id=draw_id,
                                     unseen_subjects=manifest['unseen_subject_ids']) for query in queries]
                         key = f'K={k},draw={draw_id}'
                         rates = {'queries': 0}
@@ -233,7 +233,7 @@ def _evaluate_probability_metrics_only(bundle, train, queries, manifest, output_
                 for draw_id in range(draw_counts[str(k)]):
                     print(f'[EVAL][LL] K={k} draw={draw_id + 1}/{draw_counts[str(k)]} '
                           f'| COCO queries={len(coco_queries)} | starting', flush=True)
-                    episodes = [frozen_episode(q, train, manifest, k, draw_id=draw_id,
+                    episodes = [evaluation_episode(q, train, manifest, k, draw_id=draw_id,
                                 unseen_subjects=manifest['unseen_subject_ids']) for q in coco_queries]
                     rows = []
                     draw_completed = 0
@@ -294,6 +294,8 @@ def main():
     parser.add_argument('--output-dir', type=Path,
                         help='Fresh output directory (never write into the training checkpoint)')
     parser.add_argument('--split', choices=('test',), default='test')
+    parser.add_argument('--subject-scope', choices=('seen', 'unseen', 'both'),
+                        help='Override evaluation.subject_scope')
     parser.add_argument('--dry-run', action='store_true',
                         help='Check YAML, split and frozen supports without loading GPU weights')
     loss_options = parser.add_mutually_exclusive_group()
@@ -312,6 +314,8 @@ def main():
     checkpoint = args.checkpoint.expanduser().resolve()
     try:
         config = _load_evaluation_config(checkpoint, args.config)
+        if args.subject_scope:
+            config['evaluation']['subject_scope'] = args.subject_scope
         if args.where_support_prompt_style is not None:
             config['where']['support_prompt_style'] = args.where_support_prompt_style
         if args.path is not None:
@@ -356,14 +360,19 @@ def main():
     except (ValueError, KeyError, FileNotFoundError) as exc:
         parser.error(str(exc))
 
+    if config['evaluation']['subject_scope'] == 'both':
+        _run_both_scopes(args)
+        return
     data = config['data']
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
     adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
     adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                           duration_field=data['duration']['source_field'])
     train = {r['record_id']: adapter(r) for r in raw['train']}
-    tests = [adapter(r) for r in raw['test']]
-    queries = test_queries(train, tests, manifest)
+    scope = config['evaluation']['subject_scope']
+    source_split = 'test_seen' if scope == 'seen' else 'test'
+    tests = [adapter(r) for r in raw[source_split]]
+    queries = test_queries(train, tests, manifest, scope=scope)
     try:
         where_k_values, semantic_k_values, draw_counts, semantic_counts, active_counts = _prediction_plan(
             config, manifest, enabled_where=enabled_where,
@@ -375,7 +384,7 @@ def main():
     print(f'[EVAL] checkpoint={checkpoint} | queries={len(queries)} | '
           f'loss K={config["evaluation"]["k_values"]} | WHERE K={where_k_values} | semantic K={semantic_k_values} | draws={config["evaluation"]["draw"]} | '
           f'WHERE={enabled_where} | semantic={enabled_semantic} | '
-          f'compute_loss={compute_loss}', flush=True)
+          f'compute_loss={compute_loss} | subject_scope={scope}', flush=True)
     if args.dry_run:
         print('[EVAL] dry-run PASSED; no model loaded or files written', flush=True)
         return
@@ -388,6 +397,8 @@ def main():
         'config_override': str(args.config) if args.config else None,
         'checkpoint_model_and_data_authoritative': True,
         'split_manifest_identity': identity,
+        'subject_scope': scope,
+        'source_split_json': str(ROOT / data['split_root'] / f'{source_split}.json'),
         'prediction_branches': {'where': enabled_where, 'semantic': enabled_semantic},
         'compute_loss': compute_loss,
         'k_values': config['evaluation']['k_values'], # teacher-forced losses
@@ -449,6 +460,44 @@ def main():
     }, indent=2, allow_nan=False), encoding='utf-8')
     print(f'[EVAL] complete | results={output_dir}', flush=True)
 
+
+
+def _run_both_scopes(args):
+    """Keep metrics for seen/unseen independent; never pool their scores."""
+    import subprocess
+    import sys
+    import json
+    if args.output_dir is None:
+        raise ValueError('evaluation.subject_scope=both requires --output-dir')
+    destination = args.output_dir.expanduser().resolve()
+    if destination.exists() and any(destination.iterdir()):
+        raise ValueError('choose a new empty output directory for both')
+    destination.mkdir(parents=True, exist_ok=True)
+    for scope in ('unseen', 'seen'):
+        cmd = [sys.executable, str(Path(__file__).resolve()), '--checkpoint',
+               str(args.checkpoint), '--output-dir', str(destination / scope),
+               '--subject-scope', scope]
+        if args.config is not None:
+            cmd += ['--config', str(args.config)]
+        if args.path is not None:
+            cmd += ['--path', args.path]
+        if args.semantic_max_new_tokens is not None:
+            cmd += ['--semantic-max-new-tokens', str(args.semantic_max_new_tokens)]
+        if args.where_support_prompt_style is not None:
+            cmd += ['--where-support-prompt-style', args.where_support_prompt_style]
+        if args.dry_run:
+            cmd += ['--dry-run']
+        if args.loss_override is not None:
+            cmd += ['--compute-loss' if args.loss_override else '--skip-loss']
+        subprocess.run(cmd, check=True)
+    if not args.dry_run:
+        (destination / 'evaluation_summary.json').write_text(json.dumps({
+            'subject_scope': 'both',
+            'by_subject_scope': {
+                scope: str(destination / scope / 'evaluation_summary.json')
+                for scope in ('unseen', 'seen')},
+            'note': 'Distinct subject populations; metrics are NOT pooled',
+        }, indent=2), encoding='utf-8')
 
 def _has_no_explicit_output_dir(path):
     """Check the user's override rather than inherited checkpoint runtime."""

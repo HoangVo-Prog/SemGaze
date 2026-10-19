@@ -149,6 +149,8 @@ def validate_config(config):
     if config['where']['supervision']['use_cache'] and config['training']['gradient_checkpointing']:
         raise ValueError('HF gradient checkpointing disables KV caching; choose use_cache=false or disable gradient_checkpointing')
     model, t, evaluation = config['model'], config['training'], config['evaluation']
+    if evaluation.get('subject_scope', 'unseen') not in ('seen', 'unseen', 'both'):
+        raise ValueError('evaluation.subject_scope supports seen, unseen or both')
     loading = config['checkpoint_loading']
     if any(loading[key] is not None and (not isinstance(loading[key], str) or not loading[key].strip())
            for key in ('resume_from', 'init_from')):

@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
                         help='Inferred from saved checkpoint metadata by default')
     parser.add_argument('--images-root')
     parser.add_argument('--split-root')
+    parser.add_argument('--subject-scope', choices=('seen', 'unseen', 'both'),
+                        help='Override evaluation.subject_scope in the baseline config')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--max-new-tokens', type=int)
     parser.add_argument('--precision', choices=('bf16', 'fp32'))
@@ -89,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
             command.extend(['--' + name.replace('_', '-'), str(value)])
     if args.resume:
         command.append('--resume')
+    if args.subject_scope is not None:
+        command.extend(['--subject-scope', args.subject_scope])
 
     # The canonical evaluator enforces exact split identity before loading 8B
     # weights. Do not silently bypass this check for changed data manifests.

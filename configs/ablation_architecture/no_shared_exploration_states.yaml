@@ -161,6 +161,7 @@ training:
     detach_r: false
 
 evaluation:
+  subject_scope: unseen # unseen | seen | both; test.json / test_seen.json
   strategy: last # epoch | steps | no
   eval_epoch: 1 # with strategy: epoch, evaluate after each N completed epochs
   batch_size: 4 # common fallback if K is not present in batch_size_by_k

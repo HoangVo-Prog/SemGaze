@@ -215,4 +215,4 @@ def read_current_json_splits(root: Path, manifest: dict, data_config: dict | Non
     provenance = [root / 'split_manifest.json', source_manifest_path]
     provenance += [root / f'{split}.json' for split in SPLITS]
     identity = hashlib.sha256(''.join(_sha256(p) for p in provenance).encode()).hexdigest()
-    return {k: rows_by_split[k] for k in ('train', 'test')}, runtime_manifest, identity
+    return {k: rows_by_split[k] for k in SPLITS}, runtime_manifest, identity

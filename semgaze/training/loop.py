@@ -73,7 +73,7 @@ def resolve_epoch_schedule(config, query_count):
 def format_epoch_summary(entry):
     losses = ' | '.join(f'{key}={entry[key]:.6f}' for key in EVAL_KEYS)
     return (f"[EVAL][LOSS] Epoch {entry['epoch']} | step {entry['step']} | test: "
-            f"{entry['test_queries']} unseen queries x K={entry.get('k_values', [])} ({entry['test_episodes']} episodes)\n"
+            f"{entry['test_queries']} {entry.get('subject_scope', 'unseen')} queries x K={entry.get('k_values', [])} ({entry['test_episodes']} episodes)\n"
             f"  response NLL (episode mean): {losses}\n"
             f"  complete traversals: {entry.get('test_loss_traversals', '?')}\n")
 
@@ -238,56 +238,65 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 projected = ProjectedWhereCache(bundle=bundle,
                     split_manifest_identity=split_manifest_identity,
                     cycle_id=(sampler.epoch, step + 1)) if has_predictions else None
+                configured_scope = evaluation.get('subject_scope', 'unseen')
+                selected_scopes = ('unseen', 'seen') if configured_scope == 'both' else (configured_scope,)
                 try:
-                    eval_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected,
-                                       cycle_id=(sampler.epoch, step + 1))
-                    eval_signature = inspect.signature(evaluate_test_epoch)
-                    if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in eval_signature.parameters.values()):
-                        eval_kwargs = {k: v for k, v in eval_kwargs.items() if k in eval_signature.parameters}
-                    summary = {'event': 'epoch_test', 'step': step + 1,
-                               'epoch': sampler.epoch,
-                               **evaluate_test_epoch(bundle, train_by_id, test_records, manifest, **eval_kwargs)}
-                    if not has_predictions:
-                        summary['evaluation_time_sec'] = time.perf_counter() - evaluation_started
-                    bundle.trainer_history.append(summary)
-                    stream.write(json.dumps(summary, allow_nan=False) + '\n')
-                    stream.flush()
-                    print(format_epoch_summary(summary), flush=True)
-                    if has_predictions:
-                        prediction_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected)
-                        prediction_signature = inspect.signature(predict_epoch)
-                        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in prediction_signature.parameters.values()):
-                            prediction_kwargs = {k: v for k, v in prediction_kwargs.items() if k in prediction_signature.parameters}
-                        predictions = predict_epoch(bundle, recent_episodes, train_by_id, test_records,
-                            manifest, epoch=summary['epoch'], step=step + 1,
-                            split_manifest_identity=split_manifest_identity,
-                            **prediction_kwargs)
-                        predictions['evaluation_time_sec'] = time.perf_counter() - evaluation_started
-                        bundle.trainer_history.append(predictions)
-                        stream.write(json.dumps(predictions, allow_nan=False) + '\n')
+                    for active_scope in selected_scopes:
+                        evaluation['subject_scope'] = active_scope
+                        evaluation['_scope_subdir'] = configured_scope == 'both'
+                        eval_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected,
+                                           cycle_id=(sampler.epoch, step + 1))
+                        eval_signature = inspect.signature(evaluate_test_epoch)
+                        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in eval_signature.parameters.values()):
+                            eval_kwargs = {k: v for k, v in eval_kwargs.items() if k in eval_signature.parameters}
+                        summary = {'event': 'epoch_test', 'step': step + 1,
+                                   'epoch': sampler.epoch,
+                                   'subject_scope': active_scope,
+                                   **evaluate_test_epoch(bundle, train_by_id, test_records, manifest, **eval_kwargs)}
+                        if not has_predictions:
+                            summary['evaluation_time_sec'] = time.perf_counter() - evaluation_started
+                        bundle.trainer_history.append(summary)
+                        stream.write(json.dumps(summary, allow_nan=False) + '\n')
                         stream.flush()
-                        print(format_prediction_summary(predictions), flush=True)
-                        if predictions.get('metrics_artifact'):
-                            metrics_config = evaluation['metrics']
-                            names = []
-                            where_cfg = metrics_config.get('where', {})
-                            semantic_cfg = metrics_config.get('semantic', {})
-                            if settings['where'] and any(where_cfg.get(n) for n in ('scanmatch', 'multimatch', 'sed')):
-                                names.append('[EVAL][METRIC][WHERE]')
-                            if settings['semantic'] and (semantic_cfg.get('bertscore', {}).get('enabled') or
-                                                         semantic_cfg.get('cider_r', {}).get('enabled')):
-                                names.append('[EVAL][METRIC][SEM]')
-                            if names:
-                                metric_event = {'event': 'epoch_metrics', 'step': step + 1,
-                                                'epoch': summary['epoch'], 'split': 'test',
-                                                'metrics_file': predictions['metrics_artifact'].get('metrics_path'),
-                                                'metric_namespaces': names}
-                                bundle.trainer_history.append(metric_event)
-                                stream.write(json.dumps(metric_event, allow_nan=False) + '\n')
-                                stream.flush()
-                                for name in names:
-                                    print(f'{name} frozen metrics complete', flush=True)
+                        print(format_epoch_summary(summary), flush=True)
+                        if has_predictions:
+                            prediction_kwargs = dict(visual_cache=shared_visual, projected_r_cache=projected)
+                            prediction_signature = inspect.signature(predict_epoch)
+                            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in prediction_signature.parameters.values()):
+                                prediction_kwargs = {k: v for k, v in prediction_kwargs.items() if k in prediction_signature.parameters}
+                            predictions = predict_epoch(bundle, recent_episodes, train_by_id, test_records,
+                                manifest, epoch=summary['epoch'], step=step + 1,
+                                split_manifest_identity=split_manifest_identity,
+                                **prediction_kwargs)
+                            predictions['subject_scope'] = active_scope
+                            predictions['evaluation_time_sec'] = time.perf_counter() - evaluation_started
+                            bundle.trainer_history.append(predictions)
+                            stream.write(json.dumps(predictions, allow_nan=False) + '\n')
+                            stream.flush()
+                            print(format_prediction_summary(predictions), flush=True)
+                            if predictions.get('metrics_artifact'):
+                                metrics_config = evaluation['metrics']
+                                names = []
+                                where_cfg = metrics_config.get('where', {})
+                                semantic_cfg = metrics_config.get('semantic', {})
+                                if settings['where'] and any(where_cfg.get(n) for n in ('scanmatch', 'multimatch', 'sed')):
+                                    names.append('[EVAL][METRIC][WHERE]')
+                                if settings['semantic'] and (semantic_cfg.get('bertscore', {}).get('enabled') or
+                                                             semantic_cfg.get('cider_r', {}).get('enabled')):
+                                    names.append('[EVAL][METRIC][SEM]')
+                                if names:
+                                    metric_event = {'event': 'epoch_metrics', 'step': step + 1,
+                                                    'epoch': summary['epoch'], 'split': 'test',
+                                                    'metrics_file': predictions['metrics_artifact'].get('metrics_path'),
+                                                    'metric_namespaces': names}
+                                    bundle.trainer_history.append(metric_event)
+                                    stream.write(json.dumps(metric_event, allow_nan=False) + '\n')
+                                    stream.flush()
+                                    for name in names:
+                                        print(f'{name} frozen metrics complete', flush=True)
                 finally:
+                    evaluation['subject_scope'] = configured_scope
+                    evaluation.pop('_scope_subdir', None)
                     if projected is not None:
                         projected.close()
                     if shared_visual is not None:

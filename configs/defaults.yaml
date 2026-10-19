@@ -168,6 +168,7 @@ training:
     detach_r: false
 
 evaluation:
+  subject_scope: unseen # unseen | seen | both; test.json / test_seen.json
   strategy: epoch # epoch | steps | last | no
   # last: evaluate only when the final training update completes an epoch.
   # If --max-steps stops mid-epoch, no last evaluation runs.

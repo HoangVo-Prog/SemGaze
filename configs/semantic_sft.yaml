@@ -12,6 +12,8 @@ seed: 42
 save_every: 100
 gradient_checkpointing: true
 max_new_tokens: 512
+evaluation:
+  subject_scope: unseen # unseen | seen | both
 metrics:
   bleu4: true
   rouge_l: true

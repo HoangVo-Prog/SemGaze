@@ -20,6 +20,8 @@ def main():
     p.add_argument('--checkpoint', type=Path, help='LoRA adapter directory from semantic-only SFT')
     p.add_argument('--images-root')
     p.add_argument('--split-root')
+    p.add_argument('--subject-scope', choices=('seen', 'unseen', 'both'),
+                   help='Override config evaluation.subject_scope')
     p.add_argument('--batch-size', type=int)
     p.add_argument('--max-new-tokens', type=int)
     p.add_argument('--device')
@@ -27,6 +29,12 @@ def main():
     p.add_argument('--resume', action='store_true')
     args = p.parse_args()
     cfg = yaml.safe_load(args.config.read_text(encoding='utf-8'))
+    scope = args.subject_scope or cfg.get('evaluation', {}).get('subject_scope', 'unseen')
+    if scope not in ('seen', 'unseen', 'both'):
+        p.error('evaluation.subject_scope must be seen, unseen or both')
+    if scope == 'both':
+        _run_both_baseline_scopes(args)
+        return
     method = args.method or cfg.get('method', 'semantic_zero_shot')
     style = args.prompt_style or cfg.get('prompt_style', 'origin')
     if (method == 'semantic_sft') != (args.checkpoint is not None):
@@ -37,7 +45,8 @@ def main():
         overrides['images_root'] = args.images_root
     if args.split_root:
         overrides['split_root'] = args.split_root
-    _, queries, identity, data = load_queries(source, data_overrides=overrides)
+    _, queries, identity, data = load_queries(source, data_overrides=overrides,
+                                               subject_scope=scope)
     precision = args.precision or cfg.get('precision', 'bf16')
     device = args.device or cfg.get('device', 'cuda')
     ckpt = None
@@ -53,6 +62,9 @@ def main():
     resolved = {'method': method, 'prompt_style': style, 'model_id': BASE_MODEL,
                 'checkpoint': str(args.checkpoint) if args.checkpoint else None,
                 'split_manifest_identity': identity, 'data': data,
+                'subject_scope': scope,
+                'source_split_json': str(ROOT / data['split_root'] /
+                                         ('test_seen.json' if scope == 'seen' else 'test.json')),
                 'precision': precision, 'device': device, 'metrics': cfg.get('metrics', {})}
     old = output / 'resolved_config.json'
     if args.resume and old.exists():
@@ -80,6 +92,39 @@ def main():
         'query_count': len(queries), 'decode': 'greedy', 'max_new_tokens': budget,
         'reference_type': 'identical held-out normalized GT WHAT/WHY/HOW'})
     print('Baseline evaluation complete:', output, '| queries=', len(rows))
+
+
+def _run_both_baseline_scopes(args):
+    """Evaluate both subject groups into disjoint output directories."""
+    import json
+    import subprocess
+    import sys
+    dest = args.output_dir.expanduser().resolve()
+    if dest.exists() and any(dest.iterdir()):
+        raise ValueError('both baseline evaluation requires an empty output directory')
+    dest.mkdir(parents=True, exist_ok=True)
+    for role in ('unseen', 'seen'):
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               '--config', str(args.config), '--output-dir', str(dest / role),
+               '--subject-scope', role]
+        for argname, value in (
+            ('--semgaze-config', args.semgaze_config),
+            ('--method', args.method), ('--prompt-style', args.prompt_style),
+            ('--checkpoint', args.checkpoint), ('--images-root', args.images_root),
+            ('--split-root', args.split_root), ('--batch-size', args.batch_size),
+            ('--max-new-tokens', args.max_new_tokens), ('--device', args.device),
+            ('--precision', args.precision)):
+            if value is not None:
+                cmd.extend([argname, str(value)])
+        if args.resume:
+            cmd.append('--resume')
+        subprocess.run(cmd, check=True)
+    (dest / 'evaluation_provenance.json').write_text(json.dumps({
+        'subject_scope': 'both', 'sources': {
+            role: str(dest / role / 'evaluation_provenance.json')
+            for role in ('unseen', 'seen')},
+        'note': 'separate metrics for distinct heldout subjects',
+    }, indent=2), encoding='utf-8')
 
 
 if __name__ == '__main__':

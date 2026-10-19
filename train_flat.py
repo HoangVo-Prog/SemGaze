@@ -65,7 +65,11 @@ def main():
     adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                           duration_field=data['duration']['source_field'])
     records = [adapter(r) for r in raw['train']]
-    test_records = [adapter(r) for r in raw['test']]
+    eval_subject_scope = config['evaluation'].get('subject_scope', 'unseen')
+    test_rows = (raw['test'] if eval_subject_scope == 'unseen'
+                 else raw['test_seen'] if eval_subject_scope == 'seen'
+                 else raw['test'] + raw['test_seen'])
+    test_records = [adapter(r) for r in test_rows]
     from collections import Counter
     from semgaze.data.joint import unseen_subject_ids
     counts_train = Counter(r.dataset for r in records)
