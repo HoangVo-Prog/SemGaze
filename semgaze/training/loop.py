@@ -225,6 +225,17 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                                 sampler.epoch % evaluation['eval_epoch'] == 0) or
                                (evaluation['strategy'] == 'steps' and
                                 global_step % evaluation['eval_steps'] == 0))
+            # Persist the completed optimizer state before potentially long or
+            # failing evaluation. A zero/None save_every disables only interval
+            # saves; epoch-end and final saves remain independent.
+            if ((epoch_end and checkpoint['save_at_epoch_end']) or
+                    (save_every is not None and save_every > 0 and (step + 1) % save_every == 0) or
+                    (step + 1 == max_steps and checkpoint['save_at_end'])):
+                checkpoint_path = output / f'checkpoint-{step + 1}'
+                print(f'[CHECKPOINT] saving {checkpoint_path} before evaluation', flush=True)
+                save_checkpoint(bundle, checkpoint_path,
+                    split_manifest_identity=split_manifest_identity, step=step + 1, sampler=sampler)
+                print(f'[CHECKPOINT] saved {checkpoint_path}', flush=True)
             if should_evaluate:
                 evaluation_started = time.perf_counter()
                 print(f"[EVAL] starting epoch {sampler.epoch} evaluation", flush=True)
@@ -303,10 +314,3 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                     if shared_visual is not None:
                         shared_visual.close()
                 print('[EVAL] complete', flush=True)
-            # Save after test and generation. A zero/None save_every disables
-            # only interval saves; epoch-end and final saves are independent.
-            if ((epoch_end and checkpoint['save_at_epoch_end']) or
-                    (save_every is not None and save_every > 0 and (step + 1) % save_every == 0) or
-                    (step + 1 == max_steps and checkpoint['save_at_end'])):
-                save_checkpoint(bundle, output / f'checkpoint-{step + 1}',
-                    split_manifest_identity=split_manifest_identity, step=step + 1, sampler=sampler)

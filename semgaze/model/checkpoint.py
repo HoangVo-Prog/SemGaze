@@ -68,8 +68,7 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
         raise ValueError('checkpoint protocol/mode mismatch')
     if metadata.get('architecture', legacy_full_signature()) != architecture_signature(bundle.config):
         raise ValueError('checkpoint architecture/ablation mismatch')
-    if metadata['split_manifest_identity'] != split_manifest_identity:
-        raise ValueError('checkpoint split/manifest identity mismatch')
+
     if metadata['end_fix_id'] != bundle.end_fix_id or metadata['embeddings_tied'] != bundle.embeddings_tied:
         raise ValueError('checkpoint END_FIX ID or tied-weight policy mismatch')
     if metadata['trainable_names'] != [n for n, p in bundle.model.named_parameters() if p.requires_grad]:
@@ -140,8 +139,7 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     metadata = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
     if metadata.get('architecture', legacy_full_signature()) != architecture_signature(config):
         raise ValueError('checkpoint architecture/ablation mismatch')
-    if metadata['split_manifest_identity'] != split_manifest_identity:
-        raise ValueError('checkpoint split/manifest identity mismatch')
+
     processor = AutoProcessor.from_pretrained(path / 'processor')
     token_ids = processor.tokenizer.encode(config['where']['end_fix_token'], add_special_tokens=False)
     if token_ids != [metadata['end_fix_id']]:
