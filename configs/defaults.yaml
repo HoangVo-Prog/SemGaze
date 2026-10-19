@@ -186,7 +186,6 @@ evaluation:
     where_k_values: null # null => evaluation.k_values; WHERE/scanpath prediction only
     semantic_k_values: null # null => evaluation.k_values; semantic prediction only
     train_batches: 1
-    test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
     semantic_max_new_tokens: null
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.

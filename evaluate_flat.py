@@ -332,8 +332,8 @@ def main():
             compute_loss = args.loss_override
         config['evaluation']['compute_loss'] = compute_loss
         predictions = resolve_prediction_settings(config)
-        enabled_where = predictions['where'] and predictions['test_scope'] == 'all_unseen'
-        enabled_semantic = predictions['semantic'] and predictions['test_scope'] == 'all_unseen'
+        enabled_where = predictions['where']
+        enabled_semantic = predictions['semantic']
         budget = predictions['semantic_max_new_tokens']
         if not compute_loss and not (enabled_where or enabled_semantic):
             raise ValueError('loss is disabled and no test prediction branch is enabled; '

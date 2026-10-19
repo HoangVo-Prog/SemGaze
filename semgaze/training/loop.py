@@ -228,8 +228,9 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             if should_evaluate:
                 evaluation_started = time.perf_counter()
                 print(f"[EVAL] starting epoch {sampler.epoch} evaluation", flush=True)
-                has_predictions = prediction_active and (
-                    settings['train_batches'] > 0 or settings['test_scope'] != 'none')
+                # WHERE/semantic branch toggles control held-out prediction.
+                # train_batches=0 disables only training preview predictions.
+                has_predictions = prediction_active
                 cache_settings = bundle.config['test']['cache']
                 shared_visual = InferenceVisualCache(
                     preprocessing=cache_settings['support_preprocessing'],

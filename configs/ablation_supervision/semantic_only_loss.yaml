@@ -142,7 +142,6 @@ evaluation:
     where_k_values: [1, 5, 10] # WHERE/scanpath K
     semantic_k_values: [1] # GT-WHERE semantic K
     train_batches: 1
-    test_scope: all_unseen
     semantic_max_new_tokens: 512
   metrics:
     enabled: true

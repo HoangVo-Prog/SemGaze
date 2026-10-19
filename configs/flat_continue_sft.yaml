@@ -173,7 +173,6 @@ evaluation:
     where: true # autoregressive WHERE predictions and their scanpath metrics
     semantic: true # autoregressive semantic predictions and their metrics
     train_batches: 1
-    test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
     semantic_max_new_tokens: 512
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.

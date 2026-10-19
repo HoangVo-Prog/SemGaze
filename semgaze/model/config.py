@@ -33,6 +33,12 @@ def resolve_config(config, overrides=None):
     result = _merge(defaults, config)
     if overrides:
         result = _merge(result, overrides)
+    # Old checkpoint/resolved-config compatibility only: this obsolete selector
+    # is removed from every resolved config before the evaluator uses it.
+    legacy_scope = result['evaluation']['predictions'].pop('test_scope', None)
+    if legacy_scope not in (None, 'all_unseen'):
+        raise ValueError('legacy test_scope=none has train-only prediction semantics; '
+                         'remove it and configure where/semantic explicitly')
     # Keep older run/config files backward-compatible even if they predate the
     # explicit semantic draw switch.
     result['evaluation'].setdefault('semantic_use_draws', True)
@@ -158,7 +164,7 @@ def validate_config(config):
     if loading['resume_from'] is not None and loading['init_from'] is not None:
         raise ValueError('choose only checkpoint_loading.resume_from or init_from')
     if 'validation' in config or 'validation_scope' in evaluation['predictions']:
-        raise ValueError('obsolete validation configuration; use test/test_scope')
+        raise ValueError('obsolete validation configuration; use evaluation.subject_scope')
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
         raise ValueError('use num_train_epochs; optimizer updates are derived from Q_train')
 
@@ -317,8 +323,6 @@ def validate_config(config):
             raise ValueError(f'evaluation.predictions.{branch} must be boolean')
     positive_int(predictions['train_batches'], 'evaluation.predictions.train_batches', minimum=0)
     positive_int(predictions['semantic_max_new_tokens'], 'semantic_max_new_tokens', allow_none=True)
-    if predictions['test_scope'] not in ('all_unseen', 'none'):
-        raise ValueError('test_scope supports all_unseen or none')
     positive_int(config['checkpoint']['save_every'], 'checkpoint.save_every', allow_none=True, minimum=0)
     positive_int(config['logging']['every_steps'], 'logging.every_steps')
     subjects = config['data']['unseen_subjects']

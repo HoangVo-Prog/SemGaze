@@ -30,16 +30,14 @@ from semgaze.evaluation.records import (assert_key_sets_equal, implementation_he
 def resolve_prediction_settings(config, semantic_max_new_tokens=None):
     settings = config.setdefault('evaluation', {}).setdefault('predictions', {})
     settings.setdefault('train_batches', 1)
-    settings.setdefault('test_scope', 'all_unseen')
     settings.setdefault('where', True)
     settings.setdefault('semantic', True)
     for branch in ('where', 'semantic'):
         if type(settings[branch]) is not bool:
             raise ValueError(f'evaluation.predictions.{branch} must be boolean')
-    if type(settings['train_batches']) is not int or settings['train_batches'] < 0 or settings['test_scope'] not in ('all_unseen', 'none'):
-        raise ValueError('predictions require nonnegative train_batches and test_scope all_unseen or none')
-    if (not settings['where'] and not settings['semantic']) or (
-            not settings['train_batches'] and settings['test_scope'] == 'none'):
+    if type(settings['train_batches']) is not int or settings['train_batches'] < 0:
+        raise ValueError('evaluation.predictions.train_batches must be a nonnegative integer')
+    if not settings['where'] and not settings['semantic']:
         return settings
     if not settings['semantic']:
         # WHERE-only generation needs no semantic token budget.
@@ -156,7 +154,7 @@ def prediction_batches(bundle, episodes, *, budget, cache, path='both', projecte
 
 def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
                   epoch, step, split_manifest_identity, visual_cache=None, projected_r_cache=None):
-    """Exactly one supplied train batch; every unseen test query at every K.
+    """Exactly one supplied train batch; every selected held-out query at every K.
 
     Episodes use same-K physical batches and retain full multi-image
     contexts. No training sampler is consumed. Partial files remain identifiable
@@ -168,9 +166,8 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
         raise ValueError('train predictions require the configured number of complete batches')
     if any(ep.query.subject in set(manifest['unseen_subject_ids']) for ep in train_batch):
         raise ValueError('unseen query in train prediction batch')
-    queries = (test_queries(train_by_id, test_records, manifest,
-                            scope=bundle.config['evaluation'].get('subject_scope', 'unseen'))
-               if settings['test_scope'] == 'all_unseen' else ())
+    queries = test_queries(train_by_id, test_records, manifest,
+                           scope=bundle.config['evaluation'].get('subject_scope', 'unseen'))
     where_enabled, semantic_enabled = settings['where'], settings['semantic']
     if not (where_enabled or semantic_enabled):
         raise ValueError('predict_epoch called with both prediction branches disabled')
@@ -199,8 +196,6 @@ def predict_epoch(bundle, train_batch, train_by_id, test_records, manifest, *,
               f"K={list(k_values)} | WHERE draws={where_draw_label} | "
               f"semantic draws={semantic_draw_label} | total_episodes={total} | "
               f"semantic_episodes={semantic_total}", flush=True)
-    else:
-        print('[EVAL][PRED] test predictions disabled', flush=True)
     cache_settings = bundle.config['test']['cache']
     owns_cache = visual_cache is None
     cache = InferenceVisualCache(preprocessing=cache_settings['support_preprocessing'],

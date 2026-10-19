@@ -177,7 +177,6 @@ evaluation:
     where_k_values: [1, 5, 10] # WHERE/scanpath K
     semantic_k_values: [1] # GT-WHERE semantic K
     train_batches: 1
-    test_scope: all_unseen
     # Required run choice (or --semantic-max-new-tokens); no canonical default.
     semantic_max_new_tokens: 512
   # WHAT/WHY/HOW are diagnostic slices of the same teacher-forced flat NLL.
