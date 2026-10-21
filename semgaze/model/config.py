@@ -285,10 +285,12 @@ def validate_config(config):
         raise ValueError('metrics.probability.outcome must explicitly select Outcome A or B')
     if probability_metrics.get('log_z', 0.0) != 0.0:
         raise ValueError('metrics.probability.log_z is a fixed no-op and must be 0.0')
-    for metric_name in ('bleu4', 'rouge_l', 'meteor'):
+    for metric_name in ('bleu1', 'bleu4', 'rouge_l', 'meteor'):
         options = semantic_metrics.get(metric_name, {})
         if not isinstance(options, dict) or type(options.get('enabled', False)) is not bool:
             raise ValueError(f'metrics.semantic.{metric_name}.enabled must be bool')
+    if type(semantic_metrics.get('report_per_branch', False)) is not bool:
+        raise ValueError('metrics.semantic.report_per_branch must be bool')
     meteor_options = semantic_metrics.get('meteor', {})
     if meteor_options.get('enabled'):
         if meteor_options.get('jar_path') is not None and not isinstance(meteor_options['jar_path'], str):

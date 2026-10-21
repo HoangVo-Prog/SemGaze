@@ -117,13 +117,13 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     dump_json(out / 'comparison_metrics.json', metrics)
     fields = ['method', 'subset', 'query_count', 'parse_failure_count',
-              *(f'{branch}_{name}' for branch in ('what', 'why', 'how')
-                for name in ('bleu4', 'meteor', 'rouge_l', 'cider_r', 'bertscore_f1'))]
+              *(f'{branch}_{name}' for branch in ('overall',)
+                for name in ('bleu1', 'bleu4', 'meteor', 'rouge_l', 'cider_r', 'bertscore_f1'))]
     with (out / 'comparison_table.csv').open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for name, partitions in metrics.items():
-            for subset in SUBSETS:
+            for subset in (*SUBSETS, 'Overall'):
                 if subset not in partitions:
                     continue
                 item = partitions[subset]
@@ -131,8 +131,8 @@ def main():
                 values = {'method': name, 'subset': subset,
                           'query_count': item['query_count'],
                           'parse_failure_count': raw['semantic_parse_failure_count']}
-                for branch in ('what', 'why', 'how'):
-                    for metric in ('bleu4', 'meteor', 'rouge_l', 'cider_r', 'bertscore_f1'):
+                for branch in ('overall',):
+                    for metric in ('bleu1', 'bleu4', 'meteor', 'rouge_l', 'cider_r', 'bertscore_f1'):
                         values[f'{branch}_{metric}'] = raw.get(f'eval_sem_{branch}_{metric}')
                 writer.writerow(values)
     dump_json(out / 'comparison_protocol.json', {

@@ -97,7 +97,9 @@ class Scorers:
     def __init__(self, config):
         self.options = config
         self.bertscorer = self.cider = self.meteor = None
-        self.provenance = {'bleu4': 'SemGaze corpus BLEU-4', 'rouge_l': 'SemGaze ROUGE-L'}
+        self.provenance = {'bleu1': 'SemGaze corpus BLEU-1', 'bleu4': 'SemGaze corpus BLEU-4',
+                           'rouge_l': 'SemGaze ROUGE-L',
+                           'scoring_unit': 'complete_WHAT_WHY_HOW_query'}
         if config.get('bertscore', False):
             self.bertscorer, self.provenance['bertscore'] = build_bertscorer()
         if config.get('cider_r', True):
@@ -118,6 +120,7 @@ class Scorers:
         references = {(q.record_id, 0, 0): q.semantic for q in queries}
         return score_prediction_semantics(
             canonical, references, bertscorer=self.bertscorer, cider_r=self.cider,
+            bleu1=self.options.get('bleu1', self.options.get('bleu4', True)),
             bleu4=self.options.get('bleu4', True),
             rouge_l=self.options.get('rouge_l', True), meteor=self.meteor,
             batch_size=int(self.options.get('bertscore_batch_size', 64)))
@@ -131,9 +134,9 @@ def evaluate_rows(rows, queries, scorers):
     """Never combine AiR and COCO into an unmarked headline scalar."""
     by_id = {r['query_id']: r for r in rows}
     result = {}
-    for subset in (*SUBSETS, 'COCO-Search18', 'AiR'):
-        chosen = [q for q in queries if (subset_name(q) == subset if subset in SUBSETS
-                                         else q.dataset == subset)]
+    for subset in (*SUBSETS, 'Overall', 'COCO-Search18', 'AiR'):
+        chosen = [q for q in queries if (subset == 'Overall' or
+            (subset_name(q) == subset if subset in SUBSETS else q.dataset == subset))]
         if chosen:
             result[subset] = {'query_count': len(chosen),
                               'metrics': scorers.score([by_id[q.record_id] for q in chosen], chosen)}
@@ -149,7 +152,7 @@ def scoring_report(rows, queries, scorer_opts, output_dir, *, method):
     scorers = Scorers(scorer_opts)
     try:
         result = evaluate_rows(rows, queries, scorers)
-        dump_json(output_dir / 'metrics_by_subset.json', {k: v for k, v in result.items() if k in SUBSETS})
+        dump_json(output_dir / 'metrics_by_subset.json', {k: v for k, v in result.items() if k in (*SUBSETS, 'Overall')})
         dump_json(output_dir / 'metrics.json', {k: v for k, v in result.items() if k not in SUBSETS})
         dump_json(output_dir / 'validity_summary.json', {
             'method': method, 'total_queries': len(rows),

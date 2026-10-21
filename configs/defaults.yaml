@@ -237,7 +237,10 @@ evaluation:
         n: 4
         k_r: 0.8
         tokenizer: stanford_ptb_reference
-      # LLada-style COCO corpus BLEU-4; references are per WHAT/WHY/HOW unit.
+      # Full structured WHAT+WHY+HOW text is scored as one query document.
+      # Optional bleu1.enabled inherits bleu4.enabled in legacy configs.
+      # Set semantic.report_per_branch: true for legacy branch diagnostics.
+      # LLada-style COCO corpus BLEU-4 on whole-query references.
       bleu4:
         enabled: false
       # LLada calls ROUGE-L simply "ROUGE"; both output labels alias one score.

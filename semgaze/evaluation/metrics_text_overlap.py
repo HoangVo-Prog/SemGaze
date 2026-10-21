@@ -1,6 +1,6 @@
 """LLada-compatible text overlap metrics for one-reference semantic units.
 
-BLEU-4 is computed corpus-wide with the COCO scorer's tiny/small smoothing.
+BLEU-1 and BLEU-4 are computed corpus-wide with COCO tiny/small smoothing.
 ROUGE in LLada means ROUGE-L (LCS, beta=1.2). METEOR uses Java METEOR
 1.5's SCORE/EVAL protocol; NLTK is deliberately not substituted.
 """
@@ -83,6 +83,32 @@ def score_bleu4_corpus(units):
         bleu_product *= (matches + 1e-15) / (attempts + 1e-9)
     brevity_penalty = math.exp(min(0.0, 1.0 - reference_length / hypothesis_length))
     return brevity_penalty * bleu_product ** 0.25
+
+
+def score_bleu1_corpus(units):
+    """LLada/COCO-style corpus BLEU-1, including empty predictions in brevity penalty.
+
+    Uses the same unigram clipping and smoothing constants as score_bleu4_corpus;
+    corpus BLEU-1 is *not* an average of sentence-level BLEU-1 scores.
+    """
+    if not units:
+        return None
+    correct = guess = hypothesis_length = reference_length = 0
+    for unit in units:
+        candidate = _words(unit["candidate"])
+        reference = _words(unit["reference"])
+        hypothesis_length += len(candidate)
+        reference_length += len(reference)
+        hypothesis_counts = _ngrams(candidate, 1)
+        reference_counts = _ngrams(reference, 1)
+        guess += sum(hypothesis_counts.values())
+        correct += sum(min(count, reference_counts[gram])
+                       for gram, count in hypothesis_counts.items())
+    if hypothesis_length == 0:
+        return 0.0
+    precision = (correct + 1e-15) / (guess + 1e-9)
+    bp = math.exp(min(0.0, 1.0 - reference_length / hypothesis_length))
+    return bp * precision
 
 
 class Meteor15:

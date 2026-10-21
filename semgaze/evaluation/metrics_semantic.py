@@ -15,7 +15,7 @@ from typing import Iterable, Mapping, Sequence
 
 
 from semgaze.evaluation.metrics_text_overlap import (
-    score_bleu4_corpus, score_rouge_l_corpus,
+    score_bleu1_corpus, score_bleu4_corpus, score_rouge_l_corpus,
 )
 
 BRANCHES = ("what", "why", "how")
@@ -23,7 +23,7 @@ BRANCHES = ("what", "why", "how")
 
 def semantic_metrics_enabled(options):
     return any(options.get(metric, {}).get('enabled', False)
-               for metric in ('bertscore', 'cider_r', 'bleu4', 'rouge_l', 'meteor'))
+               for metric in ('bertscore', 'cider_r', 'bleu1', 'bleu4', 'rouge_l', 'meteor'))
 
 
 def normalize_text(text):
@@ -185,46 +185,92 @@ def build_cider_r_scorer(*, reference_root=None, n=4, k_r=0.8):
         'commit': 'b5f27535299eacb2bb4b599ac239841625030c8d', 'file_sha256': files}
 
 
-def score_prediction_semantics(rows, references_by_key, *, bertscorer=None, cider_r=None,
-                               batch_size=64, bleu4=False, rouge_l=False, meteor=None):
-    """Score complete semantic corpora from frozen prediction rows.
+def _structured_unit_from_prediction(row: Mapping, query_semantic):
+    """One reference/candidate pair per *complete* WHAT+WHY+HOW query.
 
-    ``references_by_key`` maps ``(query_id, K, draw_id)`` to normalized query
-    semantic annotations.  No generation or model object is accessed.
+    Score the original generated text, not a parser-repaired or GT-filled
+    reconstruction. Labels, indices, ordering and malformed lines therefore
+    affect the score. The ground truth always comes from the joined query.
     """
-    branches = {branch: [] for branch in BRANCHES}
+    from semgaze.semantic.flat.target import build_flat_target
+    query_id = row.get('query_id', row.get('record_id'))
+    if not isinstance(query_id, str) or not query_id:
+        raise ValueError('missing query identity for structured semantic score')
+    reference = normalize_text(build_flat_target(query_semantic))
+    frozen = row.get('SEMANTIC')
+    if frozen is not None:
+        if not isinstance(frozen, Mapping):
+            raise ValueError('SEMANTIC must be a GT/PRED mapping')
+        if 'GT' in frozen and normalize_text(frozen['GT']) != reference:
+            raise ValueError(f'{query_id}: frozen semantic GT mismatch')
+        predicted = frozen.get('PRED')
+    else:
+        # Zero-shot/SFT baselines store the *same* flat textual prediction here.
+        predicted = row.get('text')
+    if predicted is not None and not isinstance(predicted, str):
+        raise ValueError(f'{query_id}: semantic prediction must be text or null')
+    candidate = normalize_text(predicted) or None
+    return {'unit_id': f'{query_id}::OVERALL', 'reference': reference,
+            'candidate': candidate, 'missing': candidate is None}
+
+
+def score_prediction_semantics(rows, references_by_key, *, bertscorer=None, cider_r=None,
+                               batch_size=64, bleu1=False, bleu4=False, rouge_l=False,
+                               meteor=None, report_per_branch=False):
+    """Score full structured generation at query level, on a frozen corpus.
+
+    Overall is *not* the arithmetic mean or pooled-unit micro-average of
+    WHAT/WHY/HOW. A single query is one BLEU/CIDEr/METEOR/ROUGE document.
+    ``report_per_branch=True`` retains legacy diagnostics when needed.
+    """
+    if type(report_per_branch) is not bool:
+        raise ValueError('report_per_branch must be boolean')
+    scopes = {'overall': []}
+    if report_per_branch:
+        scopes.update({branch: [] for branch in BRANCHES})
     parse_failures = 0
     for row in rows:
-        key = (str(row.get("query_id", row.get("record_id"))), int(row.get("K", row.get("k"))), int(row["draw_id"]))
+        key = (str(row.get('query_id', row.get('record_id'))),
+               int(row.get('K', row.get('k'))), int(row['draw_id']))
         if key not in references_by_key:
-            raise ValueError(f"missing semantic reference for prediction key {key}")
-        parsed = row.get("semantic_generation", row.get("semantic", {}))
-        parse_failures += int(not parsed.get("flat_format_valid", True))
-        units = semantic_units_from_prediction(row, references_by_key[key])
-        for branch in BRANCHES:
-            branches[branch].extend(units[branch])
-    result = {"semantic_parse_failure_count": parse_failures}
+            raise ValueError(f'missing semantic reference for prediction key {key}')
+        parsed = row.get('semantic_generation', row.get('semantic', {}))
+        parse_failures += int(not parsed.get('flat_format_valid', True))
+        scopes['overall'].append(_structured_unit_from_prediction(
+            row, references_by_key[key]))
+        if report_per_branch:
+            pieces = semantic_units_from_prediction(row, references_by_key[key])
+            for branch in BRANCHES:
+                scopes[branch].extend(pieces[branch])
+    result = {'semantic_parse_failure_count': parse_failures}
     if cider_r is None:
         cider_scorer, cider_tokenizer = None, None
     elif isinstance(cider_r, tuple):
         cider_scorer, cider_tokenizer = cider_r
     else:
         cider_scorer, cider_tokenizer = cider_r, None
-    for branch, units in branches.items():
+    for scope, units in scopes.items():
+        if len({unit['unit_id'] for unit in units}) != len(units):
+            raise ValueError(f'duplicate semantic {scope} units; score one K/draw')
         if bertscorer is not None:
-            result[f"eval_sem_{branch}_bertscore_f1"] = score_bertscore_branch(units, bertscorer, batch_size=batch_size)["f1"]
+            result[f'eval_sem_{scope}_bertscore_f1'] = score_bertscore_branch(
+                units, bertscorer, batch_size=batch_size)['f1']
         if cider_scorer is not None:
-            result[f"eval_sem_{branch}_cider_r"] = score_cider_r_branch(units, cider_scorer, cider_tokenizer)["score"]
+            result[f'eval_sem_{scope}_cider_r'] = score_cider_r_branch(
+                units, cider_scorer, cider_tokenizer)['score']
+        if bleu1:
+            result[f'eval_sem_{scope}_bleu1'] = score_bleu1_corpus(units)
         if bleu4:
-            result[f"eval_sem_{branch}_bleu4"] = score_bleu4_corpus(units)
+            result[f'eval_sem_{scope}_bleu4'] = score_bleu4_corpus(units)
         if rouge_l:
             score = score_rouge_l_corpus(units)
-            result[f"eval_sem_{branch}_rouge_l"] = score
-            result[f"eval_sem_{branch}_rouge"] = score  # LLada's ROUGE is ROUGE-L
+            result[f'eval_sem_{scope}_rouge_l'] = score
+            result[f'eval_sem_{scope}_rouge'] = score  # ROUGE means ROUGE-L
         if meteor is not None:
-            result[f"eval_sem_{branch}_meteor"] = meteor.score_units(units)
-        result[f"semantic_{branch}_unit_count"] = len(units)
-        result[f"semantic_{branch}_missing_count"] = sum(u.get("candidate") is None for u in units)
+            result[f'eval_sem_{scope}_meteor'] = meteor.score_units(units)
+        result[f'semantic_{scope}_unit_count'] = len(units)
+        result[f'semantic_{scope}_missing_count'] = sum(
+            unit['candidate'] is None for unit in units)
     return result
 
 

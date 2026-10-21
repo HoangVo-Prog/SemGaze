@@ -21,6 +21,7 @@ from semgaze.evaluation.progress import RollingRate, format_eta, progress_interv
 from semgaze.evaluation.metrics_semantic import (build_bertscorer, build_cider_r_scorer,
     aggregate_semantic_metrics, score_prediction_semantics, semantic_metrics_enabled)
 from semgaze.evaluation.metrics_text_overlap import build_meteor_scorer
+from semgaze.evaluation.semantic_table import write_semantic_metrics_tables
 from semgaze.evaluation.records import (assert_key_sets_equal, implementation_head,
                                          resolve_evaluation_draw_counts,
                                          resolve_semantic_draw_counts, resolve_prediction_draw_plan,
@@ -458,6 +459,12 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         }
         (output / 'metrics_by_group.json').write_text(
             json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
+        if score_sem:
+            paths = write_semantic_metrics_tables(
+                output, by_group, overall, method=config.get('experiment', {}).get('name', 'SemGaze'))
+            result['semantic_table_paths'] = paths
+            (output / 'metrics_by_group.json').write_text(
+                json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
         # Keep the pre-existing joint output filename as a compatibility alias.
         if dataset_name == 'all':
             (output / 'metrics_by_dataset.json').write_text(
@@ -479,6 +486,9 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
     bertscorer = bert_provenance = cider_r = cider_provenance = None
     meteor = meteor_provenance = None
     bleu4_enabled = semantic_enabled and bool(semantic_config.get('bleu4', {}).get('enabled'))
+    # Legacy resolved configs with BLEU-4 enabled automatically receive BLEU-1.
+    bleu1_enabled = semantic_enabled and bool(semantic_config.get(
+        'bleu1', semantic_config.get('bleu4', {})).get('enabled'))
     rouge_l_enabled = semantic_enabled and bool(semantic_config.get('rouge_l', {}).get('enabled'))
     if semantic_enabled and semantic_config.get('bertscore', {}).get('enabled'):
         options = {key: value for key, value in semantic_config['bertscore'].items()
@@ -606,7 +616,9 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
                 semantic_group, {(row.get('query_id', row.get('record_id')), k, draw): refs[(row.get('query_id', row.get('record_id')), k, draw)] for row in semantic_group},
                 bertscorer=bertscorer, cider_r=cider_r,
                 batch_size=semantic_config.get('bertscore', {}).get('batch_size', 64),
-                bleu4=bleu4_enabled, rouge_l=rouge_l_enabled, meteor=meteor)
+                bleu1=bleu1_enabled, bleu4=bleu4_enabled, rouge_l=rouge_l_enabled,
+                meteor=meteor,
+                report_per_branch=semantic_config.get('report_per_branch', False))
             draw_metrics.update(semantic_metrics)
             enabled_scores = {name: value for name, value in semantic_metrics.items()
                               if name.startswith('eval_sem_')}
@@ -633,6 +645,10 @@ def score_prediction_artifact(path, *, queries, config, output_dir, checkpoint='
         config=config.get('_resolved_config_path', 'resolved_config.json'),
         split_manifest_identity=split_manifest_identity, by_k=by_k,
         provenance={**({'bertscore': bert_provenance, 'cider_r': cider_provenance,
+                         'bleu1': ({'implementation': 'LLada_COCO',
+                                     'aggregation': 'corpus', 'n': 1,
+                                     'small': 1e-9, 'tiny': 1e-15} if bleu1_enabled else None),
+                         'semantic_scoring_unit': 'one_full_raw_WHAT_WHY_HOW_per_query',
                          'bleu4': ({'implementation': 'LLada_COCO',
                                     'aggregation': 'corpus', 'n': 4, 'closest': True,
                                     'small': 1e-9, 'tiny': 1e-15} if bleu4_enabled else None),
