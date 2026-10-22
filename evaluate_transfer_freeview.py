@@ -16,6 +16,8 @@ import argparse
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import groupby
+import re
 import hashlib
 import json
 import math
@@ -282,6 +284,62 @@ def make_support_plan(train, query_subjects, k_values, draws, seed,
     return plan
 
 
+
+def parse_batch_sizes_by_k(spec, k_values, fallback):
+    """Explicit per-K physical batch sizes; preserve --batch-size as fallback.
+
+    Accept e.g. ['1:4', '5:2', '10:1'] or ['1=4,5=2,10=1'].
+    Extra valid K overrides are allowed when evaluating a K subset; the
+    returned mapping only contains requested K values.
+    """
+    if type(fallback) is not int or fallback < 1:
+        raise ValueError('--batch-size must be a positive integer')
+    entries = []
+    for part in spec or ():
+        entries.extend(token for token in re.split(r'[,\s]+', part.strip()) if token)
+    overrides = {}
+    for entry in entries:
+        match = re.fullmatch(r'(\d+)\s*[:=]\s*(\d+)', entry)
+        if match is None:
+            raise ValueError(f'invalid --batch-size-by-k item {entry!r}; '
+                             'expected K:B or K=B, such as 1:4,5:2,10:1')
+        k, size = (int(part) for part in match.groups())
+        if not 1 <= k <= 10:
+            raise ValueError(f'--batch-size-by-k requires K within 1..10: {k}')
+        if k in overrides:
+            raise ValueError(f'duplicate batch-size override for K={k}')
+        if size < 1:
+            raise ValueError(f'physical batch size for K={k} must be positive')
+        overrides[k] = size
+    return {k: overrides.get(k, fallback) for k in k_values}
+
+
+def scheduled_episode_batches(episodes, batch_size, *, bucket_by_length=True):
+    """Yield same-K physical batches, optionally grouped by query length.
+
+    generate_where_batch normally subdivides mixed-length batches by generation
+    budget. Grouping oracle-length queries up front avoids internal microbatches
+    and improves utilization. Each episode is included exactly once.
+    """
+    if batch_size < 1:
+        raise ValueError('batch size must be positive')
+    if not episodes:
+        return
+    if len({len(ep.supports) for ep in episodes}) != 1:
+        raise ValueError('physical batch scheduler must receive a single K')
+    indexed = list(enumerate(episodes))
+    if bucket_by_length:
+        indexed.sort(key=lambda pair: (len(pair[1].query.x_px), pair[0]))
+        grouped = (list(rows) for _, rows in groupby(
+            indexed, key=lambda pair: len(pair[1].query.x_px)))
+    else:
+        grouped = (indexed,)
+    for group in grouped:
+        for start in range(0, len(group), batch_size):
+            selected = group[start:start + batch_size]
+            yield [ep for _, ep in selected]
+
+
 def episodes_for(queries, plan, k, draw):
     return [FlatEpisode(plan[(q.subject, k, draw)], q, draw_id=draw) for q in queries]
 
@@ -425,6 +483,8 @@ def run(args):
         raise ValueError('K must be unique integers in [1,10]')
     if args.draws < 1 or args.batch_size < 1 or not 1 <= args.max_fixations <= 10:
         raise ValueError('draws, batch-size must be positive; max-fixations in [1,10]')
+    physical_batch_sizes = parse_batch_sizes_by_k(
+        args.batch_size_by_k, args.k_values, args.batch_size)
     checkpoint = args.checkpoint.expanduser().resolve()
     meta = json.loads((checkpoint / 'metadata.json').read_text(encoding='utf-8'))
     identity = meta.get('split_manifest_identity')
@@ -442,6 +502,8 @@ def run(args):
         'fixed_annotation_frames': FRAMES, 'metric_frames': EVAL_FRAMES,
         'max_fixations': args.max_fixations,
         'k_values': args.k_values, 'draws': args.draws, 'seed': args.seed,
+        'batch_size_by_k': {str(k): v for k, v in physical_batch_sizes.items()},
+        'bucket_by_fixation_count': args.bucket_by_fixation_count,
         'datasets': {},
     }
     for name in names:
@@ -491,6 +553,8 @@ def run(args):
         print(f"[TRANSFER][PREFLIGHT] {LABELS[name]}: {protocol['datasets'][name]['queries']}; "
               f"subjects={protocol['datasets'][name]['all_target_subject_ids']}; "
               f"train={len(train)}; frame={FRAMES[name]}", flush=True)
+    print(f'[TRANSFER][BATCH] physical sizes by K={physical_batch_sizes}; '
+          f'bucket_by_fixation_count={args.bucket_by_fixation_count}', flush=True)
     if args.dry_run:
         print('[TRANSFER] DRY RUN PASSED (no model loaded, no output written)', flush=True)
         return
@@ -527,8 +591,11 @@ def run(args):
                             for draw in range(args.draws):
                                 episodes = episodes_for(queries, plans[scope], k, draw)
                                 scores = []
-                                for start in range(0, len(episodes), args.batch_size):
-                                    batch = episodes[start:start + args.batch_size]
+                                k_batch_size = physical_batch_sizes[k]
+                                draw_processed = 0
+                                for batch in scheduled_episode_batches(
+                                        episodes, k_batch_size,
+                                        bucket_by_length=args.bucket_by_fixation_count):
                                     generated = generate_where_batch(bundle, batch, cache=cache)
                                     if len(generated) != len(batch):
                                         raise RuntimeError('batch coverage mismatch')
@@ -559,9 +626,11 @@ def run(args):
                                         stream.write(json.dumps(
                                             row, ensure_ascii=False, allow_nan=False) + '\n')
                                         n_written += 1
+                                    draw_processed += len(batch)
                                     print(f'[TRANSFER] {LABELS[name]} {scope} '
-                                          f'K={k} draw={draw+1}/{args.draws}: '
-                                          f'{min(start+len(batch),len(episodes))}/{len(episodes)}',
+                                          f'K={k} draw={draw+1}/{args.draws} '
+                                          f'batch_size={k_batch_size}: '
+                                          f'{draw_processed}/{len(episodes)}',
                                           flush=True)
                                 if len(scores) != len(queries):
                                     raise RuntimeError('missing predictions within a draw')
@@ -619,7 +688,13 @@ def main():
     p.add_argument('--k-values', nargs='+', type=int, default=[1, 5, 10])
     p.add_argument('--draws', type=int, default=1)
     p.add_argument('--max-fixations', type=int, default=10)
-    p.add_argument('--batch-size', type=int, default=1)
+    p.add_argument('--batch-size', type=int, default=1,
+                   help='physical batch size fallback for K values without an override')
+    p.add_argument('--batch-size-by-k', nargs='+', default=None,
+                   help='per-K physical batches, e.g. 1:4,5:2,10:1 or 1=4 5=2 10=1')
+    p.add_argument('--bucket-by-fixation-count', action=argparse.BooleanOptionalAction,
+                   default=True, help='group same-length query episodes to avoid mixed-budget '
+                                      'microbatches inside generate_where_batch (default on)')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', default='cuda')
     p.add_argument('--output-dir', type=Path, required=True)

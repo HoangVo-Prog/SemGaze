@@ -34,6 +34,80 @@ ScanDiff/data/
 
 The `--osie-root` and `--coco-freeview-root` arguments override the per-dataset paths when archives were extracted separately. The script verifies **the full 15/10 subject populations** against the FS-PSP official IDs, then maps them onto ScanDiff's original `subject` field (0-based or 1-based). Both partitions must have test records and same-observer train supports. Split and mapping are recorded in `transfer_protocol.json`.
 
+## Run ONE dataset at a time (recommended) — per-K batching
+
+Place the **six files** in the repository root, alongside `train_flat.py` and
+`evaluate_flat.py`. There are two executable dataset-specific entrypoints:
+
+```bash
+# Run ONLY OSIE, with its official FS-PSP unseen observers (10..14, 0-based).
+CHECKPOINT=/path/to/checkpoint \
+SCANDIFF_DATA=/path/to/ScanDiff/data \
+BATCH_SIZE_BY_K='1:4,5:2,10:1' \
+./run_transfer_osie.sh
+
+# Run ONLY COCO-FreeView, with its official unseen observers (0..2, 0-based).
+CHECKPOINT=/path/to/checkpoint \
+SCANDIFF_DATA=/path/to/ScanDiff/data \
+BATCH_SIZE_BY_K='1:4,5:2,10:1' \
+./run_transfer_coco_freeview.sh
+```
+
+Neither runner loads data from the other dataset. Each produces its own
+`runs/transfer_{dataset}_unseen/` output folder, including the dataset's
+`metrics.md`, `metrics.json` and `predictions.jsonl`. Both share the
+checkpoint without modifying it. For another partition specify `SCOPE=seen`
+or `SCOPE=both` (Table 1 itself uses `unseen`). Use `DRY_RUN=1` to perform
+preflight without loading the 8B model:
+
+```bash
+CHECKPOINT=/path/to/checkpoint SCANDIFF_DATA=/path/to/ScanDiff/data \
+DRY_RUN=1 ./run_transfer_osie.sh
+```
+
+The runner accepts environment variables `K_VALUES='1 5 10'`, `DRAWS=1`,
+`SEED=42`, `BATCH_SIZE=1` (fallback), `BATCH_SIZE_BY_K`, `MAX_FIXATIONS=10`,
+`SCOPE`, `OUTPUT_DIR`, `MODEL_DEVICE`, `PYTHON_BIN`, and
+`BUCKET_BY_FIXATION_COUNT=1` (default). All optional CLI flags are forwarded.
+When you only want one K, set `K_VALUES=5`; the full three-K batch-size mapping
+can stay unchanged. Do **not** run both jobs concurrently on one GPU unless
+it can hold two InternVL checkpoints; to run simultaneously use two distinct
+GPUs (e.g. `CUDA_VISIBLE_DEVICES=0` vs `1`).
+
+**Why the per-K batching is more efficient:** `generate_where_batch` takes
+only same-K episodes, and internally separates mixed oracle-fixation-length
+examples into smaller generation-budget groups. The evaluator now schedules
+physical sizes independently for each K **and buckets episodes by oracle
+fixation count before generation** so that one actual model call normally
+contains a full same-length batch, instead of a fragmented mixed-length
+microbatch. This is a scheduling optimization, not a new model input:
+GT fixation count was already known to the WHERE prompt. The output order
+may change, but `query_id`, `K`, `draw_id` and the metrics remain intact.
+
+The defaults `K1:4`, `K5:2`, `K10:1` are starting values, **not guaranteed
+safe** for every GPU: K=10 has 11 images per episode and can be much more
+expensive than K=1. If CUDA runs out of memory, try
+`BATCH_SIZE_BY_K='1:2,5:1,10:1'`; increase conservatively only after
+measuring peak VRAM. `BUCKET_BY_FIXATION_COUNT=0` disables grouping for
+A/B comparisons.
+
+You can also use the Python evaluator directly, one dataset per process:
+
+```bash
+python -u evaluate_transfer_freeview.py \
+  --checkpoint /path/to/checkpoint \
+  --scandiff-data /path/to/ScanDiff/data \
+  --dataset osie --scope unseen --split-protocol fspsp-main \
+  --k-values 1 5 10 --batch-size 1 \
+  --batch-size-by-k 1:4 5:2 10:1 \
+  --draws 1 --output-dir runs/osie_unseen
+```
+
+Switch `--dataset osie` to `--dataset coco_freeview`, and change
+`--output-dir` to another fresh path, for the other dataset. The
+`--batch-size-by-k` parser also accepts `1=4,5=2,10=1`. Set `--batch-size`
+for any unlisted K.
+
 ## Commands — official FS-PSP main-paper split
 
 Run at the **SemGaze repository root** with the existing train/eval environment and a full checkpoint directory. **Do not pass custom unseen-subject flags.**
@@ -91,6 +165,7 @@ Scoring uses the existing SemGaze audited ScanMatch, MultiMatch and VAME/SED uti
 
 ```bash
 python -m py_compile evaluate_transfer_freeview.py
+bash -n run_transfer_dataset.sh run_transfer_osie.sh run_transfer_coco_freeview.sh
 pytest -q test_transfer_freeview.py
 ```
 
