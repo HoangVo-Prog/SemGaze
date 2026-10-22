@@ -6,8 +6,10 @@ checkpoint training/updates and no semantic annotations are required.
 
 Subject split defaults to the OFFICIAL FS-PSP main-paper split: OSIE
 0..9 seen / 10..14 unseen; COCO-FreeView 3..9 seen / 0..2 unseen.
-Raw ScanDiff subject numbering is verified (0-based or 1-based) before
-mapping these identities. ``seen`` denotes FS-PSP's target observer group,
+For COCO-FreeView, ScanDiff also exposes a 10-observer original ID set
+(101, 102, 103, 104, 105, 107, 108, 109, 110, 116). An ordered-index
+translation is supported but is NOT verified as FS-PSP identity-equivalent.
+Supply --fspsp-subject-map when an independently verified mapping is available. ``seen`` denotes FS-PSP's target observer group,
 NOT source-checkpoint observers. Query fixation COUNT is oracle-conditioned.
 """
 from __future__ import annotations
@@ -52,6 +54,12 @@ FSPSP_MAIN_SPLIT = {
     'coco_freeview': {'total_subjects': 10, 'unseen_zero_based': (0, 1, 2)},
 }
 FSPSP_SPLIT_SOURCE = 'https://github.com/cvlab-stonybrook/few-shot-scanpath'
+# Observed in ScanDiff's COCOFreeView_fixations_{train,test}.json. These are
+# ORIGINAL observer codes; converting them to FS-PSP's 0..9 index requires a
+# mapping. Ascending rank is a plausible but UNVERIFIED correspondence.
+SCANDIFF_COCO_FREEVIEW_RAW_SUBJECTS = (
+    '101', '102', '103', '104', '105', '107', '108', '109', '110', '116',
+)
 
 
 @dataclass(frozen=True)
@@ -155,12 +163,41 @@ def parse_unseen_subjects(value: str | None) -> set[str]:
     return values
 
 
-def fspsp_main_subject_split(dataset: str, train, test, id_base='auto'):
-    """Translate official FS-PSP 0-based observer IDs to ScanDiff raw IDs.
+def load_fspsp_subject_map(path: Path, dataset: str):
+    """Read an explicit FS-PSP indexed ID -> ScanDiff original ID mapping.
 
-    Unlike guessing 'last 30%', this checks the FULL subject universe. A
-    malformed/partial/different subject set fails loudly, rather than silently
-    assigning an unrelated ScanDiff observer to a named FS-PSP identity.
+    Flat JSON is accepted for a single dataset; multi-dataset files may be
+    nested under the target's name. Index 0..N-1 must be complete and bijective.
+    Only a mapping verified using original ground-truth/source records should
+    be described as exact paper parity.
+    """
+    data = json.loads(Path(path).read_text(encoding='utf-8'))
+    if isinstance(data, dict) and dataset in data:
+        data = data[dataset]
+    if not isinstance(data, dict):
+        raise ValueError(f'{path}: expected mapping from FS-PSP IDs to ScanDiff IDs')
+    n = FSPSP_MAIN_SPLIT[dataset]['total_subjects']
+    canonical_keys = {str(i) for i in range(n)}
+    if set(data) != canonical_keys:
+        raise ValueError(f'{path}: {dataset} requires exactly FS-PSP 0..{n - 1} keys')
+    translated = {str(k): str(v) for k, v in data.items()}
+    if len(set(translated.values())) != n:
+        raise ValueError(f'{path}: target IDs must be unique')
+    return translated
+
+
+def fspsp_main_subject_split(dataset: str, train, test, id_base='auto',
+                              *, subject_map_path: Path | None = None):
+    """Select FS-PSP unseen subjects with explicit, audited ID translation.
+
+    Three cases:
+      1. 0..N-1 IDs: directly identical to FS-PSP's public indexing.
+      2. 1..N IDs: standard 1-based offset (known relabeling convention).
+      3. ScanDiff COCO-FreeView original 101..116 IDs: infer ascending-rank
+         mapping but ALWAYS mark observer identity parity unverified.
+
+    For verified non-contiguous IDs, provide an explicit source-authenticated
+    JSON --fspsp-subject-map instead of assuming a particular reindex order.
     """
     if id_base not in ('auto', '0', '1'):
         raise ValueError('FS-PSP subject ID base must be auto, 0, or 1')
@@ -169,45 +206,73 @@ def fspsp_main_subject_split(dataset: str, train, test, id_base='auto'):
     found_train = {r.subject for r in train}
     found_test = {r.subject for r in test}
     full = found_train | found_test
-    candidates = {
-        base: {str(x) for x in range(base, base + n)} for base in (0, 1)
-    }
-    if id_base == 'auto':
-        matches = [base for base in (0, 1) if full == candidates[base]]
-        if len(matches) != 1:
-            raise ValueError(
-                f'{dataset}: ScanDiff observer IDs {sorted(full)} do not match '
-                f'the full official FS-PSP population 0..{n-1} or 1..{n}; '
-                'cannot safely map observer identities. Check the JSON source, '
-                'then specify --fspsp-subject-id-base 0/1 if applicable. '
-                'Do NOT use manual IDs to claim FS-PSP main-table parity.'
-            )
-        base = matches[0]
-    else:
+    canonical = {base: {str(x) for x in range(base, base + n)} for base in (0, 1)}
+
+    if subject_map_path is not None:
+        if id_base != 'auto':
+            raise ValueError('--fspsp-subject-map and --fspsp-subject-id-base are mutually exclusive')
+        mapping = load_fspsp_subject_map(subject_map_path, dataset)
+        translation = 'explicit_json_mapping'
+        base = None
+        # Supplied by user: audited as bijection/coverage, but not independently
+        # certified as the authors' identity reindexing.
+        provenance = 'user_supplied_requires_source_verification'
+    elif id_base == 'auto' and full == canonical[0]:
+        mapping = {str(i): str(i) for i in range(n)}
+        translation, base, provenance = 'identity_zero_based', 0, 'direct_fspsp_index'
+    elif id_base == 'auto' and full == canonical[1]:
+        mapping = {str(i): str(i + 1) for i in range(n)}
+        translation, base, provenance = 'offset_one_based', 1, 'assumed_one_based_reindex'
+    elif id_base == 'auto' and dataset == 'coco_freeview' and full == set(SCANDIFF_COCO_FREEVIEW_RAW_SUBJECTS):
+        mapping = {str(i): raw for i, raw in enumerate(SCANDIFF_COCO_FREEVIEW_RAW_SUBJECTS)}
+        translation, base, provenance = ('scandiff_ascending_raw_id_rank', None,
+                                         'unverified_order_assumption')
+        print('[TRANSFER][WARNING] COCO-FreeView raw subjects use 101..116 codes; '
+              'mapping FS-PSP indices by SORTED raw IDs (0->101, 1->102, 2->103). '
+              "The authors' exact observer-ID correspondence has NOT been "
+              'independently confirmed; do not claim strict Table-1 parity.', flush=True)
+    elif id_base != 'auto':
         base = int(id_base)
-        if full != candidates[base]:
+        if full != canonical[base]:
             raise ValueError(f'{dataset}: --fspsp-subject-id-base {base} expects '
-                             f'{sorted(candidates[base])}, observed {sorted(full)}')
-    # Main-paper Table 1 unseen IDs, shifted only if ScanDiff numbers 1..N.
-    unseen = {str(x + base) for x in ref['unseen_zero_based']}
-    seen = candidates[base] - unseen
-    if not unseen <= found_test or not seen <= found_test:
+                             f'{sorted(canonical[base])}, observed {sorted(full)}')
+        mapping = {str(i): str(i + base) for i in range(n)}
+        translation = 'identity_zero_based' if base == 0 else 'offset_one_based'
+        provenance = 'direct_fspsp_index' if base == 0 else 'assumed_one_based_reindex'
+    else:
+        raise ValueError(
+            f'{dataset}: ScanDiff observer IDs {sorted(full)} cannot safely map observer identities '
+            'mapped to FS-PSP 0..N-1. Pass --fspsp-subject-map PATH with a '
+            'verified complete indexed-ID -> raw-ID JSON mapping; do not '
+            'manually claim Table-1 identity parity.'
+        )
+
+    expected = set(mapping.values())
+    if expected != full:
+        raise ValueError(f'{dataset}: subject ID mapping covers {sorted(expected)} '
+                         f'but ScanDiff contains {sorted(full)}')
+    if not expected <= found_test:
         raise ValueError(f'{dataset}: target test split lacks a complete FS-PSP '
-                         f'partition: missing {sorted(candidates[base] - found_test)}')
-    if not candidates[base] <= found_train:
+                         f'partition: missing {sorted(expected - found_test)}')
+    if not expected <= found_train:
         raise ValueError(f'{dataset}: target train split lacks per-observer supports '
-                         f'for {sorted(candidates[base] - found_train)}')
+                         f'for {sorted(expected - found_train)}')
+    unseen = {mapping[str(i)] for i in ref['unseen_zero_based']}
+    seen = expected - unseen
     return unseen, {
         'protocol': 'fspsp_main_table1',
         'source': FSPSP_SPLIT_SOURCE,
         'reference_subject_id_base': 0,
         'scandiff_subject_id_base': base,
+        'translation_method': translation,
+        'mapping_provenance': provenance,
+        'mapping_verified_against_authors_source': translation == 'identity_zero_based',
+        'reference_index_to_scandiff_subject': mapping,
         'official_unseen_zero_based': list(ref['unseen_zero_based']),
         'target_unseen_ids': sorted(unseen, key=int),
         'target_seen_ids': sorted(seen, key=int),
         'mapped_from_zero_based': base == 1,
     }
-
 
 def partition_queries(train, test, unseen: set[str], scope: str):
     test_ids = {r.subject for r in test}
@@ -284,14 +349,8 @@ def make_support_plan(train, query_subjects, k_values, draws, seed,
     return plan
 
 
-
 def parse_batch_sizes_by_k(spec, k_values, fallback):
-    """Explicit per-K physical batch sizes; preserve --batch-size as fallback.
-
-    Accept e.g. ['1:4', '5:2', '10:1'] or ['1=4,5=2,10=1'].
-    Extra valid K overrides are allowed when evaluating a K subset; the
-    returned mapping only contains requested K values.
-    """
+    """Parse optional per-K physical batch-size policy (e.g. 1:4,5:2,10:1)."""
     if type(fallback) is not int or fallback < 1:
         raise ValueError('--batch-size must be a positive integer')
     entries = []
@@ -301,25 +360,21 @@ def parse_batch_sizes_by_k(spec, k_values, fallback):
     for entry in entries:
         match = re.fullmatch(r'(\d+)\s*[:=]\s*(\d+)', entry)
         if match is None:
-            raise ValueError(f'invalid --batch-size-by-k item {entry!r}; '
-                             'expected K:B or K=B, such as 1:4,5:2,10:1')
+            raise ValueError(f'invalid --batch-size-by-k item {entry!r}; expected K:B')
         k, size = (int(part) for part in match.groups())
-        if not 1 <= k <= 10:
-            raise ValueError(f'--batch-size-by-k requires K within 1..10: {k}')
+        if not 1 <= k <= 10 or size < 1:
+            raise ValueError(f'per-K physical batch size must have 1 <= K <= 10 and B >= 1: {entry}')
         if k in overrides:
             raise ValueError(f'duplicate batch-size override for K={k}')
-        if size < 1:
-            raise ValueError(f'physical batch size for K={k} must be positive')
         overrides[k] = size
     return {k: overrides.get(k, fallback) for k in k_values}
 
 
 def scheduled_episode_batches(episodes, batch_size, *, bucket_by_length=True):
-    """Yield same-K physical batches, optionally grouped by query length.
+    """Yield same-K physical batches, grouped by fixation length by default.
 
-    generate_where_batch normally subdivides mixed-length batches by generation
-    budget. Grouping oracle-length queries up front avoids internal microbatches
-    and improves utilization. Each episode is included exactly once.
+    `generate_where_batch` internally splits mixed-length episodes because their
+    generation budgets differ; grouping first avoids most short GPU launches.
     """
     if batch_size < 1:
         raise ValueError('batch size must be positive')
@@ -329,15 +384,14 @@ def scheduled_episode_batches(episodes, batch_size, *, bucket_by_length=True):
         raise ValueError('physical batch scheduler must receive a single K')
     indexed = list(enumerate(episodes))
     if bucket_by_length:
-        indexed.sort(key=lambda pair: (len(pair[1].query.x_px), pair[0]))
-        grouped = (list(rows) for _, rows in groupby(
-            indexed, key=lambda pair: len(pair[1].query.x_px)))
+        indexed.sort(key=lambda item: (len(item[1].query.x_px), item[0]))
+        groups = (list(group) for _, group in groupby(
+            indexed, key=lambda item: len(item[1].query.x_px)))
     else:
-        grouped = (indexed,)
-    for group in grouped:
+        groups = (indexed,)
+    for group in groups:
         for start in range(0, len(group), batch_size):
-            selected = group[start:start + batch_size]
-            yield [ep for _, ep in selected]
+            yield [ep for _, ep in group[start:start + batch_size]]
 
 
 def episodes_for(queries, plan, k, draw):
@@ -483,8 +537,11 @@ def run(args):
         raise ValueError('K must be unique integers in [1,10]')
     if args.draws < 1 or args.batch_size < 1 or not 1 <= args.max_fixations <= 10:
         raise ValueError('draws, batch-size must be positive; max-fixations in [1,10]')
-    physical_batch_sizes = parse_batch_sizes_by_k(
-        args.batch_size_by_k, args.k_values, args.batch_size)
+    # Validate the physical batch schedule before opening a checkpoint / loading CUDA.
+    batch_sizes = parse_batch_sizes_by_k(args.batch_size_by_k, args.k_values, args.batch_size)
+    bucket_by_fixation_count = args.bucket_by_fixation_count
+    print(f'[TRANSFER][BATCH] by_K={batch_sizes}; '
+          f'bucket_by_fixation_count={bucket_by_fixation_count}', flush=True)
     checkpoint = args.checkpoint.expanduser().resolve()
     meta = json.loads((checkpoint / 'metadata.json').read_text(encoding='utf-8'))
     identity = meta.get('split_manifest_identity')
@@ -502,8 +559,8 @@ def run(args):
         'fixed_annotation_frames': FRAMES, 'metric_frames': EVAL_FRAMES,
         'max_fixations': args.max_fixations,
         'k_values': args.k_values, 'draws': args.draws, 'seed': args.seed,
-        'batch_size_by_k': {str(k): v for k, v in physical_batch_sizes.items()},
-        'bucket_by_fixation_count': args.bucket_by_fixation_count,
+        'physical_batch_size_by_k': {str(k): size for k, size in batch_sizes.items()},
+        'bucket_by_fixation_count': bucket_by_fixation_count,
         'datasets': {},
     }
     for name in names:
@@ -517,7 +574,8 @@ def run(args):
                                  'identities; remove --unseen-subjects flags or use '
                                  '--split-protocol manual for a non-paper split')
             unseen, split_detail = fspsp_main_subject_split(
-                name, train, test, args.fspsp_subject_id_base)
+                name, train, test, args.fspsp_subject_id_base,
+                subject_map_path=args.fspsp_subject_map)
         else:
             unseen = parse_unseen_subjects(override)
             split_detail = {
@@ -553,8 +611,6 @@ def run(args):
         print(f"[TRANSFER][PREFLIGHT] {LABELS[name]}: {protocol['datasets'][name]['queries']}; "
               f"subjects={protocol['datasets'][name]['all_target_subject_ids']}; "
               f"train={len(train)}; frame={FRAMES[name]}", flush=True)
-    print(f'[TRANSFER][BATCH] physical sizes by K={physical_batch_sizes}; '
-          f'bucket_by_fixation_count={args.bucket_by_fixation_count}', flush=True)
     if args.dry_run:
         print('[TRANSFER] DRY RUN PASSED (no model loaded, no output written)', flush=True)
         return
@@ -591,11 +647,10 @@ def run(args):
                             for draw in range(args.draws):
                                 episodes = episodes_for(queries, plans[scope], k, draw)
                                 scores = []
-                                k_batch_size = physical_batch_sizes[k]
-                                draw_processed = 0
+                                seen_in_draw = 0
                                 for batch in scheduled_episode_batches(
-                                        episodes, k_batch_size,
-                                        bucket_by_length=args.bucket_by_fixation_count):
+                                        episodes, batch_sizes[k],
+                                        bucket_by_length=bucket_by_fixation_count):
                                     generated = generate_where_batch(bundle, batch, cache=cache)
                                     if len(generated) != len(batch):
                                         raise RuntimeError('batch coverage mismatch')
@@ -626,11 +681,11 @@ def run(args):
                                         stream.write(json.dumps(
                                             row, ensure_ascii=False, allow_nan=False) + '\n')
                                         n_written += 1
-                                    draw_processed += len(batch)
+                                    seen_in_draw += len(batch)
                                     print(f'[TRANSFER] {LABELS[name]} {scope} '
-                                          f'K={k} draw={draw+1}/{args.draws} '
-                                          f'batch_size={k_batch_size}: '
-                                          f'{draw_processed}/{len(episodes)}',
+                                          f'K={k} draw={draw+1}/{args.draws}: '
+                                          f'{seen_in_draw}/{len(episodes)} '
+                                          f'(physical batch={len(batch)}/{batch_sizes[k]})',
                                           flush=True)
                                 if len(scores) != len(queries):
                                     raise RuntimeError('missing predictions within a draw')
@@ -681,6 +736,9 @@ def main():
                    help='FS-PSP main-paper subject split (default), or explicit nonpaper IDs')
     p.add_argument('--fspsp-subject-id-base', choices=('auto', '0', '1'),
                    default='auto', help='Verify ScanDiff subjects are 0..N-1 or 1..N')
+    p.add_argument('--fspsp-subject-map', type=Path,
+                   help='optional JSON mapping {FS-PSP 0-based index: ScanDiff raw observer ID}; '
+                        'requires independent source verification for paper parity')
     p.add_argument('--unseen-subjects', type=str,
                    help='ONLY for --split-protocol manual; comma-separated raw target subject IDs')
     p.add_argument('--osie-unseen-subjects', type=str)
@@ -689,12 +747,13 @@ def main():
     p.add_argument('--draws', type=int, default=1)
     p.add_argument('--max-fixations', type=int, default=10)
     p.add_argument('--batch-size', type=int, default=1,
-                   help='physical batch size fallback for K values without an override')
-    p.add_argument('--batch-size-by-k', nargs='+', default=None,
-                   help='per-K physical batches, e.g. 1:4,5:2,10:1 or 1=4 5=2 10=1')
-    p.add_argument('--bucket-by-fixation-count', action=argparse.BooleanOptionalAction,
-                   default=True, help='group same-length query episodes to avoid mixed-budget '
-                                      'microbatches inside generate_where_batch (default on)')
+                   help='Fallback physical batch size when a K has no override')
+    p.add_argument('--batch-size-by-k', nargs='+', default=None, metavar='K:B',
+                   help='Physical batch size per K, e.g. 1:4,5:2,10:1 or 1:4 5:2 10:1')
+    p.add_argument('--no-bucket-by-fixation-count', action='store_false',
+                   dest='bucket_by_fixation_count',
+                   help='Disable grouping of same-K episodes by ground-truth fixation count')
+    p.set_defaults(bucket_by_fixation_count=True)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--device', default='cuda')
     p.add_argument('--output-dir', type=Path, required=True)

@@ -18,7 +18,7 @@ K_VALUES="${K_VALUES:-1 5 10}"
 DRAWS="${DRAWS:-1}"
 SEED="${SEED:-42}"
 # Conservative-ish starting point; tune downward if your GPU runs out of memory.
-BATCH_SIZE_BY_K="${BATCH_SIZE_BY_K:-1:4,5:2,10:1}"
+BATCH_SIZE_BY_K="${BATCH_SIZE_BY_K:-1:64,5:16,10:16}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_FIXATIONS="${MAX_FIXATIONS:-10}"
 MODEL_DEVICE="${MODEL_DEVICE:-cuda}"
