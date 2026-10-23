@@ -148,6 +148,7 @@ training:
   gradient_accumulation_steps: 1 # physical batches per optimizer update
   gradient_checkpointing: true
   gradient_diagnostics_every: 0 # first training step always checked; 0 disables periodic scans
+  loss_gradient_probe_every: 0 # 0=off; >0 per-loss gradient norms/cosine (extra backward and CPU RAM)
   profile_every_steps: 0 # opt-in synchronized stage timing; zero avoids profiler overhead
   length_aware_batching: true # sort within each same-K physical batch only
   reuse_query_vision: true # requires frozen deterministic producers and identical pixels

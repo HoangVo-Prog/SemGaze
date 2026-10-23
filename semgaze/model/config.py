@@ -144,6 +144,7 @@ def validate_config(config):
     if type(config['where']['supervision']['output_hidden_states']) is not bool:
         raise ValueError('where.supervision.output_hidden_states must be boolean (legacy compatibility field)')
     positive_int(config['training']['gradient_diagnostics_every'], 'training.gradient_diagnostics_every', minimum=0)
+    positive_int(config['training'].get('loss_gradient_probe_every', 0), 'training.loss_gradient_probe_every', minimum=0)
     positive_int(config['training']['profile_every_steps'], 'training.profile_every_steps', minimum=0)
     positive_int(config['training']['preprocessing_cache_max_entries'], 'training.preprocessing_cache_max_entries')
     positive_int(config['training']['semantic_collation_cache_max_entries'], 'training.semantic_collation_cache_max_entries')

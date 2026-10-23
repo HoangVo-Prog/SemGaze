@@ -56,7 +56,8 @@ def clip_and_check_gradients(bundle):
 
 def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                            zero_grad=True, loss_scale=1.0, diagnostics=True,
-                           where_batch=None, profiler=None, semantic_cache=None):
+                           where_batch=None, profiler=None, semantic_cache=None,
+                           loss_gradient_probe=None):
     """Run active objectives; explicit-text Semantic needs no WHERE forward.
 
     Both losses positive: joint WHERE + Semantic objectives.
@@ -125,6 +126,14 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             objective_losses.append(flat.loss)
         if not bool(torch.isfinite(torch.stack(objective_losses)).all()):
             raise RuntimeError('non-finite active supervision loss')
+    if loss_gradient_probe is not None:
+        # Read-only weighted gradients; keep the original backward unchanged.
+        with stage('loss_gradient_probe'):
+            loss_gradient_probe.record(
+                where_loss=where_episode_losses.mean() if where_enabled else None,
+                semantic_loss=flat.episode_losses.mean() if semantic_enabled else None,
+                lambda_where=training_config['lambda_where'],
+                lambda_sem=training_config['lambda_sem'], micro_weight=loss_scale)
     with stage('backward'):
         (loss_total * loss_scale).backward()
     checks = check_gradients(bundle) if diagnostics else {}

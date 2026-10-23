@@ -8,6 +8,7 @@ from semgaze.evaluation.test import EVAL_KEYS, evaluate_test_epoch
 from semgaze.evaluation.predictions import predict_epoch, format_prediction_summary, resolve_prediction_settings
 from semgaze.model.checkpoint import save_checkpoint
 from semgaze.training.flat_step import run_flat_training_step, clip_and_check_gradients
+from semgaze.training.loss_gradients import LossGradientProbe
 from semgaze.training.batching import sample_optimizer_batches
 from semgaze.training.profiling import TrainingProfiler
 from semgaze.semantic.flat.collation_cache import SemanticNativeLRU
@@ -39,6 +40,13 @@ def format_train_step(entry, max_steps=None):
             f"  ETA train={format_eta(entry.get('train_eta_sec'))} | "
             f"ETA epoch={format_eta(entry.get('epoch_eta_sec'))} "
             "(optimizer time only; evaluation excluded)")
+    probe = entry.get('loss_gradient_probe')
+    if probe is not None:
+        g = probe['groups']['shared_lora']
+        fmt = lambda value: 'undefined' if value is None else f'{value:.4f}'
+        text += (f"\n  grad[shared LoRA] | WHERE={g['where_norm']:.4g} | "
+                 f"SEM={g['semantic_norm']:.4g} | cos={fmt(g['cosine'])} | "
+                 f"SEM/WHERE={fmt(g['semantic_to_where_norm_ratio'])}")
     if entry.get('epoch_complete'):
         text += '\n        epoch complete'
     return text
@@ -139,11 +147,15 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             weights = [len(batch.episodes) / len(sampled_episodes) for batch in batches]
             interval = t.get('gradient_diagnostics_every', 0)
             diagnose = step == start or (interval > 0 and (step + 1) % interval == 0)
+            probe_interval = t.get('loss_gradient_probe_every', 0)
+            probe_now = probe_interval > 0 and (step == start or (step + 1) % probe_interval == 0)
+            loss_gradient_probe = LossGradientProbe(bundle) if probe_now else None
             for micro, batch in enumerate(batches):
                 result = run_flat_training_step(bundle, batch.episodes, zero_grad=(micro == 0),
                     loss_scale=weights[micro], where_batch=batch,
                     diagnostics=diagnose and micro == len(batches) - 1,
-                     profiler=profiler, semantic_cache=semantic_cache)
+                     profiler=profiler, semantic_cache=semantic_cache,
+                     loss_gradient_probe=loss_gradient_probe)
                 losses.append(result['loss_total'] * weights[micro])
                 for key in component_losses:
                     if key in result and result[key] is not None:
@@ -151,6 +163,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                 for key in diagnostic_losses:
                     if key in result and result[key] is not None:
                         diagnostic_losses[key].append(result[key] * weights[micro])
+            probe_report = loss_gradient_probe.summary() if loss_gradient_probe is not None else None
+            del loss_gradient_probe  # Release diagnostic CPU buffers before evaluation.
             if prediction_capacity:
                 recent_episodes = (recent_episodes + prediction_batch)[-prediction_capacity:]
             with (profiler.stage('clip_optimizer') if profiler else nullcontext()):
@@ -176,7 +190,7 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
             epoch_eta = train_rate.eta(updates_per_epoch - epoch_step)
             train_eta = train_rate.eta(max_steps - global_step)
             should_log = (global_step % logging['every_steps'] == 0 or
-                          global_step == max_steps or epoch_complete or profile_now)
+                          global_step == max_steps or epoch_complete or profile_now or probe_report is not None)
             if should_log:
                 entry = {'event': 'train_step', 'step': global_step,
                          'epoch': sampler.epoch - 1 + sampler.cursor / sampler.query_count,
@@ -192,6 +206,8 @@ def run_training_loop(bundle, sampler, train_by_id, test_records, manifest, *,
                          'step_time_sec': step_time, 'physical_batch_size': t['per_device_train_batch_size'],
                          'gradient_accumulation_steps': t['gradient_accumulation_steps'],
                          'episodes_per_second': len(sampled_episodes) / step_time}
+                if probe_report is not None:
+                    entry['loss_gradient_probe'] = probe_report
                 if preprocessing_stats is not None:
                     entry['preprocessing_cache_hits'] = preprocessing_stats['hits']
                     entry['preprocessing_cache_misses'] = preprocessing_stats['misses']
