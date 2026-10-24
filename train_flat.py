@@ -9,6 +9,7 @@ from semgaze.data.fewshot import TrainingEpisodeSampler
 from semgaze.model.build import build_flat_model_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.model.checkpoint import load_checkpoint_bundle, restore_checkpoint_state
+from semgaze.model.staged_init import validate_staged_config, adapt_checkpoint_for_new_run
 from semgaze.training.flat_step import make_optimizer, make_scheduler
 from semgaze.training.loop import resolve_epoch_schedule, run_training_loop, require_single_process
 from semgaze.evaluation.predictions import resolve_prediction_settings
@@ -59,6 +60,10 @@ def main():
     output_dir = resolve_output_dir(config)
     if output_dir is not None and output_dir.exists() and any(output_dir.iterdir()):
         parser.error('choose an empty output directory; resume reads from --resume')
+    if init_path is not None:
+        # Fail incompatible stage transitions before loading the 8B model.
+        previous = load_config(init_path / 'resolved_config.json')
+        validate_staged_config(previous, config)
     data = config['data']
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
     adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
@@ -88,22 +93,10 @@ def main():
     if source_checkpoint is not None:
         bundle = load_checkpoint_bundle(source_checkpoint, split_manifest_identity=identity, output_dir=output_dir, runtime=config['runtime'],
                                         precision=config['training']['precision'])
-        # Checkpoint initialization always retains source architecture/tokenizer.
+        # Load and verify the checkpoint in its original architecture first.
         if resume_path is not None:
             if bundle.config['model'] != config['model'] or bundle.config['where']['end_fix_token'] != config['where']['end_fix_token'] or bundle.config['where']['use_end_fix_token'] != config['where']['use_end_fix_token'] or bundle.config['semantic']['conditioning'] != config['semantic']['conditioning']:
                 raise ValueError('strict resume model/token settings differ from checkpoint')
-        else:
-            old_config = bundle.config
-            if old_config['model']['base_model'] != config['model']['base_model']:
-                raise ValueError('weight initialization cannot change base model')
-            for key in ('mode', 'end_fix_token', 'use_end_fix_token', 'coordinates', 'duration'):
-                if old_config['where'][key] != config['where'][key]:
-                    raise ValueError(f'weight initialization cannot change WHERE codec: {key}')
-            for key in ('state', 'semantic'):
-                if old_config[key] != config[key]:
-                    raise ValueError(f'weight initialization cannot change {key} architecture')
-            # Preserve the loaded checkpoint's actual LoRA initialization provenance.
-            config['model'] = old_config['model']
         if resume_path is not None and any(
             bundle.config['training'].get(name, {}).get('enabled', False)
             for name in ('scheduled_sampling', 'late_fixation_ce')
@@ -122,14 +115,16 @@ def main():
                 if bundle.config['training'][key] != config['training'][key]:
                     raise ValueError(f'resume training.{key} differs; start a new run to change it')
         if init_path is not None:
-            bundle.trainer_history = []  # adaptation starts with fresh history
             import random
             random.seed(config['experiment']['seed'])
             torch.manual_seed(config['experiment']['seed'])
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(config['experiment']['seed'])
-        bundle.config = config
-        bundle.context_limit = config['where']['context']['max_total_sequence_length']
+            adapt_checkpoint_for_new_run(bundle, config, source_checkpoint=init_path)
+        else:
+            # Strict resume does not permit architecture/objective changes.
+            bundle.config = config
+            bundle.context_limit = config['where']['context']['max_total_sequence_length']
     else:
         bundle = build_flat_model_bundle(config=config, output_dir=output_dir)
     if source_checkpoint is not None:
@@ -141,6 +136,9 @@ def main():
     bundle.config['runtime'].update(split_manifest_identity=identity, world_size=1)
     output_dir = bundle.output_dir
     write_run_config(bundle.config, output_dir)
+    if init_path is not None:
+        (output_dir / 'preflight.json').write_text(
+            json.dumps(bundle.diagnostics, indent=2), encoding='utf-8')
     bundle.optimizer = make_optimizer(bundle)
     bundle.scheduler = make_scheduler(bundle, max_steps)
     start = 0
