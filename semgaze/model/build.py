@@ -8,6 +8,7 @@ from .config import ROOT, load_config, resolve_config, write_run_config, resolve
 from .trainable_tokens import install_trainable_rows
 from semgaze.data.cocosearch18 import sha256_file
 from semgaze.state.projector import build_projector
+from semgaze.model.mtl_lora import install_full_mtl_lora
 
 
 class ModelPreflightError(RuntimeError):
@@ -114,7 +115,8 @@ def assert_trainable_set(model, projector, input_row, output_row, *, require_end
         if parameter.requires_grad:
             if id(parameter) in rows:
                 continue
-            if 'lora_' not in name or '.language_model.' not in name:
+            if ('.language_model.' not in name or
+                    not ('lora_' in name or name.rsplit('.', 1)[-1].startswith('mtl_'))):
                 raise ModelPreflightError(f'unexpected trainable parameter: {name}')
             lora.append(parameter)
     if not lora:
@@ -194,6 +196,7 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
             lora_dropout=lora['dropout'], target_modules=targets, task_type='CAUSAL_LM'))
         diagnostics['effective_lora'] = lora
 
+    install_full_mtl_lora(model, config['model']['mtl_lora'])
     model.to(device=config['runtime']['device'])
     input_row, output_row, tied = install_trainable_rows(model, token_ids[0])
     if not config['where']['use_end_fix_token']:

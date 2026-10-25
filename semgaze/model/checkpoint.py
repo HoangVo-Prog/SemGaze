@@ -6,13 +6,19 @@ import torch
 from safetensors.torch import save_file, load_file
 from .config import write_run_config
 from .build import assert_trainable_set
+from .mtl_lora import install_full_mtl_lora, mtl_parameter_tensors, load_mtl_parameters
 
 
 def architecture_signature(config):
-    return {'use_end_fix_token': config['where'].get('use_end_fix_token', True),
-            'readout_position': config['state']['readout_position'],
-            'semantic_conditioning': config['semantic'].get('conditioning', 'shared_states'),
-            'projector_type': config['state']['projector']['type']}
+    sig = {'use_end_fix_token': config['where'].get('use_end_fix_token', True),
+           'readout_position': config['state']['readout_position'],
+           'semantic_conditioning': config['semantic'].get('conditioning', 'shared_states'),
+           'projector_type': config['state']['projector']['type']}
+    mtl = config['model'].get('mtl_lora', {})
+    if mtl.get('enabled', False):
+        sig['mtl_lora'] = {'type': 'full', 'experts': 2, 'tasks': ['where', 'semantic'],
+                           'temperature': float(mtl['temperature'])}
+    return sig
 
 
 def legacy_full_signature():
@@ -39,6 +45,8 @@ def save_checkpoint(bundle, path, *, split_manifest_identity, step, sampler=None
             tensors['end_fix_output'] = bundle.output_row.detach().cpu().clone()
     if options['save_projector']:
         tensors.update({f'projector.{k}': v.detach().cpu().clone() for k, v in bundle.projector.state_dict().items()})
+    tensors.update({k: v.detach().cpu().contiguous().clone()
+                    for k, v in mtl_parameter_tensors(bundle.model).items()})
     if tensors:
         save_file(tensors, str(path / 'semgaze.safetensors'))
     if options['save_resolved_config']:
@@ -77,6 +85,7 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
     expected = {'end_fix_input', *(f'projector.{k}' for k in bundle.projector.state_dict())}
     if not bundle.embeddings_tied:
         expected.add('end_fix_output')
+    expected.update(mtl_parameter_tensors(bundle.model))
     if set(tensors) != expected:
         raise ValueError('checkpoint is missing required row/projector state or contains unexpected tensors')
     with torch.no_grad():
@@ -84,6 +93,7 @@ def restore_checkpoint_state(bundle, path, *, split_manifest_identity, sampler=N
         if not bundle.embeddings_tied:
             bundle.output_row.copy_(tensors['end_fix_output'])
     bundle.projector.load_state_dict({k.removeprefix('projector.'): v for k, v in tensors.items() if k.startswith('projector.')})
+    load_mtl_parameters(bundle.model, {k: v for k, v in tensors.items() if k.startswith('mtl.')})
     assert_trainable_set(bundle.model, bundle.projector, bundle.input_row, bundle.output_row,
         require_end_fix=bundle.config['where']['use_end_fix_token'])
     trainer_state = path / 'trainer_state.json'
@@ -150,7 +160,9 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     if base.__class__.__name__ != 'InternVLForConditionalGeneration':
         raise ValueError('expected HF InternVLForConditionalGeneration')
     base.resize_token_embeddings(len(processor.tokenizer))
-    model = PeftModel.from_pretrained(base, path / 'adapter', is_trainable=True).to(config['runtime']['device'])
+    model = PeftModel.from_pretrained(base, path / 'adapter', is_trainable=True)
+    install_full_mtl_lora(model, config['model']['mtl_lora'])
+    model = model.to(config['runtime']['device'])
     input_row, output_row, tied = install_trainable_rows(model, token_ids[0])
     if not config['where']['use_end_fix_token']:
         input_row.requires_grad_(False)

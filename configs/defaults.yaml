@@ -56,6 +56,11 @@ model:
       - up_proj
       - down_proj
 
+  # Full MTL-LoRA is off by default for backward compatibility.
+  mtl_lora:
+    enabled: false
+    temperature: 1.0
+
   freeze:
     vision_tower: true
     native_multimodal_projector: true

@@ -7,6 +7,7 @@ from semgaze.where.forward import forward_where_batch
 from semgaze.where.collator import collate_where, pack_where_batch, to_model_device
 from semgaze.where.generation import left_pad_generation
 from semgaze.semantic.flat.forward import prepare_semantic_batch
+from semgaze.model.mtl_lora import task_scope
 
 
 @torch.inference_mode()
@@ -48,8 +49,9 @@ def evaluate_flat_batch(bundle, episodes, *, generation_budget, cache=None, visu
         reuse_query_vision=bundle.config['test']['cache']['frozen_visual_features'])
     tokenizer = bundle.processor.tokenizer
     inputs = to_model_device(left_pad_generation(inputs, tokenizer.pad_token_id), bundle.model)
-    output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
-        eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    with task_scope('semantic'):
+        output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
+            eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
     prefix_length = inputs['input_ids'].shape[1] if explicit else 0
     if explicit and (output.shape[1] <= prefix_length or
                      not torch.equal(output[:, :prefix_length], inputs['input_ids'])):
@@ -84,8 +86,9 @@ def evaluate_flat_episode(bundle, episode, *, generation_budget, visual_cache=No
         states = bundle.projector(where.states)
     inputs, positions, _ = prepare_flat_inputs(bundle, episode.query, states, generation_budget=generation_budget)
     tokenizer = bundle.processor.tokenizer
-    output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
-        eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    with task_scope('semantic'):
+        output = bundle.model.generate(**inputs, max_new_tokens=generation_budget, do_sample=False,
+            eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
     # HF inputs_embeds-only generation returns newly generated assistant IDs.
     prefix_length = inputs['input_ids'].shape[1] if explicit else 0
     if explicit and (output.shape[1] <= prefix_length or

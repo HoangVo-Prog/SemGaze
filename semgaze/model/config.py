@@ -96,7 +96,6 @@ def validate_config(config):
         'semantic.semantic_special_tokens': False,
         'semantic.loss': 'response_token_mean_nll',
         'state.detach_where_states': False,
-        'training.backward.one_joint_backward': True,
         'training.backward.detach_f': False,
         'training.backward.detach_r': False,
         'model.freeze.vision_tower': True,
@@ -192,6 +191,16 @@ def validate_config(config):
     positive_int(model['lora']['rank'], 'model.lora.rank')
     if model['lora']['alpha'] <= 0 or not 0 <= model['lora']['dropout'] < 1 or not model['lora']['target_modules']:
         raise ValueError('LoRA requires positive alpha, dropout in [0,1), and target modules')
+    mtl = model['mtl_lora']
+    if type(mtl['enabled']) is not bool or type(mtl['temperature']) not in (float, int) \
+            or not math.isfinite(mtl['temperature']) or mtl['temperature'] <= 0:
+        raise ValueError('model.mtl_lora requires boolean enabled and positive finite temperature')
+    expected_sequential = mtl['enabled'] and cond == 'explicit_scanpath_text'
+    if t['backward']['one_joint_backward'] is expected_sequential:
+        raise ValueError('MTL-LoRA explicit mode requires training.backward.one_joint_backward=false; '
+                         'other modes require true')
+    if mtl['enabled'] and cond == 'shared_states' and t['gradient_checkpointing']:
+        raise ValueError('MTL-LoRA shared_states requires gradient_checkpointing=false to preserve task routing')
     if t['precision'] not in ('fp32', 'bf16'):
         raise ValueError('precision supports fp32 or bf16; fp16 needs a GradScaler implementation')
     if t['optimizer'] not in ('AdamW', 'Adam', 'SGD'):

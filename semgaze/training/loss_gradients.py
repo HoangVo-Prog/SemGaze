@@ -23,14 +23,17 @@ class LossGradientProbe:
         projector_ids = {id(p) for p in bundle.projector.parameters()}
         input_row_id, output_row_id = id(bundle.input_row), id(bundle.output_row)
         self.groups = {'all_trainable': list(range(len(self.params))),
-                       'shared_lora': [], 'end_fix_rows': [], 'projector': []}
+                       'shared_lora': [], 'mtl_task_specific': [],
+                       'end_fix_rows': [], 'projector': []}
         for idx, param in enumerate(self.params):
             pid = id(param)
             if pid in projector_ids:
                 group = 'projector'
             elif pid in (input_row_id, output_row_id):
                 group = 'end_fix_rows'
-            elif 'lora_' in model_names.get(pid, ''):
+            elif model_names.get(pid, '').endswith(('mtl_lambdas', 'mtl_mixture_logits')):
+                group = 'mtl_task_specific'
+            elif 'lora_' in model_names.get(pid, '') or model_names.get(pid, '').endswith('mtl_extra_b'):
                 group = 'shared_lora'
             else:
                 raise ValueError(f'unclassified trainable parameter: {model_names.get(pid, pid)}')
@@ -40,7 +43,7 @@ class LossGradientProbe:
         self.microbatches = 0
 
     def record(self, *, where_loss=None, semantic_loss=None, lambda_where=1.0,
-               lambda_sem=1.0, micro_weight=1.0):
+               lambda_sem=1.0, micro_weight=1.0, advance=True):
         """Capture the same weighted component means used by joint backward.
 
         ``where_loss`` and ``semantic_loss`` are differentiable BATCH MEANS,
@@ -69,7 +72,8 @@ class LossGradientProbe:
                     buffer[i] = value.clone()  # materialize expanded/zero-stride gradients
                 else:
                     buffer[i].add_(value)
-        self.microbatches += 1
+        if advance:
+            self.microbatches += 1
 
     def _group_stats(self, indices):
         a, b = self.gradients['where'], self.gradients['semantic']

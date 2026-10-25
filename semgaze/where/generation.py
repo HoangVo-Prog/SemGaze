@@ -2,6 +2,7 @@ import torch
 from .collator import collate_where, to_model_device, WhereContextOverflowError
 from .serialization import serialize_xyd, parse_xyd_output, active_end_fix_token
 from .collator import pack_where_batch
+from semgaze.model.mtl_lora import task_scope
 
 
 def decode_response(tokenizer, ids):
@@ -67,8 +68,9 @@ def generate_where_batch(bundle, episodes, *, cache=None, precomputed_samples=No
             fused, _ = cache.fuse(bundle, inputs, [p for s in samples for p in s.image_paths],
                                   host_pixel_values=host_pixels)
             inputs = fused | {'input_ids': inputs['input_ids']}
-        output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
-            eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
+        with task_scope('where'):
+            output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
+                eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
         for row, index in enumerate(indices):
             text = decode_response(tokenizer, output[row, length:])
             results[index] = {'text': text, 'max_new_tokens': budget,
@@ -92,7 +94,8 @@ def generate_where(bundle, episode, *, cache=None):
     prompt_length = inputs['input_ids'].shape[1]
     if prompt_length + budget > bundle.context_limit:
         raise WhereContextOverflowError('frozen WHERE prefix + generation budget exceeds context limit')
-    output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
-        eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    with task_scope('where'):
+        output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
+            eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, use_cache=True)
     text = decode_response(tokenizer, output[0, prompt_length:])
     return {'text': text, 'max_new_tokens': budget, **parse_xyd_output(text, n, token)}
