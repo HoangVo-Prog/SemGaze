@@ -6,7 +6,8 @@ import torch
 from safetensors.torch import save_file, load_file
 from .config import write_run_config
 from .build import assert_trainable_set
-from .mtl_lora import install_full_mtl_lora, mtl_parameter_tensors, load_mtl_parameters
+from .mtl_lora import (install_full_mtl_lora, mtl_parameter_tensors,
+                       load_mtl_parameters, checkpoint_task_context_fn)
 
 
 def architecture_signature(config):
@@ -170,7 +171,10 @@ def load_checkpoint_bundle(path, *, split_manifest_identity, output_dir=None, ru
     projector = build_projector(base.config.text_config.hidden_size,
         enabled=config['semantic']['conditioning'] == 'shared_states').to(input_row)
     if config['training']['gradient_checkpointing']:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        checkpoint_kwargs = {'use_reentrant': False}
+        if config['model']['mtl_lora']['enabled']:
+            checkpoint_kwargs['context_fn'] = checkpoint_task_context_fn
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
     bundle = FlatModelBundle(model, processor, projector, token_ids[0], input_row, output_row, tied,
         config, metadata['diagnostics'], Path(output_dir or path))
     restore_checkpoint_state(bundle, path, split_manifest_identity=split_manifest_identity)

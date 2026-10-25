@@ -8,7 +8,7 @@ from .config import ROOT, load_config, resolve_config, write_run_config, resolve
 from .trainable_tokens import install_trainable_rows
 from semgaze.data.cocosearch18 import sha256_file
 from semgaze.state.projector import build_projector
-from semgaze.model.mtl_lora import install_full_mtl_lora
+from semgaze.model.mtl_lora import install_full_mtl_lora, checkpoint_task_context_fn
 
 
 class ModelPreflightError(RuntimeError):
@@ -205,7 +205,10 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
     projector = build_projector(base.config.text_config.hidden_size,
         enabled=config['semantic']['conditioning'] == 'shared_states').to(device=input_row.device, dtype=input_row.dtype)
     if config['training']['gradient_checkpointing']:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        checkpoint_kwargs = {'use_reentrant': False}
+        if config['model']['mtl_lora']['enabled']:
+            checkpoint_kwargs['context_fn'] = checkpoint_task_context_fn
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
     diagnostics.update(assert_trainable_set(model, projector, input_row, output_row,
         require_end_fix=config['where']['use_end_fix_token']))
     diagnostics.update(adapter_trainable=True, end_fix_token_count=int(config['where']['use_end_fix_token']),

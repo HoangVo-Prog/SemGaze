@@ -4,8 +4,9 @@ A and B1 remain ordinary PEFT weights. B2, rank-space task transforms and
 mixture logits are saved separately in the SemGaze checkpoint. A task scope must
 remain active THROUGH backward when gradient checkpointing is enabled.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from threading import local
 from types import MethodType
 
 import torch
@@ -26,6 +27,32 @@ def task_scope(task):
         yield
     finally:
         _TASK.reset(token)
+
+
+class _RecomputeTaskContext:
+    """Reusable checkpoint-recomputation scope for repeated autograd.grad/backward."""
+    def __init__(self, task):
+        self.task = task
+        self._thread = local()
+
+    def __enter__(self):
+        tokens = getattr(self._thread, 'tokens', None)
+        if tokens is None:
+            tokens = []
+            self._thread.tokens = tokens
+        tokens.append(_TASK.set(self.task))
+        return self
+
+    def __exit__(self, *exc):
+        _TASK.reset(self._thread.tokens.pop())
+
+
+def checkpoint_task_context_fn():
+    """Snapshot forward task and restore it for each checkpoint recomputation."""
+    task = _TASK.get()
+    if task is None:
+        raise RuntimeError('MTL-LoRA checkpoint created without a selected task')
+    return nullcontext(), _RecomputeTaskContext(task)
 
 
 def enabled(bundle):
