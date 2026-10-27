@@ -168,8 +168,18 @@ def validate_config(config):
     if any(key in t for key in ('steps_per_epoch', 'epochs')):
         raise ValueError('use num_train_epochs; optimizer updates are derived from Q_train')
 
-    if config['data']['dataset'] not in ('AiR', 'COCO-Search18', 'all'):
+    dataset = config['data']['dataset']
+    variant = config['data']['variant']
+    allowed_variants = {
+        'AiR': ('all',),
+        'COCO-Search18': ('all', 'tp', 'ta'),
+        'all': ('all',),
+    }
+    if dataset not in allowed_variants:
         raise ValueError('data.dataset must be AiR, COCO-Search18, or all')
+    if variant not in allowed_variants[dataset]:
+        raise ValueError(f'data.dataset={dataset} does not support variant={variant!r}; '
+                         f'expected {allowed_variants[dataset]}')
     air_unseen = config['data'].get('air_unseen_subjects')
     if not isinstance(air_unseen, list) or not air_unseen or any(
             not isinstance(s, str) or not s.strip() for s in air_unseen

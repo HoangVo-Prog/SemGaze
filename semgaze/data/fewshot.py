@@ -31,9 +31,17 @@ class TrainingEpisodeSampler:
         self.records = []
         if data_config['dataset'] in ('all', 'COCO-Search18') and not {7, 8, 9} <= set(unseen_subjects):
             raise ValueError('COCO unseen subjects must remain {7,8,9}')
+        expected_datasets = ({'AiR', 'COCO-Search18'} if data_config['dataset'] == 'all'
+                             else {data_config['dataset']})
+        expected_condition = {'tp': 'present', 'ta': 'absent'}.get(data_config['variant'])
         for r in train_records:
             if getattr(r, 'split', 'train') != 'train':
                 raise ValueError('optimization records must come from the selected train split')
+            if r.dataset not in expected_datasets:
+                raise ValueError(f'wrong dataset in optimization records: {r.dataset}')
+            if (expected_condition is not None and
+                    getattr(r, 'condition', None) != expected_condition):
+                raise ValueError(f'{r.record_id}: wrong COCO variant condition')
             if r.subject not in unseen_subjects:
                 self.images[r.subject][r.stimulus_id].append(r)
                 self.records.append(r)

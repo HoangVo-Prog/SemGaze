@@ -24,6 +24,8 @@ def main():
     parser.add_argument('--semantic-max-new-tokens', type=int, help='Explicit epoch semantic generation budget')
     parser.add_argument('--num-train-epochs', '--epochs', dest='num_train_epochs', type=int)
     parser.add_argument('--save-every', type=int, help='Save every N optimizer steps; 0 disables interval saves')
+    parser.add_argument('--preflight-only', action='store_true',
+                        help='Validate selected split, image paths, train sampling and evaluation supports without loading the VLM')
     parser.add_argument('--resume', type=Path, help='Strict optimizer/scheduler/sampler resume')
     parser.add_argument('--init-from-checkpoint', type=Path,
                         help='Weight-only initialization for a new adaptation run')
@@ -59,7 +61,7 @@ def main():
         parser.error('use either --resume or --init-from-checkpoint, not both')
     from semgaze.model.config import resolve_output_dir
     output_dir = resolve_output_dir(config)
-    if output_dir is not None and output_dir.exists() and any(output_dir.iterdir()):
+    if not args.preflight_only and output_dir is not None and output_dir.exists() and any(output_dir.iterdir()):
         parser.error('choose an empty output directory; resume reads from --resume')
     if init_path is not None:
         # Fail incompatible stage transitions before loading the 8B model.
@@ -81,15 +83,58 @@ def main():
     from semgaze.data.joint import unseen_subject_ids
     counts_train = Counter(r.dataset for r in records)
     counts_test = Counter(r.dataset for r in test_records)
-    if data['dataset'] == 'all' and (set(counts_train) != {'AiR', 'COCO-Search18'}
-                                    or set(counts_test) != {'AiR', 'COCO-Search18'}):
-        raise ValueError('joint dataset loader omitted AiR or COCO-Search18')
+    expected_datasets = ({'AiR', 'COCO-Search18'} if data['dataset'] == 'all'
+                         else {data['dataset']})
+    if set(counts_train) != expected_datasets or set(counts_test) != expected_datasets:
+        raise ValueError(f'dataset loader selected {set(counts_train)} train and '
+                         f'{set(counts_test)} test; expected {expected_datasets}')
+    if data['dataset'] == 'COCO-Search18' and data['variant'] in ('tp', 'ta'):
+        expected_condition = {'tp': 'present', 'ta': 'absent'}[data['variant']]
+        if any(r.condition != expected_condition for r in records + test_records):
+            raise ValueError(f'COCO {data["variant"]} loader contains the wrong condition')
     unseen = unseen_subject_ids(data, manifest)
     eligible = Counter(r.dataset for r in records if r.subject not in unseen)
     print(f'[DATA] train={dict(counts_train)} eligible_queries={dict(eligible)} '
           f'test={dict(counts_test)}', flush=True)
     sampler = TrainingEpisodeSampler(records, config['experiment']['seed'], data_config=data)
     resolve_epoch_schedule(config, sampler.query_count)
+    if args.preflight_only:
+        from semgaze.data.fewshot import evaluation_episode
+        from semgaze.evaluation.test import test_queries
+        train_by_id = {r.record_id: r for r in records}
+        if len(train_by_id) != len(records):
+            raise ValueError('duplicate training record_id after conversion')
+        # Train support construction is independent of held-out frozen draws.
+        for dataset_name in sorted(expected_datasets):
+            query = next((r for r in sampler.queries if r.dataset == dataset_name), None)
+            if query is None:
+                raise ValueError(f'{dataset_name}: no seen-subject optimization query')
+            for k in data['fewshot']['k_values']:
+                sampler.sample_for_query(query, k=k)
+        scopes = ('unseen', 'seen') if eval_subject_scope == 'both' else (eval_subject_scope,)
+        checked = 0
+        # Check every held-out subject/dataset for every requested K and draw.
+        # Small CPU workload: at most 29 subjects x 3 K x 10 draws.
+        for scope in scopes:
+            scope_records = [adapter(r) for r in raw['test' if scope == 'unseen' else 'test_seen']]
+            queries = test_queries(train_by_id, scope_records, manifest, scope=scope)
+            if not queries:
+                raise ValueError(f'no {scope} held-out queries for dataset={data["dataset"]}')
+            representative = {}
+            for query in queries:
+                representative.setdefault((query.dataset, query.subject), query)
+            for query in representative.values():
+                for k in sorted(set(config['evaluation']['k_values'] +
+                                    (config['evaluation']['predictions'].get('where_k_values') or []) +
+                                    (config['evaluation']['predictions'].get('semantic_k_values') or []))):
+                    for draw_id in range(config['evaluation']['draw']):
+                        evaluation_episode(query, train_by_id, manifest, k, draw_id=draw_id,
+                                           unseen_subjects=manifest['unseen_subject_ids'])
+                        checked += 1
+        print(f'[PREFLIGHT] PASS | dataset={data["dataset"]} variant={data["variant"]} '
+              f'| Q_train={sampler.query_count} | eval_support_episodes={checked} '
+              f'| split_identity={identity} | VLM_NOT_LOADED', flush=True)
+        return
     max_steps = config['training']['total_optimizer_updates']
     source_checkpoint = resume_path or init_path
     if source_checkpoint is not None:

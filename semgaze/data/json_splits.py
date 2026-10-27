@@ -158,6 +158,11 @@ def read_current_json_splits(root: Path, manifest: dict, data_config: dict | Non
                     row.get('trial_key') != f'{task}::{name}'):
                 raise ValueError(f'{rid}: duplicate or malformed persisted record identity')
             observed_ids.add(rid)
+            condition = row.get('condition')
+            expected_condition = {'tp': 'present', 'ta': 'absent'}.get(variant)
+            if condition not in ('present', 'absent') or (
+                    expected_condition is not None and condition != expected_condition):
+                raise ValueError(f'{rid}: condition={condition!r} incompatible with COCO variant={variant}')
             expected_role = 'unseen' if subject in unseen else 'seen'
             if (row.get('subject_role') != expected_role or
                     row.get('train_query_eligible') is not (split == 'train' and subject in seen)):

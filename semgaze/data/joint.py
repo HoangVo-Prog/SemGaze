@@ -80,18 +80,28 @@ def _verify_air(root, manifest, cfg):
         if _sha256(file) != manifest['split_file_sha256'][split]:
             raise ValueError(f'AiR {split}.json checksum mismatch')
         all_rows = _read_json(file)
-        if len(all_rows) != manifest['record_counts'][split]:
-            raise ValueError(f'AiR {split} row count mismatch')
-        selected = ([r for r in all_rows if r.get('dataset') == AIR]
-                    if combined else all_rows)
-        if combined and len(selected) != manifest['per_dataset_record_counts'][AIR][split]:
-            raise ValueError(f'AiR {split} count differs from combined manifest')
+        if not isinstance(all_rows, list):
+            raise ValueError(f'AiR {split}: expected a JSON list')
+        if combined:
+            if len(all_rows) != manifest['record_counts'][split]:
+                raise ValueError(f'combined {split} row count mismatch')
+            selected = [r for r in all_rows if r.get('dataset') == AIR]
+            if len(selected) != manifest['per_dataset_record_counts'][AIR][split]:
+                raise ValueError(f'AiR {split} row count mismatch')
+        else:
+            selected = all_rows
+            # Dataset-local manifests do not contain record_counts, unlike
+            # combined manifests. Honor it only if an extended schema has one.
+            declared = manifest.get('record_counts')
+            if declared is not None and len(selected) != declared[split]:
+                raise ValueError(f'AiR {split} row count mismatch')
         stimuli = set()
         for row in selected:
             rid, name, subject = row['record_id'], row['name'], str(row['subject'])
             qid = str(row['qid'])
             expected_role = 'unseen' if subject in configured_unseen else 'seen'
             if (rid in ids or rid != f'air_semgaze::{subject}::{qid}::{name}'
+                    or row.get('dataset') != AIR
                     or row.get('variant') != 'all' or row.get('split') != split
                     or row.get('stimulus_id') != name
                     or row.get('global_stimulus_id') != f'AiR::{name}'
