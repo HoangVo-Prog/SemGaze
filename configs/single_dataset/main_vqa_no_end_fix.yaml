@@ -53,9 +53,6 @@ model:
     native_multimodal_projector: true
     base_lm_outside_lora: true
     old_vocab_rows: true
-  mtl_lora:
-    enabled: false
-    temperature: 1.0
 where:
   mode: xyd
   end_fix_token: <END_FIX>

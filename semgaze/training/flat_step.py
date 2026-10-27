@@ -2,7 +2,6 @@ import torch
 from semgaze.data.schema import normalized_episode_from_dict, require_seen_training_episode
 from semgaze.where.forward import forward_where_batch
 from semgaze.semantic.flat.forward import forward_flat_batch
-from semgaze.model.mtl_lora import task_scope, enabled as mtl_enabled
 from contextlib import nullcontext
 
 
@@ -31,7 +30,7 @@ def gradient_diagnostics(bundle):
     def finite(p):
         return p.grad is not None and bool(torch.isfinite(p.grad).all())
     lora = [p for name, p in bundle.model.named_parameters() if p.requires_grad and
-            ('lora_' in name or name.rsplit('.', 1)[-1].startswith('mtl_'))]
+            'lora_' in name]
     projector = list(bundle.projector.parameters())
     return {'lora_grad_finite': any(finite(p) for p in lora) and all(p.grad is None or finite(p) for p in lora),
             'projector_grad_finite': all(finite(p) for p in projector),
@@ -89,21 +88,13 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
         raise ValueError('training must supervise WHERE and/or semantic')
     counts = [len(e.query.x_px) for e in episodes]
     explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
-    split_backward = mtl_enabled(bundle) and explicit
     need_where_forward = where_enabled or (semantic_enabled and not explicit)
     where = None
     if need_where_forward:
         with stage('where'):
-            with task_scope('where'):
-                where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
-                                            compute_loss=where_enabled,
-                                            return_fixation_states=semantic_enabled and not explicit)
-                if split_backward and where_enabled:
-                    if loss_gradient_probe is not None:
-                        loss_gradient_probe.record(where_loss=where.episode_losses.mean(),
-                            lambda_where=training_config['lambda_where'], lambda_sem=0,
-                            micro_weight=loss_scale, advance=not semantic_enabled)
-                    (training_config['lambda_where'] * where.episode_losses.mean() * loss_scale).backward()
+            where = forward_where_batch(bundle, episodes, batch=where_batch, profiler=profiler,
+                                        compute_loss=where_enabled,
+                                        return_fixation_states=semantic_enabled and not explicit)
     where_episode_losses = where.episode_losses if where is not None else None
     flat, positions, semantic_metadata = None, [], [{} for _ in episodes]
     states = [None] * len(episodes)
@@ -115,16 +106,9 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                 states = list(projected.split(counts))
                 if not all(f.requires_grad and r.requires_grad for f, r in zip(where.states, states)):
                     raise RuntimeError('WHERE F / projected R were detached')
-            with task_scope('semantic'):
-                flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
-                    where=None if explicit else where, profiler=profiler,
-                    semantic_cache=None if explicit else semantic_cache, response_offsets=True)
-                if split_backward:
-                    if loss_gradient_probe is not None:
-                        loss_gradient_probe.record(semantic_loss=flat.episode_losses.mean(),
-                            lambda_where=0, lambda_sem=training_config['lambda_sem'],
-                            micro_weight=loss_scale, advance=True)
-                    (training_config['lambda_sem'] * flat.episode_losses.mean() * loss_scale).backward()
+            flat, positions, semantic_metadata = forward_flat_batch(bundle, [e.query for e in episodes], states,
+                where=None if explicit else where, profiler=profiler,
+                semantic_cache=None if explicit else semantic_cache, response_offsets=True)
             from semgaze.semantic.flat.diagnostics import summarize_semantic_component_nll
             component_values = summarize_semantic_component_nll(flat.token_nll, episodes, semantic_metadata)
     if where_enabled and semantic_enabled:
@@ -143,7 +127,7 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
             objective_losses.append(flat.loss)
         if not bool(torch.isfinite(torch.stack(objective_losses)).all()):
             raise RuntimeError('non-finite active supervision loss')
-    if loss_gradient_probe is not None and not split_backward:
+    if loss_gradient_probe is not None:
         # Read-only weighted gradients; keep the original backward unchanged.
         with stage('loss_gradient_probe'):
             loss_gradient_probe.record(
@@ -151,9 +135,8 @@ def run_flat_training_step(model_bundle, episode, optimizer_step=False, *,
                 semantic_loss=flat.episode_losses.mean() if semantic_enabled else None,
                 lambda_where=training_config['lambda_where'],
                 lambda_sem=training_config['lambda_sem'], micro_weight=loss_scale)
-    if not split_backward:
-        with stage('backward'):
-            (loss_total * loss_scale).backward()
+    with stage('backward'):
+        (loss_total * loss_scale).backward()
     checks = check_gradients(bundle) if diagnostics else {}
     if optimizer_step:
         if bundle.optimizer is None:

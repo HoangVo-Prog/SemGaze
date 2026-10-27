@@ -4,7 +4,6 @@ from contextlib import nullcontext
 from semgaze.state.extractor import extract_query_states, extract_duration_numeric_states
 from .collator import collate_where_batch, to_model_device
 from semgaze.model.selected_loss import forward_backbone, compute_selected_causal_nll
-from semgaze.model.mtl_lora import task_scope
 
 
 @dataclass
@@ -38,9 +37,8 @@ def forward_where_batch(bundle, episodes, *, batch=None, profiler=None, visual_c
         if visual_cache is not None:
             inputs, features = visual_cache.fuse(bundle, inputs, [p for s in batch.samples for p in s.image_paths],
                                                   host_pixel_values=batch.inputs['pixel_values'])
-        with task_scope('where'):
-            outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
-                                       if use_cache is None else use_cache))
+        outputs = forward_backbone(bundle.model, inputs, use_cache=(bundle.config['where']['supervision']['use_cache']
+                                   if use_cache is None else use_cache))
         loss = None
         if compute_loss:
             loss = compute_selected_causal_nll(outputs.last_hidden_state, batch.inputs['labels'],

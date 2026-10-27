@@ -8,11 +8,11 @@ from semgaze.model.config import ROOT, load_config, resolve_config
 
 
 def test_vqa_config_and_subjects():
-    config = load_config(ROOT / 'configs/flat_vqa_only_mtl.yaml')
+    config = load_config(ROOT / 'configs/single_dataset/main_vqa_no_end_fix.yaml')
     assert config['data']['dataset'] == 'AiR'
     assert config['data']['split_root'] == 'data/split/AiR/split/all'
-    assert config['model']['mtl_lora']['enabled'] is True
-    assert config['training']['backward']['one_joint_backward'] is False
+    assert 'mtl_lora' not in config['model']
+    assert config['training']['backward']['one_joint_backward'] is True
     assert unseen_subject_ids(config['data']) == frozenset(
         {'AiR::JY', 'AiR::SC', 'AiR::YN'})
 
@@ -24,7 +24,7 @@ def test_coco_variant_is_not_blocked_by_config():
 
 
 def test_air_sampler_excludes_unseen_subjects():
-    config = load_config(ROOT / 'configs/flat_vqa_only_mtl.yaml')
+    config = load_config(ROOT / 'configs/single_dataset/main_vqa_no_end_fix.yaml')
     def rec(subject, name):
         return SimpleNamespace(dataset='AiR', subject=subject,
             stimulus_id='AiR::' + name, record_id=subject + '::' + name)

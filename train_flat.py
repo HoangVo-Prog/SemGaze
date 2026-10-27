@@ -10,7 +10,6 @@ from semgaze.model.build import build_flat_model_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
 from semgaze.model.checkpoint import load_checkpoint_bundle, restore_checkpoint_state
 from semgaze.model.staged_init import validate_staged_config, adapt_checkpoint_for_new_run
-from semgaze.model.mtl_lora import checkpoint_task_context_fn
 from semgaze.training.flat_step import make_optimizer, make_scheduler
 from semgaze.training.loop import resolve_epoch_schedule, run_training_loop, require_single_process
 from semgaze.evaluation.predictions import resolve_prediction_settings
@@ -176,10 +175,7 @@ def main():
         bundle = build_flat_model_bundle(config=config, output_dir=output_dir)
     if source_checkpoint is not None:
         if config['training']['gradient_checkpointing']:
-            checkpoint_kwargs = {'use_reentrant': False}
-            if config['model']['mtl_lora']['enabled']:
-                checkpoint_kwargs['context_fn'] = checkpoint_task_context_fn
-            bundle.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
+            bundle.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
         else:
             bundle.model.gradient_checkpointing_disable()
     bundle.config['evaluation'] = config['evaluation']

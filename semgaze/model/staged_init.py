@@ -12,7 +12,6 @@ from pathlib import Path
 from semgaze.model.build import assert_trainable_set
 from semgaze.model.checkpoint import architecture_signature
 from semgaze.state.projector import build_projector
-from semgaze.model.mtl_lora import install_full_mtl_lora
 
 
 def validate_staged_config(source, target):
@@ -38,10 +37,6 @@ def validate_staged_config(source, target):
                 f'weight-only stage transition requires matching {group}.{key}; '
                 'a checkpoint cannot initialize a different backbone/LoRA/vocabulary/WHERE codec'
             )
-    source_mtl = source['model']['mtl_lora']
-    target_mtl = target['model']['mtl_lora']
-    if source_mtl['enabled'] and source_mtl != target_mtl:
-        raise ValueError('cannot change an existing MTL-LoRA architecture during staged initialization')
     if target['semantic']['conditioning'] == 'shared_states' and not target['checkpoint']['save_projector']:
         raise ValueError('shared_states needs checkpoint.save_projector=true for loadable new checkpoints')
     # The current loader requires these artifacts even when END_FIX is disabled.
@@ -85,11 +80,7 @@ def adapt_checkpoint_for_new_run(bundle, target, *, source_checkpoint):
     # LoRA tensor geometry/provenance belong to the checkpoint (not a new adapter
     # initialization in the target YAML). Other training/evaluation choices belong
     # to the new run, including independent epochs, loss weights and scheduler.
-    requested_mtl = deepcopy(target['model']['mtl_lora'])
-    if requested_mtl['enabled'] and not source['model']['mtl_lora']['enabled']:
-        install_full_mtl_lora(bundle.model, requested_mtl)
     target['model'] = deepcopy(source['model'])
-    target['model']['mtl_lora'] = requested_mtl
     bundle.config = target
     bundle.context_limit = target['where']['context']['max_total_sequence_length']
     bundle.trainer_history = []

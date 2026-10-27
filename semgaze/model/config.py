@@ -33,6 +33,11 @@ def resolve_config(config, overrides=None):
     result = _merge(defaults, config)
     if overrides:
         result = _merge(result, overrides)
+    # Backward compatibility: strip disabled historical MTL config only.
+    legacy_mtl = result['model'].pop('mtl_lora', None)
+    if legacy_mtl is not None and (not isinstance(legacy_mtl, dict)
+                                  or legacy_mtl.get('enabled') is not False):
+        raise ValueError('MTL-LoRA is removed; use a standard-LoRA config/checkpoint')
     # Old checkpoint/resolved-config compatibility only: this obsolete selector
     # is removed from every resolved config before the evaluator uses it.
     legacy_scope = result['evaluation']['predictions'].pop('test_scope', None)
@@ -201,16 +206,8 @@ def validate_config(config):
     positive_int(model['lora']['rank'], 'model.lora.rank')
     if model['lora']['alpha'] <= 0 or not 0 <= model['lora']['dropout'] < 1 or not model['lora']['target_modules']:
         raise ValueError('LoRA requires positive alpha, dropout in [0,1), and target modules')
-    mtl = model['mtl_lora']
-    if type(mtl['enabled']) is not bool or type(mtl['temperature']) not in (float, int) \
-            or not math.isfinite(mtl['temperature']) or mtl['temperature'] <= 0:
-        raise ValueError('model.mtl_lora requires boolean enabled and positive finite temperature')
-    expected_sequential = mtl['enabled'] and cond == 'explicit_scanpath_text'
-    if t['backward']['one_joint_backward'] is expected_sequential:
-        raise ValueError('MTL-LoRA explicit mode requires training.backward.one_joint_backward=false; '
-                         'other modes require true')
-    if mtl['enabled'] and cond == 'shared_states' and t['gradient_checkpointing']:
-        raise ValueError('MTL-LoRA shared_states requires gradient_checkpointing=false to preserve task routing')
+    if t['backward']['one_joint_backward'] is not True:
+        raise ValueError('standard LoRA requires training.backward.one_joint_backward=true')
     if t['precision'] not in ('fp32', 'bf16'):
         raise ValueError('precision supports fp32 or bf16; fp16 needs a GradScaler implementation')
     if t['optimizer'] not in ('AdamW', 'Adam', 'SGD'):

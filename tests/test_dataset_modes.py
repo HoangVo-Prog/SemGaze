@@ -23,7 +23,7 @@ def test_main_config_matrix(name, end_fix):
     assert cfg['data']['dataset'] == dataset
     assert cfg['data']['variant'] == variant
     assert cfg['data']['split_root'] == split
-    assert cfg['model']['mtl_lora']['enabled'] is False
+    assert 'mtl_lora' not in cfg['model']
     assert cfg['training']['backward']['one_joint_backward'] is True
     assert cfg['semantic']['conditioning'] == 'explicit_scanpath_text'
     assert cfg['where']['use_end_fix_token'] is end_fix

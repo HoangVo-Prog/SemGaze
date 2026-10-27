@@ -23,7 +23,7 @@ class LossGradientProbe:
         projector_ids = {id(p) for p in bundle.projector.parameters()}
         input_row_id, output_row_id = id(bundle.input_row), id(bundle.output_row)
         self.groups = {'all_trainable': list(range(len(self.params))),
-                       'shared_lora': [], 'mtl_task_specific': [],
+                       'shared_lora': [],
                        'end_fix_rows': [], 'projector': []}
         for idx, param in enumerate(self.params):
             pid = id(param)
@@ -31,9 +31,7 @@ class LossGradientProbe:
                 group = 'projector'
             elif pid in (input_row_id, output_row_id):
                 group = 'end_fix_rows'
-            elif model_names.get(pid, '').endswith(('mtl_lambdas', 'mtl_mixture_logits')):
-                group = 'mtl_task_specific'
-            elif 'lora_' in model_names.get(pid, '') or model_names.get(pid, '').endswith('mtl_extra_b'):
+            elif 'lora_' in model_names.get(pid, ''):
                 group = 'shared_lora'
             else:
                 raise ValueError(f'unclassified trainable parameter: {model_names.get(pid, pid)}')

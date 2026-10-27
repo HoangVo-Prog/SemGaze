@@ -11,7 +11,6 @@ from torch.nn import functional as F
 from semgaze.data.fewshot import evaluation_episode
 from semgaze.data.schema import UNSEEN_SUBJECTS
 from semgaze.where.forward import forward_where_batch
-from semgaze.model.mtl_lora import task_scope
 from semgaze.semantic.flat.forward import forward_flat_batch
 from semgaze.evaluation.batching import schedule_batches, episode_id
 from semgaze.model.visual_cache import InferenceVisualCache
@@ -81,8 +80,7 @@ def serial_reference_losses(bundle, episode, *, batch=None):
     explicit = bundle.config['semantic']['conditioning'] == 'explicit_scanpath_text'
     states = None if explicit else bundle.projector(where.states[0])
     inputs, _, native = prepare_flat_inputs(bundle, episode.query, states)
-    with task_scope('semantic'):
-        output = bundle.model(**inputs, output_hidden_states=False, use_cache=False, return_dict=True)
+    output = bundle.model(**inputs, output_hidden_states=False, use_cache=False, return_dict=True)
     values = flat_component_nll(output.logits, inputs['labels'], native.response_offsets, episode.query.semantic)
     if not math.isclose(values['test_flat'], float(output.loss), rel_tol=1e-5, abs_tol=1e-5):
         raise RuntimeError('diagnostic flat token reduction differs from native response loss')

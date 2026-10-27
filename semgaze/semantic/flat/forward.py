@@ -8,7 +8,6 @@ from contextlib import nullcontext
 from .prompt import build_flat_prompt
 from .target import build_flat_target
 from semgaze.model.selected_loss import forward_backbone, compute_selected_causal_nll
-from semgaze.model.mtl_lora import task_scope
 
 
 class SemanticContextOverflowError(ValueError):
@@ -191,9 +190,8 @@ def forward_flat_batch(bundle, queries, states, *, where=None, profiler=None, re
                                                              semantic_cache=semantic_cache)
     host_labels = inputs['labels']
     with stage('semantic_forward'):
-        with task_scope('semantic'):
-            outputs = forward_backbone(bundle.model, to_model_device(
-                {k: v for k, v in inputs.items() if k != 'labels'}, bundle.model))
+        outputs = forward_backbone(bundle.model, to_model_device(
+            {k: v for k, v in inputs.items() if k != 'labels'}, bundle.model))
         loss = compute_selected_causal_nll(outputs.last_hidden_state, host_labels, bundle.model.get_output_embeddings())
     if not response_offsets:
         metadata = [{k: v for k, v in row.items() if k != 'response_offsets'} for row in metadata]
