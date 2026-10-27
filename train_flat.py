@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import torch
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
-from semgaze.data.joint import JointAdapter
+from semgaze.data.joint import JointAdapter, AirAdapter
 from semgaze.data.fewshot import TrainingEpisodeSampler
 from semgaze.model.build import build_flat_model_bundle
 from semgaze.model.config import ROOT, load_config, write_run_config
@@ -46,8 +46,8 @@ def main():
     try:
         config = load_config(args.config, overrides)
         require_single_process(config)
-        if config['data']['variant'] != 'all':
-            raise ValueError('optimization Q_train requires the all-variant train.json')
+        if config['data']['dataset'] in ('AiR', 'all') and config['data']['variant'] != 'all':
+            raise ValueError('AiR/combined optimization Q_train requires variant=all')
         if config['evaluation']['strategy'] != 'no':
             resolve_prediction_settings(config)
     except ValueError as exc:
@@ -67,7 +67,8 @@ def main():
         validate_staged_config(previous, config)
     data = config['data']
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
-    adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
+    adapter_cls = {'all': JointAdapter, 'AiR': AirAdapter,
+                   'COCO-Search18': CocoSearch18Adapter}[data['dataset']]
     adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                           duration_field=data['duration']['source_field'])
     records = [adapter(r) for r in raw['train']]

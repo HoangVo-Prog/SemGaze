@@ -9,8 +9,8 @@ class TrainingEpisodeSampler:
     def __init__(self, train_records, seed, *, data_config=None):
         from semgaze.model.config import default_section
         data_config = data_config if data_config is not None else default_section('data')
-        if data_config['variant'] != 'all':
-            raise ValueError('Q_train must be built from the all-variant train.json')
+        if data_config['dataset'] in ('all', 'AiR') and data_config['variant'] != 'all':
+            raise ValueError('AiR/combined Q_train requires variant=all')
 
         self.k_values = tuple(data_config['fewshot']['k_values'])
         self.probabilities = tuple(data_config['fewshot']['train_k_probabilities'])
@@ -29,11 +29,11 @@ class TrainingEpisodeSampler:
         self.rng = random.Random(seed)
         self.images = defaultdict(lambda: defaultdict(list))
         self.records = []
-        if not {7, 8, 9} <= set(unseen_subjects):
+        if data_config['dataset'] in ('all', 'COCO-Search18') and not {7, 8, 9} <= set(unseen_subjects):
             raise ValueError('COCO unseen subjects must remain {7,8,9}')
         for r in train_records:
-            if getattr(r, 'split', 'train') != 'train' or getattr(r, 'variant', 'all') != 'all':
-                raise ValueError('optimization records must come from all/train')
+            if getattr(r, 'split', 'train') != 'train':
+                raise ValueError('optimization records must come from the selected train split')
             if r.subject not in unseen_subjects:
                 self.images[r.subject][r.stimulus_id].append(r)
                 self.records.append(r)

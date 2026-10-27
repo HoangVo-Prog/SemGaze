@@ -34,8 +34,10 @@ def qualified_stimulus(dataset, name):
 def unseen_subject_ids(config, manifest=None):
     if manifest is not None and 'datasets' in manifest:
         return frozenset(manifest['unseen_subject_ids'])
+    if config['dataset'] == AIR:
+        return frozenset(qualified_subject(AIR, s) for s in config['air_unseen_subjects'])
     subjects = set(config['unseen_subjects'])
-    if config['dataset'] in ('all', AIR):
+    if config['dataset'] == 'all':
         subjects.update(qualified_subject(AIR, s) for s in config['air_unseen_subjects'])
     return frozenset(subjects)
 
@@ -45,10 +47,18 @@ def _assert_unique(values, label):
         raise ValueError(f'{label}: duplicate identities')
 
 
-def _verify_air(root, combined, cfg):
-    """Validate all AiR split rows, support mappings and persisted provenance."""
-    source_path = _repo_path(combined['source_manifests'][AIR]).resolve()
-    source = _read_json(source_path)
+def _verify_air(root, manifest, cfg):
+    """Validate AiR rows/supports from a standalone or combined persisted split."""
+    combined = manifest.get('dataset') == 'all'
+    if combined:
+        source_ref = manifest.get('source_manifests', {}).get(AIR)
+        if not source_ref:
+            raise ValueError('combined manifest has no AiR source manifest')
+        source_path = _repo_path(source_ref).resolve()
+        source = _read_json(source_path)
+    else:
+        source_path = root / 'split_manifest.json'
+        source = manifest
     if source.get('dataset') != AIR or source.get('variant') != 'all':
         raise ValueError('AiR source manifest mismatch')
     configured_unseen = set(map(str, cfg['air_unseen_subjects']))
@@ -67,14 +77,15 @@ def _verify_air(root, combined, cfg):
     seen = set(map(str, source['seen_subject_ids']))
     for split in ('train', 'test', 'test_seen'):
         file = root / f'{split}.json'
-        if _sha256(file) != combined['split_file_sha256'][split]:
-            raise ValueError(f'combined {split}.json checksum mismatch')
+        if _sha256(file) != manifest['split_file_sha256'][split]:
+            raise ValueError(f'AiR {split}.json checksum mismatch')
         all_rows = _read_json(file)
-        if len(all_rows) != combined['record_counts'][split]:
-            raise ValueError(f'combined {split} row count mismatch')
-        selected = [r for r in all_rows if r.get('dataset') == AIR]
-        if len(selected) != combined['per_dataset_record_counts'][AIR][split]:
+        if len(all_rows) != manifest['record_counts'][split]:
             raise ValueError(f'AiR {split} row count mismatch')
+        selected = ([r for r in all_rows if r.get('dataset') == AIR]
+                    if combined else all_rows)
+        if combined and len(selected) != manifest['per_dataset_record_counts'][AIR][split]:
+            raise ValueError(f'AiR {split} count differs from combined manifest')
         stimuli = set()
         for row in selected:
             rid, name, subject = row['record_id'], row['name'], str(row['subject'])
@@ -129,6 +140,35 @@ def _verify_air(root, combined, cfg):
                         raise ValueError('AiR frozen support record mismatch')
         _assert_unique(all_images, f'AiR K={k} exclusive support images')
     return rows, source, source_path
+
+
+def read_air_splits(root, manifest, config):
+    """Read AiR independently; keep source-local frozen draws and qualified IDs."""
+    root = Path(root).resolve()
+    if config['dataset'] != AIR or config['variant'] != 'all':
+        raise ValueError('AiR-only training requires dataset=AiR, variant=all')
+    if manifest.get('dataset') not in (AIR, 'all'):
+        raise ValueError('AiR split root must contain AiR or combined persisted data')
+    if manifest.get('dataset') == 'all' and manifest.get('resplit_after_merge') is not False:
+        raise ValueError('combined AiR split must preserve the source partition')
+    rows, source, source_path = _verify_air(root, manifest, config)
+    unseen = {qualified_subject(AIR, s) for s in source['unseen_subject_ids']}
+    seen = {qualified_subject(AIR, s) for s in source['seen_subject_ids']}
+    runtime = dict(source)
+    runtime.update(
+        dataset=AIR,
+        variant='all',
+        datasets={AIR: source},
+        unseen_subject_ids=sorted(unseen),
+        seen_subject_ids=sorted(seen),
+        train_stimulus_ids=sorted(qualified_stimulus(AIR, s) for s in source['train_stimulus_ids']),
+        test_stimulus_ids=sorted(qualified_stimulus(AIR, s) for s in source['test_stimulus_ids']),
+    )
+    provenance = [source_path, root / 'split_manifest.json']
+    provenance += [root / f'{split}.json' for split in ('train', 'test', 'test_seen')]
+    identity = hashlib.sha256(('air-only-v1|' + '|'.join(_sha256(p) for p in provenance))
+                              .encode()).hexdigest()
+    return rows, runtime, identity
 
 
 def read_joint_splits(root, manifest, config):

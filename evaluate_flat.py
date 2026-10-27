@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from semgaze.data.cocosearch18 import read_persisted_splits, CocoSearch18Adapter
-from semgaze.data.joint import JointAdapter
+from semgaze.data.joint import JointAdapter, AirAdapter
 from semgaze.data.fewshot import evaluation_episode
 from semgaze.model.checkpoint import load_checkpoint_bundle
 from semgaze.model.config import ROOT, load_config, resolve_config, resolve_output_dir, write_run_config
@@ -365,7 +365,8 @@ def main():
         return
     data = config['data']
     raw, manifest, identity = read_persisted_splits(ROOT / data['split_root'], data_config=data)
-    adapter_cls = JointAdapter if data['dataset'] == 'all' else CocoSearch18Adapter
+    adapter_cls = {'all': JointAdapter, 'AiR': AirAdapter,
+                   'COCO-Search18': CocoSearch18Adapter}[data['dataset']]
     adapter = adapter_cls(ROOT / data['images_root'], annotation_frame=data['annotation_frame'],
                           duration_field=data['duration']['source_field'])
     train = {r['record_id']: adapter(r) for r in raw['train']}

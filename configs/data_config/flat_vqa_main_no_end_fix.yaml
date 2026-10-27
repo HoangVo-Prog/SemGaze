@@ -1,0 +1,264 @@
+# InterGaze main: VQA (AiR) only; joint WHERE + Semantic; standard shared LoRA; no END_FIX.
+# Based on configs/flat_single.yaml (SemGaze method branch, 2026-10-27).
+# Requires the single-dataset loader patch for standalone AiR data.
+
+experiment:
+  name: intergaze_vqa_main_no_end_fix
+  semantic_mode: flat_single_output
+  protocol_version: flat-v1
+  seed: 42
+
+data:
+  dataset: AiR
+  variant: all
+  split_root: data/split/AiR/split/all
+  images_root: /data/shared/cvpr/hoang/dataset/images_recovered
+  annotation_frame: original_image
+  unseen_subjects: [] # No COCO subjects in an AiR-only run.
+  air_unseen_subjects: ['JY', 'SC', 'YN']
+  duration:
+    source_field: T
+    semantics: dwell_duration
+    source_unit: ms
+    conversion_to_ms: identity
+  fewshot:
+    k_values: [1]
+    train_k_probabilities: [1.0]
+    k_sampling_strategy: per_episode
+    require_same_subject: true
+    require_distinct_support_stimuli: true
+    exclude_query_stimulus: true
+    preserve_input_order: true
+
+model:
+  base_model: OpenGVLab/InternVL3_5-8B-HF
+  backend: huggingface
+  initialization_adapter: null
+  adapter_load_mode: fresh
+  merge_adapter_for_training: false
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+  mtl_lora:
+    enabled: false # Main = ordinary LoRA, not MTL-LoRA.
+    temperature: 1.0
+  freeze:
+    vision_tower: true
+    native_multimodal_projector: true
+    base_lm_outside_lora: true
+    old_vocab_rows: true
+
+where:
+  mode: xyd
+  end_fix_token: '<END_FIX>'
+  use_end_fix_token: false
+  require_atomic_end_fix: true
+  support_prompt_style: concise
+  coordinates:
+    grid_size: 100
+    min_value: 0
+    max_value: 99
+    text_width: 2
+    conversion: deepgaze_two_stage_python_round
+  duration:
+    unit: ms
+    bin_width_ms: 1
+    min_value: 0
+    max_value: 999
+    text_width: 3
+    non_integer_rounding: nearest_python_round
+  context:
+    max_k: 10
+    max_images_per_episode: 11
+    max_total_sequence_length: 8192
+    visual_policy: one_448x448_tile_per_image
+    overflow_training: resample_supports_same_query_and_k
+  supervision:
+    support_assistant_labels: ignore
+    query_assistant_labels: supervise
+    supervise_query_end_fix: false
+    output_hidden_states: false
+    use_cache: false
+
+state:
+  readout_layer: final_language_model_layer
+  readout_position: last_duration_numeric_token
+  projector:
+    type: none
+    input_dim: model_hidden_size
+    output_dim: model_hidden_size
+  detach_where_states: false
+  direct_state_positions:
+    attention_mask: 1
+    label: -100
+
+semantic:
+  mode: flat_single_output
+  conditioning: explicit_scanpath_text
+  replay_support_context: false
+  consume_full_chronological_states: true
+  use_gold_why_groups: true
+  predict_groups: false
+  semantic_special_tokens: false
+  output_format: flat_lines
+  parser: strict_rule_based
+  loss: response_token_mean_nll
+
+checkpoint_loading:
+  resume_from: null
+  init_from: null
+
+training:
+  lambda_where: 1.0
+  lambda_sem: 1.0
+  optimizer: AdamW
+  learning_rate: 1.0e-4
+  scheduler: cosine
+  warmup_ratio: 0.10
+  precision: bf16
+  num_train_epochs: 2
+  max_steps: null
+  max_episode_retries: 1000
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2
+  gradient_checkpointing: true
+  gradient_diagnostics_every: 0
+  loss_gradient_probe_every: 1
+  profile_every_steps: 0
+  length_aware_batching: true
+  reuse_query_vision: true
+  cache_preprocessed_images: true
+  preprocessing_cache_max_entries: 32
+  cache_semantic_collation: true
+  cache_frozen_visual_features: false
+  semantic_collation_cache_max_entries: 128
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  backward:
+    one_joint_backward: true # Necessary for non-MTL-LoRA main.
+    detach_f: false
+    detach_r: false
+
+evaluation:
+  subject_scope: unseen
+  strategy: last
+  eval_epoch: 1
+  batch_size: 4
+  batch_size_by_k: {'1': 4, '5': 2, '10': 1} # Conservative physical eval batch sizes for A100.
+  eval_steps: 1000
+  draw: 1
+  semantic_use_draws: true
+  k_values: [1, 5, 10]
+  loss_aggregation: episode_mean
+  predictions:
+    where: true
+    semantic: true
+    where_k_values: [1, 5, 10]
+    semantic_k_values: [1]
+    train_batches: 1
+    semantic_max_new_tokens: 512
+  metrics:
+    enabled: true
+    split: test
+    where:
+      scanmatch: true
+      multimatch: true
+      sed: true
+      isp_reference:
+        width: 512
+        height: 320
+        scanmatch_xbins: 16
+        scanmatch_ybins: 12
+        scanmatch_temp_bin_ms: 50
+        scanmatch_threshold: 3.5
+        sed_grid_n: 5
+      coordinate_adapter: deepgaze_vl_predict_scanpath_round
+    probability:
+      ll: false
+      ig: false
+      outcome: B
+      mode: deepgaze_fast
+      resolution: 100
+      normalize_digits: true
+      centerbias:
+        source: canonical_data
+        root: null
+        allow_synthetic_fallback: false
+    semantic:
+      bertscore:
+        enabled: true
+        package_version: '0.3.13'
+        lang: en
+        model_type: roberta-large
+        num_layers: 17
+        idf: false
+        rescale_with_baseline: false
+        use_fast_tokenizer: false
+        batch_size: 64
+      cider_r:
+        enabled: true
+        implementation: vendored_authors
+        n: 4
+        k_r: 0.8
+        tokenizer: stanford_ptb_reference
+      bleu1:
+        enabled: true
+      bleu4:
+        enabled: true
+      rouge_l:
+        enabled: true
+      meteor:
+        enabled: true
+        jar_path: null
+        java_bin: java
+
+test:
+  loss:
+    execution: same_k_batched
+    batch_size_by_k: {'1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, '10': 1}
+    bucket_by_length: false
+    bucket_window: 64
+  prediction:
+    execution: same_k_batched
+    batch_size_by_k: {'1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, '10': 1}
+    bucket_by_length: false
+    bucket_window: 64
+  cache:
+    frozen_visual_features: true
+    support_preprocessing: true
+    max_entries: 256
+    prefix_kv: false
+
+runtime:
+  device: cuda
+  output_dir: null
+
+logging:
+  every_steps: 1
+  filename: trainer_log.jsonl
+
+checkpoint:
+  save_every: 100
+  save_at_epoch_end: true
+  save_at_end: true
+  save_processor_and_tokenizer: true
+  save_end_fix_token_id: true
+  save_peft_adapter: true
+  save_trainable_end_fix_rows: true
+  save_projector: false
+  save_resolved_config: true
+  save_split_manifest_identity: true
+  save_optimizer: true
+  save_scheduler: true
