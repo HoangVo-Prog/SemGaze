@@ -42,9 +42,10 @@ model:
 
   # LoRA settings for fresh initialization. Continued adapters use checkpoint metadata.
   lora:
-    rank: 8
-    alpha: 16
+    rank: 128
+    alpha: 24
     dropout: 0.05
+    use_rslora: true
     target_modules:
       - q_proj
       - k_proj

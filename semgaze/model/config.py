@@ -206,6 +206,10 @@ def validate_config(config):
     positive_int(model['lora']['rank'], 'model.lora.rank')
     if model['lora']['alpha'] <= 0 or not 0 <= model['lora']['dropout'] < 1 or not model['lora']['target_modules']:
         raise ValueError('LoRA requires positive alpha, dropout in [0,1), and target modules')
+    if type(model['lora']['use_rslora']) is not bool:
+        raise ValueError(
+            'model.lora.use_rslora must be boolean'
+        )
     if t['backward']['one_joint_backward'] is not True:
         raise ValueError('standard LoRA requires training.backward.one_joint_backward=true')
     if t['precision'] not in ('fp32', 'bf16'):

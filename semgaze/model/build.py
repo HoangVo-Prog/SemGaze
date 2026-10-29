@@ -192,7 +192,7 @@ def build_flat_model_bundle(config_path=None, *, config=None, output_dir=None):
         if missing:
             raise ModelPreflightError(f'configured LoRA targets match no language-model modules: {missing}')
         model = get_peft_model(base, LoraConfig(r=lora['rank'], lora_alpha=lora['alpha'],
-            lora_dropout=lora['dropout'], target_modules=targets, task_type='CAUSAL_LM'))
+            lora_dropout=lora['dropout'], use_rslora=lora['use_rslora'], target_modules=targets, task_type='CAUSAL_LM'))
         diagnostics['effective_lora'] = lora
 
     model.to(device=config['runtime']['device'])
