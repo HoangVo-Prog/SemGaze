@@ -47,6 +47,7 @@ model:
     rank: 8
     alpha: 16
     dropout: 0.05
+    use_rslora: false
     target_modules:
       - q_proj
       - k_proj

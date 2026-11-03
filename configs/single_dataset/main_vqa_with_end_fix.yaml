@@ -121,7 +121,7 @@ training:
   gradient_accumulation_steps: 2
   gradient_checkpointing: true
   gradient_diagnostics_every: 0
-  loss_gradient_probe_every: 1
+  loss_gradient_probe_every: 0
   length_aware_batching: true
   reuse_query_vision: true
   cache_preprocessed_images: true
