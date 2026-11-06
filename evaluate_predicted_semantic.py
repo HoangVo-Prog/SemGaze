@@ -299,6 +299,146 @@ def replay_generate_semantic(bundle, episode, predicted, budget, *, gold_why_gro
     return parsed
 
 
+def replay_generate_semantic_batch(bundle, items, budget, *, gold_why_groups=False):
+    """Batched PRED-only WHERE replay and batched semantic generation.
+
+    ``items`` is an ordered list of (original_episode, predicted_XYD). The
+    returned list retains that order, including sample-local InvalidPrediction
+    and WhereContextOverflowError values. No WHERE generation is invoked.
+    """
+    import torch
+    from torch.nn.utils.rnn import pad_sequence
+    from semgaze.state.insertion import insert_states_batch
+    from semgaze.where.collator import collate_where, pack_where_batch
+    from semgaze.where.generation import left_pad_generation
+
+    if not items:
+        return []
+    if type(budget) is not int or budget <= 0:
+        raise ValueError('positive semantic generation budget required')
+    if any(len(episode.supports) != 1 for episode, _ in items):
+        raise ValueError('predicted semantic batch is K=1 only')
+    mode = bundle.config['semantic']['conditioning']
+    if mode not in ('shared_states', 'explicit_scanpath_text'):
+        raise ValueError(f'unsupported semantic conditioning: {mode}')
+    token = active_end_fix_token(bundle.config)
+    tokenizer = bundle.processor.tokenizer
+    results = [None] * len(items)
+    work = []
+    # A bad prediction/overlong prompt must not invalidate other queries in
+    # the same physical batch; all errors are recorded at their input index.
+    for index, (episode, predicted) in enumerate(items):
+        try:
+            shadow = shadow_query_for_group_mode(
+                episode.query, predicted, gold_why_groups=gold_why_groups)
+            assert_replay_identity(shadow, predicted, token)
+            replay_episode = FlatEpisode(episode.supports, shadow, draw_id=0)
+            prompt = prediction_only_prompt(shadow, mode, gold_why_groups=gold_why_groups)
+            native = collate_native(bundle.processor, [image_user(prompt.text)],
+                                    [shadow.image_path], None, prompt=prompt)
+            # Include one inserted continuous state per PRED fixation.
+            semantic_length = native.inputs['attention_mask'].shape[1]
+            state_count = len(predicted) if mode == 'shared_states' else 0
+            if semantic_length + state_count + budget > bundle.context_limit:
+                raise InvalidPrediction('semantic_context_overflow')
+            where_sample = (collate_where(bundle.processor, replay_episode,
+                            bundle.end_fix_id, bundle.context_limit,
+                            teacher_forcing=True, config=bundle.config)
+                            if mode == 'shared_states' else None)
+            work.append((index, replay_episode, predicted, native, where_sample))
+        except (InvalidPrediction, WhereContextOverflowError) as exc:
+            results[index] = exc
+    if not work:
+        return results
+
+    # Readout positions are computed from *PRED* query assistant tokens. Each
+    # sample can have a different number of PRED fixations and WHERE length.
+    if mode == 'shared_states':
+        replay_episodes = [entry[1] for entry in work]
+        samples = [entry[4] for entry in work]
+        batch = pack_where_batch(bundle.processor, replay_episodes, samples)
+        where = forward_where_batch(bundle, replay_episodes, batch=batch,
+                                    compute_loss=False, use_cache=False)
+        if len(where.states) != len(work):
+            raise RuntimeError('batched WHERE replay lost predictions')
+        states = []
+        for entry, r in zip(work, where.states):
+            if r.ndim != 2 or r.shape[0] != len(entry[2]):
+                raise RuntimeError('batched WHERE state count != PRED fixation count')
+            states.append(bundle.projector(r))
+    else:
+        states = [None] * len(work)
+
+    # Follow the original prepare_semantic_batch assembly semantics, but with
+    # the separately selected no-gold/gold prompt for each PRED trajectory.
+    if mode == 'shared_states':
+        embedding_module = bundle.model.get_input_embeddings()
+        embeddings, masks, labels, boundaries = [], [], [], []
+        for (_, _, _, native, _), state in zip(work, states):
+            native_inputs = to_model_device(native.inputs, bundle.model)
+            ids = native_inputs['input_ids']
+            if bool((ids == bundle.end_fix_id).any()):
+                raise RuntimeError('semantic prompt contains END_FIX')
+            embeds = embedding_module(ids)
+            embeddings.append(embeds)
+            masks.append(native_inputs['attention_mask'])
+            labels.append(native_inputs['labels'])
+            boundaries.append(native.boundaries)
+        fused, positions = insert_states_batch(embeddings, masks, labels,
+                                               states, boundaries)
+        inputs = {'inputs_embeds': fused['inputs_embeds'],
+                  'attention_mask': fused['attention_mask'],
+                  'pixel_values': torch.cat([entry[3].inputs['pixel_values'] for entry in work])}
+    else:
+        native_inputs = [entry[3].inputs for entry in work]
+        inputs = {
+            'input_ids': pad_sequence([v['input_ids'][0] for v in native_inputs],
+                batch_first=True, padding_value=tokenizer.pad_token_id),
+            'attention_mask': pad_sequence([v['attention_mask'][0] for v in native_inputs],
+                batch_first=True, padding_value=0),
+            'pixel_values': torch.cat([v['pixel_values'] for v in native_inputs]),
+        }
+        positions = [() for _ in work]
+
+    # Convert right-padded physical batches to left-padded generation inputs.
+    # The shared-state and explicit-text paths preserve the same conventions
+    # as evaluate_flat_batch, including the output-prefix interpretation.
+    inputs = to_model_device(left_pad_generation(inputs, tokenizer.pad_token_id), bundle.model)
+    output = bundle.model.generate(**inputs, max_new_tokens=budget, do_sample=False,
+        eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id,
+        use_cache=True)
+    if output.ndim != 2 or output.shape[0] != len(work):
+        raise RuntimeError('semantic generation returned an invalid physical batch')
+    prefix_length = inputs['input_ids'].shape[1] if mode == 'explicit_scanpath_text' else 0
+    if mode == 'explicit_scanpath_text':
+        if output.shape[1] <= prefix_length or not torch.equal(
+                output[:, :prefix_length], inputs['input_ids']):
+            raise RuntimeError('batched semantic generation lost explicit input prefixes')
+    if output.shape[1] - prefix_length > budget:
+        raise RuntimeError('batched semantic generation exceeded new-token budget')
+    for row_index, (index, _, predicted, native, _) in enumerate(work):
+        inserted = len(positions[row_index])
+        if inserted != (len(predicted) if mode == 'shared_states' else 0):
+            raise RuntimeError('batched semantic state insertion != predicted fixation count')
+        raw = decode_response(tokenizer, output[row_index, prefix_length:])
+        shadow = work[row_index][1].query
+        parsed = parse_flat_output(raw, len(predicted), len(shadow.semantic.why_groups))
+        parsed.update({'text': raw, 'state_source': 'replayed_precomputed_PRED_XYD',
+                       'gold_groups_supplied': gold_why_groups,
+                       'gold_groups_requested': gold_why_groups,
+                       'why_group_source': ('GT_membership_only' if gold_why_groups
+                                            else 'predicted_whole_trajectory'),
+                       'why_group_count': len(shadow.semantic.why_groups),
+                       'semantic_prompt_mode': ('gold_why_groups' if gold_why_groups
+                                                else 'no_gold_why_groups'),
+                       'inserted_state_count': inserted, 'max_new_tokens': budget,
+                       'predicted_fixation_count': len(predicted)})
+        results[index] = parsed
+    if any(r is None for r in results):
+        raise RuntimeError('batched semantic results did not cover every input')
+    return results
+
+
 def _input_universe(raw, adapter, train, manifest, scope):
     key = 'test_seen' if scope == 'seen' else 'test'
     queries = test_queries(train, [adapter(row) for row in raw[key]], manifest, scope=scope)
@@ -313,6 +453,8 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--subject-scope', choices=('auto', 'seen', 'unseen'), default='auto')
     parser.add_argument('--semantic-max-new-tokens', type=int)
+    parser.add_argument('--batch-size', type=int,
+                        help='Maximum K=1 episodes per WHERE replay and semantic generation batch (default: 1)')
     parser.add_argument('--branch-metrics', action='store_true')
     parser.add_argument('--gold-why-groups', choices=('on', 'off'),
                         help='Use GT WHY-group membership (on) or a dedicated whole-trajectory WHY prompt (off; default)')
@@ -330,6 +472,13 @@ def main(argv=None):
         parser.error('evaluation.predicted_semantic.gold_why_groups must be a boolean')
     gold_why_groups = (args.gold_why_groups == 'on') if args.gold_why_groups is not None else group_settings.get('gold_why_groups', False)
     config['evaluation'].setdefault('predicted_semantic', {})['gold_why_groups'] = gold_why_groups
+    batch_value = group_settings.get('batch_size', 1)
+    if type(batch_value) is not int or batch_value < 1:
+        parser.error('evaluation.predicted_semantic.batch_size must be an integer >= 1')
+    batch_size = args.batch_size if args.batch_size is not None else batch_value
+    if type(batch_size) is not int or batch_size < 1:
+        parser.error('--batch-size must be an integer >= 1')
+    config['evaluation']['predicted_semantic']['batch_size'] = batch_size
     budget = (args.semantic_max_new_tokens if args.semantic_max_new_tokens is not None
               else config['evaluation']['predictions']['semantic_max_new_tokens'])
     if type(budget) is not int or budget <= 0:
@@ -386,7 +535,7 @@ def main(argv=None):
                   'expected_test_queries': len(by_id), 'missing_query_count': len(missing),
                   'missing_query_ids': sorted(missing),
                   'manifest_identity': identity,
-                  'gold_why_groups': gold_why_groups,
+                  'gold_why_groups': gold_why_groups, 'batch_size': batch_size,
                   'semantic_prompt_mode': 'gold_why_groups' if gold_why_groups else 'no_gold_why_groups',
                   'dataset_groups': dict(Counter(
                       'VQA' if q.condition == 'vqa' else 'TP' if q.condition == 'present' else 'TA'
@@ -406,6 +555,7 @@ def main(argv=None):
         'scanpath_source': 'predicted_file',
         'K': 1, 'draw_id': 0, 'subject_scope': scope,
         'gold_why_groups': gold_why_groups,
+        'batch_size': batch_size,
         'semantic_prompt_mode': 'gold_why_groups' if gold_why_groups else 'no_gold_why_groups',
         'semantic_max_new_tokens': budget,
         'split_manifest_identity': identity,
@@ -419,28 +569,63 @@ def main(argv=None):
         errors['missing_where_record'] = len(missing)
     try:
         with output_path.open('w', encoding='utf-8') as stream, test_mode(bundle):
-            for index, row in enumerate(rows, 1):
-                query = by_id[row['query_id']]
-                episode = episodes[query.record_id]
-                row['_source_file'] = source.name
-                details = {}
-                try:
-                    fixed, details = parse_stored_prediction(row, token)
-                    sem = replay_generate_semantic(bundle, episode, fixed, budget,
-                                                   gold_why_groups=gold_why_groups)
-                    record = semantic_failure_record(row, query, '', gold_why_groups=gold_why_groups)
-                    record['SEMANTIC']['PRED'] = sem.pop('text')
-                    record['semantic_generation'] = sem
-                    record['validation'] = details
-                    success += 1
-                except (InvalidPrediction, WhereContextOverflowError) as exc:
-                    reason = str(exc)
-                    errors[reason] += 1
-                    record = semantic_failure_record(row, query, reason, gold_why_groups=gold_why_groups)
-                    record['validation'] = details
-                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
-                if index % 50 == 0 or index == len(rows):
-                    print(f'[PRED-SEM] {index}/{len(rows)} | processed={success} | skipped={sum(errors.values())}', flush=True)
+            # Group only K=1 draw=0 input rows; every physical forward receives
+            # at most batch_size episodes. Output is restored to JSONL order.
+            for chunk_start in range(0, len(rows), batch_size):
+                chunk = rows[chunk_start:chunk_start + batch_size]
+                records = [None] * len(chunk)
+                valid = []
+                for local_index, row in enumerate(chunk):
+                    query = by_id[row['query_id']]
+                    episode = episodes[query.record_id]
+                    row['_source_file'] = source.name
+                    try:
+                        fixed, details = parse_stored_prediction(row, token)
+                        valid.append((local_index, row, query, episode, fixed, details))
+                    except InvalidPrediction as exc:
+                        reason = str(exc)
+                        errors[reason] += 1
+                        record = semantic_failure_record(row, query, reason,
+                                                         gold_why_groups=gold_why_groups)
+                        record['validation'] = {}
+                        records[local_index] = record
+                if valid:
+                    if batch_size == 1:
+                        # Exact backward-compatible serial path when configured 1.
+                        (_, _, _, ep, fixed, _) = valid[0]
+                        try:
+                            inferred = [replay_generate_semantic(
+                                bundle, ep, fixed, budget, gold_why_groups=gold_why_groups)]
+                        except (InvalidPrediction, WhereContextOverflowError) as exc:
+                            inferred = [exc]
+                    else:
+                        inferred = replay_generate_semantic_batch(
+                            bundle, [(entry[3], entry[4]) for entry in valid], budget,
+                            gold_why_groups=gold_why_groups)
+                    if len(inferred) != len(valid):
+                        raise RuntimeError('semantic inference lost batched query alignment')
+                    for (local_index, row, query, episode, fixed, details), sem in zip(valid, inferred):
+                        if isinstance(sem, (InvalidPrediction, WhereContextOverflowError)):
+                            reason = str(sem)
+                            errors[reason] += 1
+                            record = semantic_failure_record(row, query, reason,
+                                                             gold_why_groups=gold_why_groups)
+                        else:
+                            record = semantic_failure_record(row, query, '',
+                                                             gold_why_groups=gold_why_groups)
+                            record['SEMANTIC']['PRED'] = sem['text']
+                            record['semantic_generation'] = {k: v for k, v in sem.items() if k != 'text'}
+                            success += 1
+                        record['validation'] = details
+                        records[local_index] = record
+                if any(record is None for record in records):
+                    raise RuntimeError('missing row in batched output restoration')
+                for record in records:
+                    stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
+                index = chunk_start + len(chunk)
+                if index // 50 != chunk_start // 50 or index == len(rows):
+                    print(f'[PRED-SEM] {index}/{len(rows)} | processed={success} | '
+                          f'skipped={sum(errors.values())} | batch_size={batch_size}', flush=True)
             # Full-manifest scoring: an absent query is a documented failure
             # with NO synthetic WHERE.PRED or semantic output.
             for query_id in sorted(missing):
@@ -474,6 +659,7 @@ def main(argv=None):
         'protocol': ('predicted_scanpath_with_GT_WHY_membership' if gold_why_groups
                      else 'predicted_scanpath_no_GT_WHY_membership'),
         'gold_why_groups': gold_why_groups,
+        'batch_size': batch_size,
         'semantic_prompt_mode': 'gold_why_groups' if gold_why_groups else 'no_gold_why_groups',
         'not_directly_comparable_to_gold_group_conditioned_GT_evaluation': not gold_why_groups,
     }, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
